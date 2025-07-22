@@ -5,6 +5,7 @@
 ### Problems:
 
 - Use a modelfile to create a customized model
+- Queue system for multiple request
 
 ## Setup
 
