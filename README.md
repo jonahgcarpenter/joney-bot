@@ -6,6 +6,7 @@
 
 - Use a modelfile to create a customized model
 - Queue system for multiple request
+- Online status for discord
 
 ## Setup
 
