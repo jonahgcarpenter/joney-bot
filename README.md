@@ -11,7 +11,6 @@ I like the idea of a chatbot for discord, simply mention the bot user and it wil
 - Use a modelfile to create a customized model
 - Queue system for multiple request
 - Online status for discord
-- Consoldate startup task
 
 ## Setup
 
@@ -29,8 +28,4 @@ I like the idea of a chatbot for discord, simply mention the bot user and it wil
 
 ### Run the server
 
-- uvicorn api-wrapper:app --reload --host 0.0.0.0 --port 8000
-
-### Run the bot
-
-- python bot.py
+- python main.py

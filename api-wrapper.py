@@ -25,7 +25,7 @@ app = FastAPI()
 # --- Pydantic Model for Input Validation ---
 class PromptRequest(BaseModel):
     prompt: str
-    model: str = "llama2-uncensored:7b"
+    model: str = "joney-bot:latest"
 
 
 # --- Input Sanitization Function ---
