@@ -8,11 +8,9 @@ I like the idea of a chatbot for discord, simply mention the bot user and it wil
 
 ### Problems:
 
-- Use a modelfile to create a customized model
 - Queue system for multiple request
-- Online status for discord
 
-## Setup
+## Python Setup
 
 ### Create & Activate VENV
 
@@ -29,3 +27,7 @@ I like the idea of a chatbot for discord, simply mention the bot user and it wil
 ### Run the server
 
 - python main.py
+
+## Docker
+
+- docker-compose up -d
