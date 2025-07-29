@@ -1,10 +1,16 @@
 services:
   app:
     build:
-      context: .
+      context: ./app
       dockerfile: Dockerfile
     container_name: joney-bot
     environment:
       - PYTHONUNBUFFERED=1
       - DISCORD_TOKEN=${DISCORD_TOKEN}
       - OLLAMA_HOST_URL=${OLLAMA_HOST_URL}
+    networks:
+      - joney-bot
+
+networks:
+  joney-bot:
+    driver: bridge

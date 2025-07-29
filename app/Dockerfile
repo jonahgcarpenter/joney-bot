@@ -1,6 +1,6 @@
 FROM python:3.13-slim
 
-RUN useradd --system -U oswald
+RUN useradd --system -U joney-bot
 
 WORKDIR /app
 
@@ -10,8 +10,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-RUN chown -R oswald:oswald /app
+RUN chown -R joney-bot:joney-bot /app
 
-USER oswald
+USER joney-bot
 
 CMD ["python", "main.py"]
