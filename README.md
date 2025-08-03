@@ -11,6 +11,7 @@ I like the idea of a chatbot for discord, simply mention the bot user and it wil
 - Queue system for multiple request
 - Memory and User context
 - SearXNG
+- Correctly save discord user in DB using discord API
 
 ## Python Setup
 
