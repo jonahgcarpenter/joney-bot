@@ -3,11 +3,18 @@ services:
     build:
       context: ./app
       dockerfile: Dockerfile
+    image: jonahgcarpenter/joney-bot:1.1
     container_name: joney-bot
     environment:
       - PYTHONUNBUFFERED=1
       - DISCORD_TOKEN=${DISCORD_TOKEN}
       - OLLAMA_HOST_URL=${OLLAMA_HOST_URL}
+      - DB_HOST=${DB_HOST}
+      - DB_PORT=${DB_PORT}
+      - DB_NAME=${DB_NAME}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_SCHEMA=${DB_SCHEMA}
     networks:
       - joney-bot
 
