@@ -42,7 +42,7 @@ app = FastAPI()
 class PromptRequest(BaseModel):
     prompt: str
     username: str
-    model: str = "joney-bot:latest"
+    model: str = "oswald:latest"
 
 
 # --- Input Sanitization Function ---
@@ -79,21 +79,24 @@ async def generate_prompt(
         )
 
     try:
-        # --- ALWAYS PERFORM WEB SEARCH ---
-        log.info(f"Performing web search for prompt: '{sanitized_prompt}'")
-        search_results = search.query_searxng(sanitized_prompt)
+        # --- THINK AND SEARCH ---
+        log.info(
+            f"Starting intelligent search process for prompt: '{sanitized_prompt}'"
+        )
+        search_results = search.think_and_search(
+            prompt=sanitized_prompt, model=data.model
+        )
 
         if search_results:
             final_prompt = (
-                "Based on the following real-time web search results, provide a comprehensive answer to the user's question.\n\n"
                 "--- Web Search Results ---\n"
                 f"{search_results}\n"
                 "--- End of Search Results ---\n\n"
                 f"User's Question: {sanitized_prompt}"
             )
-            log.info("Constructed a new prompt with search results.")
+            log.info("Constructed a data-only prompt with search results.")
         else:
-            # Fallback if search fails or returns nothing
+            # If search fails, we still just send the user's question.
             log.warning(
                 "Web search failed or returned no results. Using original prompt."
             )
