@@ -2,9 +2,13 @@ import logging
 import os
 import re
 
-import requests
-import vector_db
 from dotenv import load_dotenv
+
+load_dotenv()
+
+import requests
+import search
+import vector_db
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
@@ -19,10 +23,10 @@ logging.getLogger("transformers.modeling_utils").setLevel(logging.ERROR)
 
 log = logging.getLogger(__name__)
 
-load_dotenv()
 
 # --- Configuration ---
 OLLAMA_HOST = os.getenv("OLLAMA_HOST_URL")
+SEARXNG_URL = os.getenv("SEARXNG_URL")
 
 # --- Initialize Model for Embeddings ---
 log.info("Loading sentence transformer model...")
@@ -63,7 +67,10 @@ def save_to_db_background(username: str, prompt: str, response: str):
 async def generate_prompt(
     request: Request, data: PromptRequest, background_tasks: BackgroundTasks
 ):
-    """Receives a prompt, gets a response from Ollama, and saves the exchange to the DB."""
+    """
+    Receives a prompt, ALWAYS performs a web search, gets a response from Ollama
+    based on the search results, and saves the original exchange to the DB.
+    """
     sanitized_prompt = sanitize_input(data.prompt)
 
     if not sanitized_prompt:
@@ -72,9 +79,29 @@ async def generate_prompt(
         )
 
     try:
+        # --- ALWAYS PERFORM WEB SEARCH ---
+        log.info(f"Performing web search for prompt: '{sanitized_prompt}'")
+        search_results = search.query_searxng(sanitized_prompt)
+
+        if search_results:
+            final_prompt = (
+                "Based on the following real-time web search results, provide a comprehensive answer to the user's question.\n\n"
+                "--- Web Search Results ---\n"
+                f"{search_results}\n"
+                "--- End of Search Results ---\n\n"
+                f"User's Question: {sanitized_prompt}"
+            )
+            log.info("Constructed a new prompt with search results.")
+        else:
+            # Fallback if search fails or returns nothing
+            log.warning(
+                "Web search failed or returned no results. Using original prompt."
+            )
+            final_prompt = sanitized_prompt
+
         response = requests.post(
             f"{OLLAMA_HOST}/api/generate",
-            json={"model": data.model, "prompt": sanitized_prompt, "stream": False},
+            json={"model": data.model, "prompt": final_prompt, "stream": False},
             timeout=60,
         )
         response.raise_for_status()
@@ -82,6 +109,7 @@ async def generate_prompt(
         ollama_data = response.json()
         model_response = ollama_data.get("response", "No response content from model.")
 
+        # --- SAVE ORIGINAL PROMPT (not the big one) TO DB ---
         background_tasks.add_task(
             save_to_db_background, data.username, sanitized_prompt, model_response
         )
