@@ -31,10 +31,19 @@ async def on_message(message: discord.Message):
 
     if bot.user.mentioned_in(message):
         prompt = message.content.replace(f"<@{bot.user.id}>", "").strip()
+
+        # --- Resolve user mentions ---
+        if message.mentions:
+            for member in message.mentions:
+                # We skip the bot itself in this loop
+                if member.id != bot.user.id:
+                    prompt = prompt.replace(member.mention, member.display_name)
+
         if not prompt:
+            # This handles cases where the message was just a mention of the bot.
+            await message.reply("What's up sexy")
             return
 
-        # --- MODIFIED PART: Get the username ---
         username = str(message.author)
         print(f"Received prompt from {username}: '{prompt}'")
 
