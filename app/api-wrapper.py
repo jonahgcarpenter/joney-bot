@@ -1,3 +1,4 @@
+import logging
 import os
 import re
 
@@ -8,17 +9,27 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
 
+# --- Logging Setup ---
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
+)
+
+logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
+logging.getLogger("transformers.modeling_utils").setLevel(logging.ERROR)
+
+log = logging.getLogger(__name__)
+
 load_dotenv()
 
 # --- Configuration ---
 OLLAMA_HOST = os.getenv("OLLAMA_HOST_URL")
 
 # --- Initialize Model for Embeddings ---
-print("Loading sentence transformer model...")
+log.info("Loading sentence transformer model...")
 embedding_model = SentenceTransformer(
     "nomic-ai/nomic-embed-text-v1.5", trust_remote_code=True
 )
-print("Model loaded.")
+log.info("Sentence transformer model loaded")
 
 app = FastAPI()
 
@@ -40,10 +51,8 @@ def sanitize_input(prompt: str) -> str:
 # --- Background Task for Saving to DB ---
 def save_to_db_background(username: str, prompt: str, response: str):
     """Generates embeddings and saves the chat log to the database."""
-    print(f"Generating embeddings for prompt and response from user '{username}'...")
     prompt_embedding = embedding_model.encode(prompt)
     response_embedding = embedding_model.encode(response)
-    print("Embeddings generated. Saving to database...")
     vector_db.save_chat(
         username, prompt, response, prompt_embedding, response_embedding
     )
@@ -61,10 +70,6 @@ async def generate_prompt(
         raise HTTPException(
             status_code=400, detail="Prompt is empty after sanitization."
         )
-
-    print(
-        f"Received sanitized prompt from '{data.username}': '{sanitized_prompt}' for model '{data.model}'"
-    )
 
     try:
         response = requests.post(
@@ -84,12 +89,14 @@ async def generate_prompt(
         return {"response": model_response}
 
     except requests.exceptions.RequestException as e:
-        print(f"Error contacting Ollama: {e}")
+        log.error(f"Error contacting Ollama: {e}")
         raise HTTPException(
             status_code=503, detail="Could not connect to the Ollama service."
         )
     except Exception as e:
-        print(f"An unexpected error occurred: {e}")
+        log.error(
+            f"An unexpected error occurred in generate_prompt: {e}", exc_info=True
+        )
         raise HTTPException(
             status_code=500, detail="An internal server error occurred."
         )
@@ -98,10 +105,15 @@ async def generate_prompt(
 @app.on_event("startup")
 async def startup_event():
     """On startup, set up the database."""
-    print("--- Running database setup ---")
     vector_db.setup_database()
 
 
 @app.get("/")
 def read_root():
     return {"status": "Ollama API Wrapper is running"}
+
+
+@app.get("/health")
+def health_check():
+    """Provides a simple health check endpoint."""
+    return {"status": "ok"}

@@ -1,7 +1,10 @@
+import logging
 import os
 
 import psycopg2
 from pgvector.psycopg2 import register_vector
+
+log = logging.getLogger(__name__)
 
 
 def get_db_connection():
@@ -11,15 +14,13 @@ def get_db_connection():
             dbname=os.getenv("DB_NAME"),
             user=os.getenv("DB_USER"),
             password=os.getenv("DB_PASSWORD"),
-            host=os.getenv("DB_HOST", "localhost"),
-            port=os.getenv("DB_PORT", "5432"),
+            host=os.getenv("DB_HOST"),
+            port=os.getenv("DB_PORT"),
         )
         register_vector(conn)
         return conn
     except psycopg2.OperationalError as e:
-        print(
-            f"Error: Could not connect to the database. Please check your connection settings. Details: {e}"
-        )
+        log.error(f"Could not connect to the database. Details: {e}")
         return None
 
 
@@ -31,7 +32,7 @@ def setup_database():
 
     try:
         with conn.cursor() as cur:
-            schema_name = os.getenv("DB_SCHEMA", "my_app_schema")
+            schema_name = os.getenv("DB_SCHEMA")
             cur.execute(f"CREATE SCHEMA IF NOT EXISTS {schema_name};")
 
             cur.execute(
@@ -47,10 +48,10 @@ def setup_database():
                 );
             """
             )
-            print(f"Table '{schema_name}.chat_logs' is ready.")
+            log.info(f"Database is ready")
         conn.commit()
     except Exception as e:
-        print(f"An error occurred during database setup: {e}")
+        log.error(f"An error occurred during database setup: {e}")
     finally:
         if conn:
             conn.close()
@@ -62,12 +63,12 @@ def save_chat(
     """Saves a chat prompt, its response, the user, and their embeddings to the database."""
     conn = get_db_connection()
     if conn is None:
-        print("Could not save chat log due to no database connection.")
+        log.error("Could not save chat log due to no database connection.")
         return
 
     try:
         with conn.cursor() as cur:
-            schema_name = os.getenv("DB_SCHEMA", "my_app_schema")
+            schema_name = os.getenv("DB_SCHEMA")
             cur.execute(
                 f"""
                 INSERT INTO {schema_name}.chat_logs (username, prompt, response, prompt_embedding, response_embedding)
@@ -76,9 +77,11 @@ def save_chat(
                 (username, prompt, response, prompt_embedding, response_embedding),
             )
         conn.commit()
-        print(f"Successfully saved chat log for user '{username}' to the database.")
+        log.info(
+            f"SUCCESS: Processed and saved chat from '{username}'. Prompt: \"{prompt[:75]}\""
+        )
     except Exception as e:
-        print(f"An error occurred while saving the chat log: {e}")
+        log.error(f"An error occurred while saving the chat log for '{username}': {e}")
     finally:
         if conn:
             conn.close()

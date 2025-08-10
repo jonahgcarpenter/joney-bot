@@ -6,9 +6,8 @@ import time
 
 def run_fastapi():
     """Starts the FastAPI application using uvicorn."""
-    print("--- Starting API Wrapper (FastAPI) ---")
     process = subprocess.Popen(
-        [sys.executable, "-m", "uvicorn", "api-wrapper:app"],
+        [sys.executable, "-m", "uvicorn", "api-wrapper:app", "--log-level", "warning"],
         stdout=sys.stdout,
         stderr=sys.stderr,
     )
@@ -17,7 +16,6 @@ def run_fastapi():
 
 def run_discord_bot():
     """Starts the Discord bot."""
-    print("--- Starting Discord Bot ---")
     process = subprocess.Popen(
         [sys.executable, "bot.py"],
         stdout=sys.stdout,
@@ -30,7 +28,6 @@ if __name__ == "__main__":
     api_process = multiprocessing.Process(target=run_fastapi)
     bot_process = multiprocessing.Process(target=run_discord_bot)
 
-    print("--- Launching services ---")
     api_process.start()
     bot_process.start()
 
