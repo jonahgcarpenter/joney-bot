@@ -7,7 +7,15 @@ import time
 def run_fastapi():
     """Starts the FastAPI application using uvicorn."""
     process = subprocess.Popen(
-        [sys.executable, "-m", "uvicorn", "api-wrapper:app", "--log-level", "warning"],
+        [
+            sys.executable,
+            "-m",
+            "uvicorn",
+            "base.api-wrapper:app",
+            "--log-level",
+            "warning",
+            "--reload",
+        ],
         stdout=sys.stdout,
         stderr=sys.stderr,
     )
@@ -17,7 +25,7 @@ def run_fastapi():
 def run_discord_bot():
     """Starts the Discord bot."""
     process = subprocess.Popen(
-        [sys.executable, "bot.py"],
+        [sys.executable, "base/bot.py"],
         stdout=sys.stdout,
         stderr=sys.stderr,
     )

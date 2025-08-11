@@ -7,11 +7,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import requests
-import search
-import vector_db
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
+from tools import search, vector_db
 
 # --- Logging Setup ---
 logging.basicConfig(
@@ -137,11 +136,6 @@ async def generate_prompt(
 async def startup_event():
     """On startup, set up the database."""
     vector_db.setup_database()
-
-
-@app.get("/")
-def read_root():
-    return {"status": "Ollama API Wrapper is running"}
 
 
 @app.get("/health")
