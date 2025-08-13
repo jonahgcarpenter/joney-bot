@@ -1,10 +1,10 @@
 import json
 import logging
 import os
-from datetime import datetime
 from urllib.parse import quote_plus
 
 import requests
+from tools.system_prompts import get_search_query_generator_prompt
 
 # --- Logging Setup ---
 log = logging.getLogger(__name__)
@@ -39,22 +39,7 @@ def _generate_search_queries(prompt: str, model: str) -> list[str]:
         )
         return [prompt]
 
-    current_date = datetime.now().strftime("%Y-%m-%d")
-
-    system_prompt = (
-        f"You are a highly specialized Search Query Generator. Your entire purpose is to create search queries that will arm a downstream, unhinged AI with the information it needs to be as funny and insulting as possible. The current date is {current_date}.\n\n"
-        "Follow this logic precisely:\n\n"
-        "1.  **Analyze the User's Prompt.** First, determine if it's a straightforward, factual question OR if it's conversational/joking/insulting.\n\n"
-        "2.  **If it IS a Factual Question:** (e.g., 'What is the capital of Canada?')\n"
-        "    - Generate 1-3 direct search queries to find the answer.\n\n"
-        "3.  **If it is NOT a Factual Question:** (e.g., insults, jokes, questions with slang)\n"
-        "    - Your job immediately becomes **Slang and Weirdness Detection.**\n"
-        "    - Scan the prompt for ANY words or phrases that are slang, made-up, or unusual. Your goal is to define these terms.\n"
-        "    - For 'i have no bitches, how can i aquire more of the huzz', the terms 'bitches' and 'huzz' are slang. You MUST generate definitional queries like `[\"huzz meaning\", \"bitches slang definition\"]`.\n"
-        "    - If a non-factual prompt contains ONLY common words (e.g., 'shut up you are dumb'), then and ONLY then should you return an empty list because there is nothing to define.\n\n"
-        "## Final Output:\n"
-        "You MUST respond with ONLY a JSON object with a single key: 'search_queries'. The value will be a list of strings. This list can be empty, but only if the rules above are met."
-    )
+    system_prompt = get_search_query_generator_prompt()
 
     full_prompt = f'{system_prompt}\n\nUser Prompt: "{prompt}"'
     clean_json_str = "{}"
@@ -68,7 +53,7 @@ def _generate_search_queries(prompt: str, model: str) -> list[str]:
                 "prompt": full_prompt,
                 "stream": False,
                 "format": "json",
-                "keep_alive": 0,
+                "keep_alive": "5m",
                 "options": {"temperature": 0.0},
             },
             timeout=25,
@@ -76,7 +61,6 @@ def _generate_search_queries(prompt: str, model: str) -> list[str]:
         response.raise_for_status()
 
         ollama_envelope = response.json()
-        log.info(f"Ollama raw envelope: {ollama_envelope}")
         response_json_str = ollama_envelope.get("response", "{}")
         clean_json_str = _extract_json_from_string(response_json_str)
         inner_data = json.loads(clean_json_str)
@@ -155,15 +139,17 @@ def query_searxng(query: str, max_results: int = 3) -> str:
         return ""
 
 
-def think_and_search(prompt: str, model: str) -> str:
+def think_and_search(prompt: str, model: str) -> str | None:
     """
     Orchestrates the intelligent search process. It generates multiple queries,
     executes a search for each, and combines the results.
+    Returns None if no search was ever intended.
     """
     search_queries = _generate_search_queries(prompt, model)
 
     if not search_queries:
-        return ""
+        # Return None to indicate the LLM decided not to search.
+        return None
 
     all_results_context = []
     seen_content = set()
@@ -180,6 +166,7 @@ def think_and_search(prompt: str, model: str) -> str:
 
     if not all_results_context:
         log.warning("All search queries returned no results.")
+        # Return an empty string to indicate search was tried but failed.
         return ""
 
     final_context = "\n\n---\n\n".join(all_results_context)

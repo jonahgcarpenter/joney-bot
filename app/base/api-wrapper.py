@@ -11,6 +11,7 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
 from tools import search, vector_db
+from tools.system_prompts import get_final_answer_prompt
 
 # --- Logging Setup ---
 logging.basicConfig(
@@ -41,7 +42,7 @@ app = FastAPI()
 class PromptRequest(BaseModel):
     prompt: str
     username: str
-    model: str = "oswald:latest"
+    model: str = "llama2-uncensored:7b"
 
 
 # --- Input Sanitization Function ---
@@ -86,24 +87,16 @@ async def generate_prompt(
             prompt=sanitized_prompt, model=data.model
         )
 
-        if search_results:
-            final_prompt = (
-                "--- Web Search Results ---\n"
-                f"{search_results}\n"
-                "--- End of Search Results ---\n\n"
-                f"User's Question: {sanitized_prompt}"
-            )
-            log.info("Constructed a data-only prompt with search results.")
-        else:
-            # If search fails, we still just send the user's question.
-            log.warning(
-                "Web search failed or returned no results. Using original prompt."
-            )
-            final_prompt = sanitized_prompt
+        final_prompt = get_final_answer_prompt(sanitized_prompt, search_results)
+        log.info("Constructed final prompt for Oswald using search context.")
 
         response = requests.post(
             f"{OLLAMA_HOST}/api/generate",
-            json={"model": data.model, "prompt": final_prompt, "stream": False},
+            json={
+                "model": data.model,
+                "prompt": final_prompt,
+                "stream": False,
+            },
             timeout=60,
         )
         response.raise_for_status()
