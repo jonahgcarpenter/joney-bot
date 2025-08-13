@@ -8,11 +8,16 @@ I like the idea of a chatbot for discord, simply mention the bot user and it wil
 
 ### Problems:
 
+- Train my own LLM, provided ones are less maluable and are by nature less unhinged
 - Queue system for multiple request
 - Memory and User context
-- Ensure the search function won't get me in trouble
+- Ensure the search function won't get me in trouble, maybe save each search query too?
+- Fix prod deployment showing up as Stack in portainer
+- Shrink container size??
 
-## Python Setup
+## Python Usage
+
+- cd app
 
 ### Create & Activate VENV
 
@@ -20,16 +25,10 @@ I like the idea of a chatbot for discord, simply mention the bot user and it wil
 
 - source venv/bin/activate
 
-### Install / Freeze Requirements
+### Install Requirements
 
 - pip install -r requirements.txt
-
-- pip freeze > requirements.txt
 
 ### Run the server
 
 - python main.py
-
-## Docker
-
-- docker-compose up -d
