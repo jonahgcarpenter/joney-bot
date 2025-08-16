@@ -37,28 +37,36 @@ You can run this bot either by building it directly from the source code with Py
 
 ### Option 1: Build from Source
 
-**1. Create your .env**
+**1. Clone the Repo**
+```bash
+git clone https://github.com/jonahgcarpenter/joney-bot.git && cd joney-bot
+```
+
+**2. Create your .env**
 ```bash
 cp .env.example .env
 ```
 
-**2. Navigate to the App Directory**
+**3. Navigate to the App Directory**
 ```bash
 cd app
 ```
 
-**3. Create & Activate VENV**
+**4. Create & Activate VENV**
 ```bash
 python -m venv venv
+```
+
+```bash
 source venv/bin/activate
 ```
 
-**4. Install Dependancies**
+**5. Install Dependancies**
 ```bash
 pip install -r requirements.txt
 ```
 
-**5. Run the Server**
+**6. Run the Server**
 ```bash
 python main.py
 ```
@@ -87,7 +95,6 @@ docker compose up -d
 
 ## Todo
 
-- Optimize the search funtion, and refine the system prompts to generate better queries to better answer the prompt
+- Optimize the system prompts
 - Queue system for multiple request
-- Memory and User context
-- Fix prod deployment showing up as Stack in portainer
+- Memory and User context for Discord users
