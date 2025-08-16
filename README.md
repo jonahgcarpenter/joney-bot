@@ -1,4 +1,4 @@
-# Joney Discord Bot
+# Joney Bot
 
 ## About This Project
 
@@ -27,7 +27,7 @@ graph TD
 
 Before running the application, you will need the following services available:
 
-* **PostgreSQL:** Used for persistent data storage, for now this is simply coversation history
+* **PostgreSQL w/ PGVector:** Used for persistent data storage, for now this is simply coversation history
 * **SearXNG:** A running instance is required to act as the search engine tool for the bot.
 * **Ollama:** Required to serve the local Large Language Model (LLM) that powers the bot's intelligence.
 
