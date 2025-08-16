@@ -95,6 +95,7 @@ docker compose up -d
 
 ## Todo
 
+- Create a more robust alternative to check if something is searchable, specifically so the AI does not search for illegal things
 - Multi-stage build process to shrink docker image size?
 - Optimize the system prompts
 - Queue system for multiple request
