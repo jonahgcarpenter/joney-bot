@@ -95,6 +95,7 @@ docker compose up -d
 
 ## Todo
 
+- Multi-stage build process to shrink docker image size?
 - Optimize the system prompts
 - Queue system for multiple request
 - Memory and User context for Discord users
