@@ -44,6 +44,7 @@ def setup_database():
                     response TEXT NOT NULL,
                     prompt_embedding VECTOR(768),
                     response_embedding VECTOR(768),
+                    search_queries TEXT,
                     created_at TIMESTAMPTZ DEFAULT NOW()
                 );
             """
@@ -58,23 +59,39 @@ def setup_database():
 
 
 def save_chat(
-    username: str, prompt: str, response: str, prompt_embedding, response_embedding
+    username: str,
+    prompt: str,
+    response: str,
+    prompt_embedding,
+    response_embedding,
+    search_queries: list[str] | None = None,
 ):
-    """Saves a chat prompt, its response, the user, and their embeddings to the database."""
+    """Saves a chat prompt, its response, the user, embeddings, and search queries to the database."""
     conn = get_db_connection()
     if conn is None:
         log.error("Could not save chat log due to no database connection.")
         return
+
+    # Convert the list of queries into a single comma-separated string.
+    # If search_queries is None or empty, store NULL in the database.
+    queries_str = ", ".join(search_queries) if search_queries else None
 
     try:
         with conn.cursor() as cur:
             schema_name = os.getenv("DB_SCHEMA")
             cur.execute(
                 f"""
-                INSERT INTO {schema_name}.chat_logs (username, prompt, response, prompt_embedding, response_embedding)
-                VALUES (%s, %s, %s, %s, %s)
+                INSERT INTO {schema_name}.chat_logs (username, prompt, response, prompt_embedding, response_embedding, search_queries)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 """,
-                (username, prompt, response, prompt_embedding, response_embedding),
+                (
+                    username,
+                    prompt,
+                    response,
+                    prompt_embedding,
+                    response_embedding,
+                    queries_str,
+                ),
             )
         conn.commit()
         log.info(

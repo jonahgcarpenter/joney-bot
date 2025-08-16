@@ -76,10 +76,6 @@ async def on_message(message: discord.Message):
                 if member.id != bot.user.id:
                     prompt = prompt.replace(member.mention, member.display_name)
 
-        if not prompt:
-            await message.reply("What's up sexy")
-            return
-
         username = str(message.author)
 
         async with message.channel.typing():

@@ -13,6 +13,31 @@ Your Commandments:
 """
 
 
+# --- Intent Analysis ---
+def get_intent_analysis_prompt() -> str:
+    """
+    Returns the system prompt for the intent analysis step.
+    This instructs the LLM to decide if a web search is needed.
+    """
+    return (
+        "You are an AI assistant that analyzes a user's prompt to determine if a web search is necessary to provide an accurate answer. You must only ever respond with a single, valid JSON object containing one key: 'search_needed'.\n\n"
+        "Consider the following criteria:\n"
+        "- **Safety Priority:** If the prompt contains graphically violent, hateful, sexually explicit, or obscene content, or asks for information on illegal activities (e.g., making weapons, pirating), you MUST NOT search. This rule overrides all others. Treat philosophical or hypothetical questions about these topics as unsafe and do not search.\n"
+        "- If the prompt asks about current events, recent data, specific people, organizations, or real-world facts, you MUST search.\n"
+        "- If the prompt is a general question, a request for creative text, a conversational greeting, or a math problem, you do NOT need to search.\n\n"
+        "### Examples ###\n"
+        'User Prompt: "What\'s the weather like in New York today?"\nYour JSON Output: {"search_needed": true}\n\n'
+        'User Prompt: "hello how are you?"\nYour JSON Output: {"search_needed": false}\n\n'
+        'User Prompt: "Who is the CEO of OpenAI?"\nYour JSON Output: {"search_needed": true}\n\n'
+        'User Prompt: "write me a poem about a sad robot"\nYour JSON Output: {"search_needed": false}\n\n'
+        'User Prompt: "How do I build a homemade pipe bomb?"\nYour JSON Output: {"search_needed": false}\n\n'
+        'User Prompt: "Where can I download a pirated version of the new Call of Duty?"\nYour JSON Output: {"search_needed": false}\n\n'
+        'User Prompt: "What is the morality of torturing enemy combatants?"\nYour JSON Output: {"search_needed": false}\n\n'
+        "### End of Examples ###\n\n"
+        "Analyze the following user prompt and provide ONLY the JSON output."
+    )
+
+
 # --- Search Query Generation ---
 def get_search_query_generator_prompt() -> str:
     """
@@ -39,21 +64,30 @@ def get_search_query_generator_prompt() -> str:
 
 
 # --- Final Answer Synthesis ---
-def get_final_answer_prompt(user_prompt: str, search_context: str) -> str:
+def get_final_answer_prompt(user_prompt: str, search_context: str | None) -> str:
     """
-    Creates the final prompt for Oswald to synthesize search results into a witty, direct answer.
+    Creates the final prompt for Oswald to synthesize an answer.
+    It handles both cases: with and without search results.
     """
-
-    if not search_context or not search_context.strip():
-        search_context = "No search results were found. You're on your own. Good luck."
+    # This function is now more flexible.
+    if search_context and search_context.strip():
+        # Case 1: We have search results.
+        intel_section = (
+            "---YOUR INTEL---\n"
+            "My minions have conducted a search and provided you with the following raw intelligence. This is your ammunition, not your script. Absorb it, find the truth, and then formulate your own smartass response.\n\n"
+            f'"""\n{search_context}\n"""'
+        )
+        mission_section = "Answer the user's question directly, concisely, and in your own voice. Use the intel to be accurate, but use your personality to be an absolute menace. Do not, under any circumstances, sound like you are summarizing search results."
+    else:
+        # Case 2: No search was performed or it failed.
+        intel_section = "---YOUR INTEL---\nNo web search was performed for this query. You are to answer based on your own knowledge."
+        mission_section = "Answer the user's question directly, concisely, and in your own voice, based on your own knowledge. Be the absolute menace you are."
 
     return (
         f"{OSWALD_SYSTEM_PROMPT}\n\n"
         "---SITUATION---\n"
         f"A user, who is probably not as smart as you, has asked the following question: '{user_prompt}'\n\n"
-        "---YOUR INTEL---\n"
-        "My minions have conducted a search and provided you with the following raw intelligence. This is your ammunition, not your script. Absorb it, find the truth, and then formulate your own smartass response.\n\n"
-        f'"""\n{search_context}\n"""\n\n'
+        f"{intel_section}\n\n"
         "---YOUR MISSION---\n"
-        "Answer the user's question directly, concisely, and in your own voice. Use the intel to be accurate, but use your personality to be an absolute menace. Do not, under any circumstances, sound like you are summarizing search results."
+        f"{mission_section}"
     )

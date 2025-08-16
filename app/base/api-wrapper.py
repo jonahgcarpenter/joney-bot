@@ -10,17 +10,15 @@ import requests
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
-from tools import search, vector_db
+from tools import intent_analysis, search, vector_db
 from tools.system_prompts import get_final_answer_prompt
 
 # --- Logging Setup ---
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
 )
-
 logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
 logging.getLogger("transformers.modeling_utils").setLevel(logging.ERROR)
-
 log = logging.getLogger(__name__)
 
 
@@ -34,7 +32,6 @@ embedding_model = SentenceTransformer(
     "nomic-ai/nomic-embed-text-v1.5", trust_remote_code=True
 )
 log.info("Sentence transformer model loaded")
-
 app = FastAPI()
 
 
@@ -53,12 +50,22 @@ def sanitize_input(prompt: str) -> str:
 
 
 # --- Background Task for Saving to DB ---
-def save_to_db_background(username: str, prompt: str, response: str):
+def save_to_db_background(
+    username: str,
+    prompt: str,
+    response: str,
+    search_queries: list[str] | None = None,
+):
     """Generates embeddings and saves the chat log to the database."""
     prompt_embedding = embedding_model.encode(prompt)
     response_embedding = embedding_model.encode(response)
     vector_db.save_chat(
-        username, prompt, response, prompt_embedding, response_embedding
+        username,
+        prompt,
+        response,
+        prompt_embedding,
+        response_embedding,
+        search_queries,
     )
 
 
@@ -68,35 +75,39 @@ async def generate_prompt(
     request: Request, data: PromptRequest, background_tasks: BackgroundTasks
 ):
     """
-    Receives a prompt, ALWAYS performs a web search, gets a response from Ollama
-    based on the search results, and saves the original exchange to the DB.
+    Receives a prompt, performs intent analysis to decide if a search is needed,
+    gets a response from Ollama, and saves the exchange to the DB.
     """
     sanitized_prompt = sanitize_input(data.prompt)
-
     if not sanitized_prompt:
         raise HTTPException(
             status_code=400, detail="Prompt is empty after sanitization."
         )
 
     try:
-        # --- THINK AND SEARCH ---
-        log.info(
-            f"Starting intelligent search process for prompt: '{sanitized_prompt}'"
-        )
-        search_results = search.think_and_search(
+        # --- INTENT ANALYSIS ---
+        search_needed = intent_analysis.decide_if_search_is_needed(
             prompt=sanitized_prompt, model=data.model
         )
 
-        final_prompt = get_final_answer_prompt(sanitized_prompt, search_results)
-        log.info("Constructed final prompt for Oswald using search context.")
+        search_context = None
+        search_queries = None
+        if search_needed:
+            # --- PATH 1: SEARCH NEEDED ---
+            log.info("Search is needed. Starting intelligent search process.")
+            search_context, search_queries = search.think_and_search(
+                prompt=sanitized_prompt, model=data.model
+            )
+        else:
+            # --- PATH 2: SEARCH NOT NEEDED ---
+            log.info("Search not needed. Generating a conversational response.")
+
+        # --- GENERATE FINAL RESPONSE (FOR BOTH PATHS) ---
+        final_prompt = get_final_answer_prompt(sanitized_prompt, search_context)
 
         response = requests.post(
             f"{OLLAMA_HOST}/api/generate",
-            json={
-                "model": data.model,
-                "prompt": final_prompt,
-                "stream": False,
-            },
+            json={"model": data.model, "prompt": final_prompt, "stream": False},
             timeout=60,
         )
         response.raise_for_status()
@@ -104,9 +115,13 @@ async def generate_prompt(
         ollama_data = response.json()
         model_response = ollama_data.get("response", "No response content from model.")
 
-        # --- SAVE ORIGINAL PROMPT (not the big one) TO DB ---
+        # --- SAVE TO DB (FOR BOTH PATHS) ---
         background_tasks.add_task(
-            save_to_db_background, data.username, sanitized_prompt, model_response
+            save_to_db_background,
+            data.username,
+            sanitized_prompt,
+            model_response,
+            search_queries,
         )
 
         return {"response": model_response}

@@ -139,7 +139,7 @@ def query_searxng(query: str, max_results: int = 3) -> str:
         return ""
 
 
-def think_and_search(prompt: str, model: str) -> str | None:
+def think_and_search(prompt: str, model: str) -> tuple[str | None, list[str]]:
     """
     Orchestrates the intelligent search process. It generates multiple queries,
     executes a search for each, and combines the results.
@@ -149,7 +149,7 @@ def think_and_search(prompt: str, model: str) -> str | None:
 
     if not search_queries:
         # Return None to indicate the LLM decided not to search.
-        return None
+        return None, search_queries
 
     all_results_context = []
     seen_content = set()
@@ -167,10 +167,10 @@ def think_and_search(prompt: str, model: str) -> str | None:
     if not all_results_context:
         log.warning("All search queries returned no results.")
         # Return an empty string to indicate search was tried but failed.
-        return ""
+        return "", search_queries
 
     final_context = "\n\n---\n\n".join(all_results_context)
     log.info(
         f"Successfully combined results from {len(all_results_context)} search queries."
     )
-    return final_context
+    return final_context, search_queries
