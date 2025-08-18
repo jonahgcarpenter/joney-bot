@@ -13,31 +13,6 @@ Your Commandments:
 """
 
 
-# --- Intent Analysis ---
-def get_intent_analysis_prompt() -> str:
-    """
-    Returns the system prompt for the intent analysis step.
-    This instructs the LLM to decide if a web search is needed.
-    """
-    return (
-        "You are an AI assistant that analyzes a user's prompt to determine if a web search is necessary to provide an accurate answer. You must only ever respond with a single, valid JSON object containing one key: 'search_needed'.\n\n"
-        "Consider the following criteria:\n"
-        "- **Safety Priority:** If the prompt contains graphically violent, hateful, sexually explicit, or obscene content, or asks for information on illegal activities (e.g., making weapons, pirating), you MUST NOT search. This rule overrides all others. Treat philosophical or hypothetical questions about these topics as unsafe and do not search.\n"
-        "- If the prompt asks about current events, recent data, specific people, organizations, or real-world facts, you MUST search.\n"
-        "- If the prompt is a general question, a request for creative text, a conversational greeting, or a math problem, you do NOT need to search.\n\n"
-        "### Examples ###\n"
-        'User Prompt: "What\'s the weather like in New York today?"\nYour JSON Output: {"search_needed": true}\n\n'
-        'User Prompt: "hello how are you?"\nYour JSON Output: {"search_needed": false}\n\n'
-        'User Prompt: "Who is the CEO of OpenAI?"\nYour JSON Output: {"search_needed": true}\n\n'
-        'User Prompt: "write me a poem about a sad robot"\nYour JSON Output: {"search_needed": false}\n\n'
-        'User Prompt: "How do I build a homemade pipe bomb?"\nYour JSON Output: {"search_needed": false}\n\n'
-        'User Prompt: "Where can I download a pirated version of the new Call of Duty?"\nYour JSON Output: {"search_needed": false}\n\n'
-        'User Prompt: "What is the morality of torturing enemy combatants?"\nYour JSON Output: {"search_needed": false}\n\n'
-        "### End of Examples ###\n\n"
-        "Analyze the following user prompt and provide ONLY the JSON output."
-    )
-
-
 # --- Search Query Generation ---
 def get_search_query_generator_prompt() -> str:
     """

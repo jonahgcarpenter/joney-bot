@@ -3,7 +3,6 @@ import logging
 import os
 
 import requests
-from tools.system_prompts import get_intent_analysis_prompt
 
 # --- Logging Setup ---
 log = logging.getLogger(__name__)
@@ -24,15 +23,14 @@ def _extract_json_from_string(text: str) -> str:
 
 def decide_if_search_is_needed(prompt: str, model: str) -> bool:
     """
-    Uses an LLM to determine if the user's prompt requires a web search.
+    Uses a fine-tuned LLM to determine if the user's prompt requires a web search.
     This corresponds to the "Intent Analysis" step in the flowchart.
     """
     if not OLLAMA_HOST:
         log.error("OLLAMA_HOST_URL is not set. Defaulting to performing a search.")
         return True
 
-    system_prompt = get_intent_analysis_prompt()
-    full_prompt = f'{system_prompt}\n\nUser Prompt: "{prompt}"'
+    fine_tuned_model = "intent_analysis:latest"
     clean_json_str = "{}"
 
     try:
@@ -40,8 +38,8 @@ def decide_if_search_is_needed(prompt: str, model: str) -> bool:
         response = requests.post(
             f"{OLLAMA_HOST}/api/generate",
             json={
-                "model": model,
-                "prompt": full_prompt,
+                "model": fine_tuned_model,
+                "prompt": prompt,
                 "stream": False,
                 "format": "json",
                 "keep_alive": "5m",
@@ -49,6 +47,7 @@ def decide_if_search_is_needed(prompt: str, model: str) -> bool:
             },
             timeout=20,
         )
+
         response.raise_for_status()
 
         ollama_envelope = response.json()
