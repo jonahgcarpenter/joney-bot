@@ -5,6 +5,8 @@ import subprocess
 import sys
 import time
 
+from tools.logging_config import setup_logging
+
 
 def run_fastapi():
     """Starts the FastAPI application using uvicorn."""
@@ -56,6 +58,8 @@ if __name__ == "__main__":
 
     api_process.start()
     bot_process.start()
+
+    setup_logging()
 
     try:
         api_process.join()

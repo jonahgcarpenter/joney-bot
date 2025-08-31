@@ -1,6 +1,16 @@
 import logging
 import os
 import re
+import sys
+
+# --- Path Setup ---
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, project_root)
+
+# Import and run logging config before anything else
+from tools.logging_config import setup_logging
+
+setup_logging()
 
 from dotenv import load_dotenv
 
@@ -11,20 +21,18 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
 from tools import intent_analysis, search, vector_db
-from tools.system_prompts import get_final_answer_prompt
+from tools.system_prompts import (
+    get_final_answer_prompt,
+    get_user_profile_generator_prompt,
+)
 
 # --- Logging Setup ---
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
-)
-logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
-logging.getLogger("transformers.modeling_utils").setLevel(logging.ERROR)
 log = logging.getLogger(__name__)
 
 
 # --- Configuration ---
 OLLAMA_HOST = os.getenv("OLLAMA_HOST_URL")
-SEARXNG_URL = os.getenv("SEARXNG_URL")
+CONTEXT_SUMMARY_COUNT = int(os.getenv("CONTEXT_SUMMARY_COUNT", 10))
 
 # --- Initialize Model for Embeddings ---
 log.info("Loading sentence transformer model...")
@@ -40,6 +48,7 @@ class PromptRequest(BaseModel):
     prompt: str
     username: str
     model: str = "llama2-uncensored:7b"
+    target_user: str | None = None
 
 
 # --- Input Sanitization Function ---
@@ -49,24 +58,61 @@ def sanitize_input(prompt: str) -> str:
     return sanitized.strip()
 
 
-# --- Background Task for Saving to DB ---
-def save_to_db_background(
+# --- Background Task for Saving and Profiling ---
+def process_and_save_background(
     username: str,
     prompt: str,
     response: str,
+    model: str,
     search_queries: list[str] | None = None,
 ):
-    """Generates embeddings and saves the chat log to the database."""
-    prompt_embedding = embedding_model.encode(prompt)
-    response_embedding = embedding_model.encode(response)
-    vector_db.save_chat(
-        username,
-        prompt,
-        response,
-        prompt_embedding,
-        response_embedding,
-        search_queries,
-    )
+    """
+    Saves the current chat, then generates and saves a new user profile.
+    """
+    try:
+        # Step 1: Save the current interaction
+        log.debug(f"Saving current chat for '{username}'.")
+        prompt_embedding = embedding_model.encode(prompt)
+        response_embedding = embedding_model.encode(response)
+        vector_db.save_chat(
+            username,
+            prompt,
+            response,
+            prompt_embedding,
+            response_embedding,
+            search_queries,
+        )
+
+        # Step 2: Get recent chat history
+        log.debug(f"Fetching recent chat history for '{username}' to generate profile.")
+        chat_history = vector_db.get_recent_chats(username, CONTEXT_SUMMARY_COUNT)
+        if not chat_history:
+            log.warning(
+                f"No chat history for '{username}', skipping profile generation."
+            )
+            return
+
+        # Step 3: Generate a new profile
+        log.info(f"Generating new user profile for '{username}'.")
+        profile_prompt = get_user_profile_generator_prompt(chat_history, username)
+        profile_response = requests.post(
+            f"{OLLAMA_HOST}/api/generate",
+            json={"model": model, "prompt": profile_prompt, "stream": False},
+            timeout=60,
+        )
+        profile_response.raise_for_status()
+        new_profile = profile_response.json().get("response", "").strip()
+
+        # Step 4: Save the new profile
+        if new_profile:
+            vector_db.update_user_profile(username, new_profile)
+        else:
+            log.warning(f"LLM returned an empty profile for '{username}'.")
+
+    except Exception as e:
+        log.error(f"Error in background task for '{username}': {e}", exc_info=True)
+    finally:
+        log.info(f"[bold red]ENDING INTERACTION with {username}[/bold red]")
 
 
 # --- API Endpoint ---
@@ -75,9 +121,10 @@ async def generate_prompt(
     request: Request, data: PromptRequest, background_tasks: BackgroundTasks
 ):
     """
-    Receives a prompt, performs intent analysis to decide if a search is needed,
-    gets a response from Ollama, and saves the exchange to the DB.
+    Receives a prompt, gets a response, and kicks off a background task.
     """
+    log.info(f"[bold red]STARTING INTERACTION with {data.username}[/bold red]")
+
     sanitized_prompt = sanitize_input(data.prompt)
     if not sanitized_prompt:
         raise HTTPException(
@@ -85,55 +132,62 @@ async def generate_prompt(
         )
 
     try:
+        # --- GET USER CONTEXTS ---
+        user_context = vector_db.get_user_context(data.username)
+        target_user_profile = None
+        if data.target_user:
+            log.info(f"Prompt is about '{data.target_user}'. Fetching their profile.")
+            target_user_profile = vector_db.get_user_context(data.target_user)
+            if not target_user_profile:
+                log.warning(f"No profile found for target user '{data.target_user}'.")
+
         # --- INTENT ANALYSIS ---
         search_needed = intent_analysis.decide_if_search_is_needed(
             prompt=sanitized_prompt, model=data.model
         )
-
-        search_context = None
-        search_queries = None
+        search_context, search_queries = None, None
         if search_needed:
-            # --- PATH 1: SEARCH NEEDED ---
             log.info("Search is needed. Starting intelligent search process.")
             search_context, search_queries = search.think_and_search(
                 prompt=sanitized_prompt, model=data.model
             )
         else:
-            # --- PATH 2: SEARCH NOT NEEDED ---
             log.info("Search not needed. Generating a conversational response.")
 
-        # --- GENERATE FINAL RESPONSE (FOR BOTH PATHS) ---
-        final_prompt = get_final_answer_prompt(sanitized_prompt, search_context)
-
+        # --- GENERATE FINAL RESPONSE ---
+        final_prompt = get_final_answer_prompt(
+            sanitized_prompt,
+            search_context,
+            user_context,
+            target_user_profile,
+            data.target_user,
+        )
         response = requests.post(
             f"{OLLAMA_HOST}/api/generate",
             json={"model": data.model, "prompt": final_prompt, "stream": False},
             timeout=60,
         )
         response.raise_for_status()
+        model_response = response.json().get("response", "No response from model.")
 
-        ollama_data = response.json()
-        model_response = ollama_data.get("response", "No response content from model.")
-
-        # --- SAVE TO DB (FOR BOTH PATHS) ---
+        # --- KICK OFF BACKGROUND TASK ---
         background_tasks.add_task(
-            save_to_db_background,
+            process_and_save_background,
             data.username,
             sanitized_prompt,
             model_response,
+            data.model,
             search_queries,
         )
-
         return {"response": model_response}
 
-    except requests.exceptions.RequestException as e:
-        log.error(f"Error contacting Ollama: {e}")
-        raise HTTPException(
-            status_code=503, detail="Could not connect to the Ollama service."
-        )
     except Exception as e:
         log.error(
-            f"An unexpected error occurred in generate_prompt: {e}", exc_info=True
+            f"An unexpected error occurred in generate_prompt for '{data.username}': {e}",
+            exc_info=True,
+        )
+        log.info(
+            f"[bold red]ENDING INTERACTION with {data.username} due to error[/bold red]"
         )
         raise HTTPException(
             status_code=500, detail="An internal server error occurred."
@@ -142,11 +196,9 @@ async def generate_prompt(
 
 @app.on_event("startup")
 async def startup_event():
-    """On startup, set up the database."""
     vector_db.setup_database()
 
 
 @app.get("/health")
 def health_check():
-    """Provides a simple health check endpoint."""
     return {"status": "ok"}

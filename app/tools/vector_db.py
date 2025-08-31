@@ -18,6 +18,7 @@ def get_db_connection():
             port=os.getenv("DB_PORT"),
         )
         register_vector(conn)
+        log.debug("Database connection successful.")
         return conn
     except psycopg2.OperationalError as e:
         log.error(f"Could not connect to the database. Details: {e}")
@@ -25,7 +26,7 @@ def get_db_connection():
 
 
 def setup_database():
-    """Sets up the database table if it doesn't exist."""
+    """Sets up the database tables if they don't exist."""
     conn = get_db_connection()
     if conn is None:
         return
@@ -35,6 +36,7 @@ def setup_database():
             schema_name = os.getenv("DB_SCHEMA")
             cur.execute(f"CREATE SCHEMA IF NOT EXISTS {schema_name};")
 
+            # Create chat_logs table
             cur.execute(
                 f"""
                 CREATE TABLE IF NOT EXISTS {schema_name}.chat_logs (
@@ -49,10 +51,137 @@ def setup_database():
                 );
             """
             )
+
+            # Create users table for context
+            cur.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {schema_name}.users (
+                    id SERIAL PRIMARY KEY,
+                    username TEXT UNIQUE NOT NULL,
+                    context TEXT,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                );
+            """
+            )
+
+            # Create a trigger to automatically update the updated_at timestamp
+            cur.execute(
+                f"""
+                CREATE OR REPLACE FUNCTION update_updated_at_column()
+                RETURNS TRIGGER AS $$
+                BEGIN
+                   NEW.updated_at = now();
+                   RETURN NEW;
+                END;
+                $$ language 'plpgsql';
+                """
+            )
+            cur.execute(
+                f"""
+                DROP TRIGGER IF EXISTS update_users_updated_at ON {schema_name}.users;
+                CREATE TRIGGER update_users_updated_at
+                BEFORE UPDATE ON {schema_name}.users
+                FOR EACH ROW
+                EXECUTE FUNCTION update_updated_at_column();
+                """
+            )
+
             log.info(f"Database is ready")
         conn.commit()
     except Exception as e:
         log.error(f"An error occurred during database setup: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+
+def get_user_context(username: str) -> str | None:
+    """Retrieves the context for a given user."""
+    conn = get_db_connection()
+    if conn is None:
+        return None
+
+    context = None
+    try:
+        with conn.cursor() as cur:
+            schema_name = os.getenv("DB_SCHEMA")
+            cur.execute(
+                f"SELECT context FROM {schema_name}.users WHERE username = %s",
+                (username,),
+            )
+            result = cur.fetchone()
+            if result:
+                context = result[0]
+                log.debug(f"Found context for user '{username}'.")
+            else:
+                log.debug(f"No context found for user '{username}'.")
+    except Exception as e:
+        log.error(f"Error retrieving context for user '{username}': {e}")
+    finally:
+        if conn:
+            conn.close()
+    return context
+
+
+def get_recent_chats(username: str, limit: int) -> str:
+    """Retrieves the most recent chat interactions for a user."""
+    conn = get_db_connection()
+    if conn is None:
+        return ""
+
+    chat_history = []
+    try:
+        with conn.cursor() as cur:
+            schema_name = os.getenv("DB_SCHEMA")
+            cur.execute(
+                f"""
+                SELECT prompt, response FROM {schema_name}.chat_logs
+                WHERE username = %s
+                ORDER BY created_at DESC
+                LIMIT %s;
+                """,
+                (username, limit),
+            )
+            # Fetch results and format them, then reverse to get chronological order
+            results = cur.fetchall()
+            for prompt, response in reversed(results):
+                chat_history.append(f"User: {prompt}\nOswald: {response}")
+    except Exception as e:
+        log.error(f"Error retrieving recent chats for user '{username}': {e}")
+    finally:
+        if conn:
+            conn.close()
+
+    return "\n\n".join(chat_history)
+
+
+def update_user_profile(username: str, profile: str):
+    """Saves the AI-generated profile to the user's context."""
+    conn = get_db_connection()
+    if conn is None:
+        log.error("Could not update user profile due to no database connection.")
+        return
+
+    try:
+        with conn.cursor() as cur:
+            schema_name = os.getenv("DB_SCHEMA")
+            log.info(f"Updating profile for user '{username}'.")
+            log.debug(f"New profile for '{username}': {profile}")
+
+            # Use INSERT ... ON CONFLICT to create a new user or update an existing one
+            cur.execute(
+                f"""
+                INSERT INTO {schema_name}.users (username, context)
+                VALUES (%s, %s)
+                ON CONFLICT (username)
+                DO UPDATE SET context = EXCLUDED.context;
+                """,
+                (username, profile),
+            )
+        conn.commit()
+    except Exception as e:
+        log.error(f"Error updating profile for user '{username}': {e}")
     finally:
         if conn:
             conn.close()
@@ -72,8 +201,6 @@ def save_chat(
         log.error("Could not save chat log due to no database connection.")
         return
 
-    # Convert the list of queries into a single comma-separated string.
-    # If search_queries is None or empty, store NULL in the database.
     queries_str = ", ".join(search_queries) if search_queries else None
 
     try:
@@ -94,9 +221,7 @@ def save_chat(
                 ),
             )
         conn.commit()
-        log.info(
-            f"SUCCESS: Processed and saved chat from '{username}'. Prompt: \"{prompt[:75]}\""
-        )
+        log.info(f"SUCCESS: Saved chat from '{username}'.")
     except Exception as e:
         log.error(f"An error occurred while saving the chat log for '{username}': {e}")
     finally:

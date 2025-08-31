@@ -1,9 +1,17 @@
 import asyncio
 import logging
 import os
+import sys
 
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, project_root)
+
+from tools.logging_config import setup_logging
+
+setup_logging()
+
+import aiohttp
 import discord
-import requests
 from discord.ext import commands
 from dotenv import load_dotenv
 
@@ -15,9 +23,8 @@ API_HEALTH_URL = API_WRAPPER_URL.replace("/generate", "/health")
 
 
 # --- Logging Setup ---
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
-)
+log = logging.getLogger(__name__)
+
 
 # Silence noisy discord.py logs
 logging.getLogger("discord").setLevel(logging.WARNING)
@@ -37,24 +44,26 @@ async def on_ready():
     logging.info(f"Connected to Discord as {bot.user}. Waiting for backend API...")
 
     max_retries = 12  # Try for up to 60 seconds (12 * 5s)
-    for attempt in range(max_retries):
-        try:
-            # Check the health of the API wrapper
-            response = requests.get(API_HEALTH_URL, timeout=3)
-            if response.status_code == 200 and response.json().get("status") == "ok":
-                logging.info("Backend API is online and healthy")
-                # This log now appears last, confirming a fully successful startup
-                logging.info(f"Bot is ready! Logged in as {bot.user}")
-                return
-        except requests.exceptions.ConnectionError:
-            # This is expected if the API isn't running yet, so we just wait
-            pass
-        except requests.exceptions.RequestException as e:
-            # Log other errors (like timeouts) but continue to retry
-            logging.warning(f"API health check failed: {e}")
+    async with aiohttp.ClientSession() as session:
+        for attempt in range(max_retries):
+            try:
+                # Check the health of the API wrapper using aiohttp
+                async with session.get(API_HEALTH_URL, timeout=3) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        if data.get("status") == "ok":
+                            logging.info("Backend API is online and healthy")
+                            logging.info(f"Bot is ready! Logged in as {bot.user}")
+                            return
+            except (aiohttp.ClientConnectorError, asyncio.TimeoutError):
+                # This is expected if the API isn't running yet, so we just wait
+                pass
+            except aiohttp.ClientError as e:
+                # Log other errors (like timeouts) but continue to retry
+                logging.warning(f"API health check failed: {e}")
 
-        # Wait before retrying
-        await asyncio.sleep(5)
+            # Wait before retrying
+            await asyncio.sleep(5)
 
     logging.critical(
         "FATAL: Backend API did not become healthy. Bot may not function correctly."
@@ -68,9 +77,18 @@ async def on_message(message: discord.Message):
         return
 
     if bot.user.mentioned_in(message):
+        # --- NEW: Identify the target user of the prompt ---
+        target_user_name = None
+        # Create a list of mentioned users, excluding the bot itself
+        other_mentions = [m for m in message.mentions if m.id != bot.user.id]
+        # If there is exactly one other person mentioned, they are the target
+        if len(other_mentions) == 1:
+            target_user_name = str(other_mentions[0])  # e.g., "Bando#1234"
+            log.info(f"Identified target user in prompt: {target_user_name}")
+
         prompt = message.content.replace(f"<@{bot.user.id}>", "").strip()
 
-        # --- Resolve user mentions ---
+        # Resolve all user mentions to their display names for the prompt text
         if message.mentions:
             for member in message.mentions:
                 if member.id != bot.user.id:
@@ -80,14 +98,23 @@ async def on_message(message: discord.Message):
 
         async with message.channel.typing():
             try:
+                # --- NEW: Add target_user to the payload if they exist ---
                 payload = {"prompt": prompt, "username": username}
-                response = requests.post(API_WRAPPER_URL, json=payload, timeout=70)
-                response.raise_for_status()
+                if target_user_name:
+                    payload["target_user"] = target_user_name
 
-                api_data = response.json()
-                model_response = api_data.get(
-                    "response", "Sorry, I received an empty response."
-                )
+                log.debug(f"Sending payload to API: {payload}")
+
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        API_WRAPPER_URL, json=payload, timeout=70
+                    ) as response:
+                        response.raise_for_status()  # Raises an exception for bad status codes
+
+                        api_data = await response.json()
+                        model_response = api_data.get(
+                            "response", "Sorry, I received an empty response."
+                        )
 
                 if len(model_response) > 2000:
                     logging.warning("Response > 2000 chars, splitting.")
@@ -100,15 +127,22 @@ async def on_message(message: discord.Message):
                 else:
                     await message.reply(model_response)
 
-            except requests.exceptions.HTTPError as http_err:
+            except aiohttp.ClientResponseError as http_err:
                 error_detail = "An unknown error occurred."
                 try:
-                    error_detail = http_err.response.json().get("detail", error_detail)
-                except:
-                    pass
+                    # Try to get detail from the response if it's JSON
+                    error_json = await http_err.json()
+                    error_detail = error_json.get("detail", error_detail)
+                except Exception:
+                    pass  # Keep the default error if response is not JSON
                 await message.reply(f"An error occurred with the API: {error_detail}")
-                logging.error(f"HTTPError: {error_detail}")
-            except requests.exceptions.RequestException as e:
+                logging.error(f"HTTPError: {error_detail} (Status: {http_err.status})")
+            except asyncio.TimeoutError:
+                await message.reply(
+                    "My brain took too long to respond (timeout). Please try again."
+                )
+                logging.error("API Connection Error: Timeout")
+            except aiohttp.ClientConnectorError as e:
                 await message.reply(
                     "I couldn't connect to my brain (the API wrapper). Please check if it's running."
                 )

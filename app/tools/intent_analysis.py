@@ -35,6 +35,7 @@ def decide_if_search_is_needed(prompt: str, model: str) -> bool:
 
     try:
         log.info(f"Performing intent analysis for prompt: '{prompt}'")
+        log.debug(f"Sending prompt to intent model '{fine_tuned_model}'.")
         response = requests.post(
             f"{OLLAMA_HOST}/api/generate",
             json={
