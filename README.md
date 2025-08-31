@@ -13,14 +13,25 @@ The bot follows a structured, multi-step process to decide when to search the we
 
 ```mermaid
 graph TD
-    A[User Mentions Bot] --> B{Intent Analysis};
-    B --> |Search Not Needed| C[Generate Conversational Response];
-    B --> |Search Needed| D[Plan & Generate Search Queries];
-    D --> E[Execute Search via SearXNG];
-    E --> F[Synthesize Answer from Search Results];
-    F --> G[Format & Send Discord Message];
-    C --> G;
-    G --> H[End];
+    subgraph Main Request Thread
+        A[User Mentions Bot] --> B[Fetch User Profile];
+        B --> C{Intent Analysis};
+        C --> |Search Not Needed| D[Generate Conversational Response];
+        C --> |Search Needed| E[Plan & Generate Search Queries];
+        E --> F[Execute Search via SearXNG];
+        F --> G[Synthesize Answer from Search Results];
+        G --> H[Format & Send Discord Message];
+        D --> H;
+    end
+
+    subgraph Background Task
+        I[Save Chat to DB] --> J[Fetch Recent Chat History];
+        J --> K[Generate New User Profile via LLM];
+        K --> L[Save New Profile to DB];
+        L --> M[End];
+    end
+
+    H --> I;
 ```
 
 ## Prerequisites
