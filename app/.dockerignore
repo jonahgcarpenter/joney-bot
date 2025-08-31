@@ -1,6 +1,5 @@
 # Ignore the Dockerfile itself and docker-compose
 Dockerfile
-docker-compose.yml
 
 # Ignore environment and cache files
 venv
@@ -11,7 +10,6 @@ __pycache__/
 
 # Ignore documentation and other metadata files
 README.md
-Modelfile
 
 # Ignore git files
 .git

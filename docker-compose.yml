@@ -1,0 +1,16 @@
+services:
+  joney-bot:
+    container_name: joney-bot
+    image: jonahgcarpenter/joney-bot:latest
+    environment:
+      - DISCORD_TOKEN=${DISCORD_TOKEN}
+      - OLLAMA_HOST_URL=${OLLAMA_HOST_URL}
+      - SEARXNG_URL=${SEARXNG_URL}
+      - DB_HOST=${DB_HOST}
+      - DB_PORT=${DB_PORT}
+      - DB_NAME=${DB_NAME}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_SCHEMA=${DB_SCHEMA}
+      - LOG_LEVEL=${LOG_LEVEL}
+      - CONTEXT_SUMMARY_COUNT=${CONTEXT_SUMMARY_COUNT}
