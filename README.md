@@ -14,7 +14,7 @@ The bot follows a structured, multi-step process to decide when to search the we
 ```mermaid
 graph TD
     subgraph Main Request Thread
-        A[User Mentions Bot] --> B[Fetch User Profile];
+        A[User Mentions Bot] --> B[Fetch User Profile for Current Turn];
         B --> C{Intent Analysis};
         C --> |Search Not Needed| D[Generate Conversational Response];
         C --> |Search Needed| E[Plan & Generate Search Queries];
@@ -24,11 +24,15 @@ graph TD
         D --> H;
     end
 
-    subgraph Background Task
-        I[Save Chat to DB] --> J[Fetch Recent Chat History];
-        J --> K[Generate New User Profile via LLM];
-        K --> L[Save New Profile to DB];
-        L --> M[End];
+    subgraph Background Task - Memory Evolution
+        I[Save Current Chat to DB] --> J{Profile Exists?};
+        J --> |No| K[Fetch Recent Chats - Last 10];
+        K --> L[Generate New User Profile];
+        J --> |Yes| M[Fetch Old Profile & Most Recent Chat];
+        M --> N[Update Existing Profile];
+        L --> O[Save Profile to DB];
+        N --> O;
+        O --> P[End];
     end
 
     H --> I;
@@ -83,20 +87,9 @@ python main.py
 ```
 
 ### Option 2: Docker Compose
-**1. Create your docker-compose.yml file**
+**1. Create your .env**
 ```bash
-services:
-  joney-bot:
-    image: jonahgcarpenter/joney-bot:latest
-    environment:
-      - DISCORD_TOKEN=${DISCORD_TOKEN}
-      - OLLAMA_HOST_URL=${OLLAMA_HOST_URL}
-      - DB_HOST=${DB_HOST}
-      - DB_PORT=${DB_PORT}
-      - DB_NAME=${DB_NAME}
-      - DB_USER=${DB_USER}
-      - DB_PASSWORD=${DB_PASSWORD}
-      - DB_SCHEMA=${DB_SCHEMA}
+cp .env.example .env
 ```
 
 **2. Run the Server**
@@ -106,8 +99,5 @@ docker compose up -d
 
 ## Todo
 
-- Create a more robust alternative to check if something is searchable, specifically so the AI does not search for illegal things
-- Multi-stage build process to shrink docker image size?
-- Optimize the system prompts
+- Get better output using trained models instead of system prompts
 - Queue system for multiple request
-- Memory and User context for Discord users
