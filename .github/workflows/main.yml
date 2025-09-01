@@ -1,0 +1,14 @@
+name: Discord Release Notes
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  discord:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Discord Notification
+        uses: SethCohen/github-releases-to-discord@v1
+        with:
+          webhook_url: ${{ secrets.DISCORD_WEBHOOK }}
