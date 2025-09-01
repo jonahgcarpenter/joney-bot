@@ -156,6 +156,36 @@ def get_recent_chats(username: str, limit: int) -> str:
     return "\n\n".join(chat_history)
 
 
+def get_single_most_recent_chat(username: str) -> str | None:
+    """Retrieves only the single most recent chat interaction for a user."""
+    conn = get_db_connection()
+    if conn is None:
+        return None
+
+    try:
+        with conn.cursor() as cur:
+            schema_name = os.getenv("DB_SCHEMA")
+            cur.execute(
+                f"""
+                SELECT prompt, response FROM {schema_name}.chat_logs
+                WHERE username = %s
+                ORDER BY created_at DESC
+                LIMIT 1;
+                """,
+                (username,),
+            )
+            result = cur.fetchone()
+            if result:
+                prompt, response = result
+                return f"User: {prompt}\nOswald: {response}"
+    except Exception as e:
+        log.error(f"Error retrieving most recent chat for user '{username}': {e}")
+    finally:
+        if conn:
+            conn.close()
+    return None
+
+
 def update_user_profile(username: str, profile: str):
     """Saves the AI-generated profile to the user's context."""
     conn = get_db_connection()

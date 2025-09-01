@@ -120,3 +120,27 @@ def get_user_profile_generator_prompt(chat_history: str, username: str) -> str:
         f"User profile generator prompt for '{username}':\n[bold yellow]---PROMPT START---[/bold yellow]\n{profile_prompt}\n[bold yellow]---PROMPT END---[/bold yellow]"
     )
     return profile_prompt
+
+
+# --- User Profile Update ---
+def get_user_profile_updater_prompt(
+    old_context: str, recent_chat: str, username: str
+) -> str:
+    """
+    Creates the prompt for Oswald to update an existing user profile.
+    """
+    update_prompt = (
+        f"{OSWALD_SYSTEM_PROMPT}\n\n"
+        "---YOUR MISSION---\n"
+        f"You are refining your private notes on a user named '{username}'. Below is your EXISTING SUMMARY of them, followed by your MOST RECENT interaction. Your task is to integrate the insights from the recent chat into the existing summary. The final output should be a single, cohesive, updated summary. Do not treat this as a conversation; simply produce the new, complete summary. Keep it concise, under 150 words.\n\n"
+        "---EXISTING SUMMARY---\n"
+        f"{old_context}\n\n"
+        "---MOST RECENT INTERACTION---\n"
+        f"{recent_chat}\n\n"
+        "---YOUR UPDATED SUMMARY OF THE USER---\n"
+    )
+
+    log.debug(
+        f"User profile updater prompt for '{username}':\n[bold yellow]---PROMPT START---[/bold yellow]\n{update_prompt}\n[bold yellow]---PROMPT END---[/bold yellow]"
+    )
+    return update_prompt

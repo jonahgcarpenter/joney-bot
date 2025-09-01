@@ -24,6 +24,7 @@ from tools import intent_analysis, search, vector_db
 from tools.system_prompts import (
     get_final_answer_prompt,
     get_user_profile_generator_prompt,
+    get_user_profile_updater_prompt,
 )
 
 # --- Logging Setup ---
@@ -67,10 +68,10 @@ def process_and_save_background(
     search_queries: list[str] | None = None,
 ):
     """
-    Saves the current chat, then generates and saves a new user profile.
+    Saves chat, then generates or updates the user profile based on context.
     """
     try:
-        # Step 1: Save the current interaction
+        # Step 1: Save the current interaction (no changes here)
         log.debug(f"Saving current chat for '{username}'.")
         prompt_embedding = embedding_model.encode(prompt)
         response_embedding = embedding_model.encode(response)
@@ -83,18 +84,40 @@ def process_and_save_background(
             search_queries,
         )
 
-        # Step 2: Get recent chat history
-        log.debug(f"Fetching recent chat history for '{username}' to generate profile.")
-        chat_history = vector_db.get_recent_chats(username, CONTEXT_SUMMARY_COUNT)
-        if not chat_history:
-            log.warning(
-                f"No chat history for '{username}', skipping profile generation."
-            )
-            return
+        # Step 2: NEW LOGIC - Check for existing user context/profile
+        log.debug(f"Checking for existing profile for '{username}'.")
+        existing_profile = vector_db.get_user_context(username)
+        profile_prompt = None
 
-        # Step 3: Generate a new profile
-        log.info(f"Generating new user profile for '{username}'.")
-        profile_prompt = get_user_profile_generator_prompt(chat_history, username)
+        if not existing_profile:
+            # --- CASE 1: No existing profile. Create one from the last 10 chats. ---
+            log.info(f"No profile found for '{username}'. Generating a new one.")
+            chat_history = vector_db.get_recent_chats(username, CONTEXT_SUMMARY_COUNT)
+            if chat_history:
+                profile_prompt = get_user_profile_generator_prompt(
+                    chat_history, username
+                )
+            else:
+                log.warning(
+                    f"No chat history for '{username}', skipping profile generation."
+                )
+                return
+        else:
+            # --- CASE 2: Profile exists. Update it with the single most recent chat. ---
+            log.info(f"Existing profile found for '{username}'. Updating it.")
+            most_recent_chat = vector_db.get_single_most_recent_chat(username)
+            if most_recent_chat:
+                profile_prompt = get_user_profile_updater_prompt(
+                    existing_profile, most_recent_chat, username
+                )
+            else:
+                log.warning(
+                    f"Could not fetch most recent chat for '{username}', skipping profile update."
+                )
+                return
+
+        # Step 3: Generate the new/updated profile
+        log.info(f"Generating new/updated user profile for '{username}'.")
         profile_response = requests.post(
             f"{OLLAMA_HOST}/api/generate",
             json={"model": model, "prompt": profile_prompt, "stream": False},
