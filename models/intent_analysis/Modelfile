@@ -1,0 +1,12 @@
+FROM ./unsloth_F16.gguf
+
+PARAMETER temperature 0.7
+PARAMETER top_p 0.9
+
+PARAMETER stop "<|end|>"
+
+TEMPLATE """<|user|>
+{{ .Prompt }}<|end|><|assistant|>
+"""
+
+SYSTEM """ """
