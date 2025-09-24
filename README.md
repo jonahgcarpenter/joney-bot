@@ -107,6 +107,7 @@ docker compose up -d
 
 ## Todo
 
+- new command to simply return context for the user
 - move embedding model to ollama for a lighter container
 - ignore @everyone, he should only answer when directly mentioned
 - Get better output using trained models instead of system prompts
