@@ -76,19 +76,32 @@ async def on_message(message: discord.Message):
     if message.author == bot.user:
         return
 
-    if bot.user.mentioned_in(message):
-        # --- NEW: Identify the target user of the prompt ---
+    # Ignore any message containing @everyone or @here
+    if (
+        message.mention_everyone
+        or "@everyone" in message.content
+        or "@here" in message.content
+    ):
+        return
+
+    # Check if the bot was specifically mentioned
+    if bot.user in message.mentions:
+        # --- Clean the prompt by removing the bot's mention ---
+        mention_standard = f"<@{bot.user.id}>"
+        mention_nickname = f"<@!{bot.user.id}>"
+        prompt = (
+            message.content.replace(mention_standard, "")
+            .replace(mention_nickname, "")
+            .strip()
+        )
+
+        # --- Identify if another single user was mentioned ---
         target_user_name = None
-        # Create a list of mentioned users, excluding the bot itself
         other_mentions = [m for m in message.mentions if m.id != bot.user.id]
-        # If there is exactly one other person mentioned, they are the target
         if len(other_mentions) == 1:
-            target_user_name = str(other_mentions[0])  # e.g., "Bando#1234"
-            log.info(f"Identified target user in prompt: {target_user_name}")
+            target_user_name = str(other_mentions[0])
 
-        prompt = message.content.replace(f"<@{bot.user.id}>", "").strip()
-
-        # Resolve all user mentions to their display names for the prompt text
+        # --- Resolve all remaining mentions to display names for the API ---
         if message.mentions:
             for member in message.mentions:
                 if member.id != bot.user.id:
@@ -98,24 +111,21 @@ async def on_message(message: discord.Message):
 
         async with message.channel.typing():
             try:
-                # --- NEW: Add target_user to the payload if they exist ---
                 payload = {"prompt": prompt, "username": username}
                 if target_user_name:
                     payload["target_user"] = target_user_name
-
-                log.debug(f"Sending payload to API: {payload}")
 
                 async with aiohttp.ClientSession() as session:
                     async with session.post(
                         API_WRAPPER_URL, json=payload, timeout=70
                     ) as response:
-                        response.raise_for_status()  # Raises an exception for bad status codes
-
+                        response.raise_for_status()
                         api_data = await response.json()
                         model_response = api_data.get(
                             "response", "Sorry, I received an empty response."
                         )
 
+                # Split and send the response if it exceeds Discord's character limit
                 if len(model_response) > 2000:
                     logging.warning("Response > 2000 chars, splitting.")
                     for i in range(0, len(model_response), 1990):
@@ -130,11 +140,10 @@ async def on_message(message: discord.Message):
             except aiohttp.ClientResponseError as http_err:
                 error_detail = "An unknown error occurred."
                 try:
-                    # Try to get detail from the response if it's JSON
                     error_json = await http_err.json()
                     error_detail = error_json.get("detail", error_detail)
                 except Exception:
-                    pass  # Keep the default error if response is not JSON
+                    pass
                 await message.reply(f"An error occurred with the API: {error_detail}")
                 logging.error(f"HTTPError: {error_detail} (Status: {http_err.status})")
             except asyncio.TimeoutError:
