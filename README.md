@@ -107,7 +107,6 @@ docker compose up -d
 
 ## Todo
 
-- error handling for empty prompt
 - new command to simply return context for the user
 - move embedding model to ollama for a lighter container
 - Get better output using trained models instead of system prompts

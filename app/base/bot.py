@@ -95,6 +95,11 @@ async def on_message(message: discord.Message):
             .strip()
         )
 
+        # --- Handle empty prompts after cleaning ---
+        if not prompt:
+            await message.reply("What the fuck do you want idiot?")
+            return
+
         # --- Identify if another single user was mentioned ---
         target_user_name = None
         other_mentions = [m for m in message.mentions if m.id != bot.user.id]
