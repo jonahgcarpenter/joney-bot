@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import sys
+from urllib.parse import quote
 
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, project_root)
@@ -18,8 +19,10 @@ from dotenv import load_dotenv
 # --- Configuration ---
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
-API_WRAPPER_URL = "http://localhost:8000/generate"
-API_HEALTH_URL = API_WRAPPER_URL.replace("/generate", "/health")
+API_BASE_URL = "http://localhost:8000"
+API_WRAPPER_URL = f"{API_BASE_URL}/generate"
+API_HEALTH_URL = f"{API_BASE_URL}/health"
+API_CONTEXT_URL = f"{API_BASE_URL}/context"
 
 
 # --- Logging Setup ---
@@ -95,9 +98,44 @@ async def on_message(message: discord.Message):
             .strip()
         )
 
+        username = str(message.author)
+
         # --- Handle empty prompts after cleaning ---
         if not prompt:
             await message.reply("What the fuck do you want idiot?")
+            return
+
+        # --- Handle !context command ---
+        if prompt == "!context":
+            log.info(f"User '{username}' requested their context.")
+            async with message.channel.typing():
+                try:
+                    # URL-encode the username to handle special characters like '#'
+                    encoded_username = quote(username)
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(
+                            f"{API_CONTEXT_URL}/{encoded_username}"
+                        ) as response:
+                            if response.status == 200:
+                                data = await response.json()
+                                context = data.get(
+                                    "context", "Context data is missing."
+                                )
+                                reply_message = (
+                                    f"Here is your saved context:\n```\n{context}\n```"
+                                )
+                                await message.reply(reply_message)
+                            elif response.status == 404:
+                                await message.reply(
+                                    "I don't have any context saved for you yet."
+                                )
+                            else:
+                                response.raise_for_status()
+                except Exception as e:
+                    log.error(f"Error fetching context for '{username}': {e}")
+                    await message.reply(
+                        "Sorry, I couldn't retrieve your context due to an error."
+                    )
             return
 
         # --- Identify if another single user was mentioned ---
@@ -111,8 +149,6 @@ async def on_message(message: discord.Message):
             for member in message.mentions:
                 if member.id != bot.user.id:
                     prompt = prompt.replace(member.mention, member.display_name)
-
-        username = str(message.author)
 
         async with message.channel.typing():
             try:

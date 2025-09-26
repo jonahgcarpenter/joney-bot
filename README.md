@@ -6,6 +6,8 @@ This project is my first dive into the world of AI, created as a fun way for me 
 
 The idea was to build a simple, interactive AI chatbot for Discord. There are no complex commands to remember—just mention the bot's user (`@Bot Name`) with your question or prompt, and it will do its best to provide a helpful, interesting, or just plain fun response.
 
+With the new addition of user based context, the command (`@Bot Name !context`) will simply return the context for the user
+
 ## How It Works
 
 The bot follows a structured, multi-step process to decide when to search the web and how to synthesize information into a helpful answer. The core logic is visualized below:
@@ -107,7 +109,6 @@ docker compose up -d
 
 ## Todo
 
-- new command to simply return context for the user
 - move embedding model to ollama for a lighter container
 - Get better output using trained models instead of system prompts
 - Queue system for multiple request

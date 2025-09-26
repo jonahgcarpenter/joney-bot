@@ -217,6 +217,16 @@ async def generate_prompt(
         )
 
 
+@app.get("/context/{username}")
+async def get_user_context_endpoint(username: str):
+    """Fetches the user profile/context from the database."""
+    log.info(f"Received request for context for user '{username}'.")
+    user_context = vector_db.get_user_context(username)
+    if not user_context:
+        raise HTTPException(status_code=404, detail="No context found for this user.")
+    return {"username": username, "context": user_context}
+
+
 @app.on_event("startup")
 async def startup_event():
     vector_db.setup_database()
