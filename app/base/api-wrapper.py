@@ -19,7 +19,6 @@ load_dotenv()
 import requests
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from pydantic import BaseModel
-from sentence_transformers import SentenceTransformer
 from tools import intent_analysis, search, vector_db
 from tools.system_prompts import (
     get_final_answer_prompt,
@@ -33,14 +32,10 @@ log = logging.getLogger(__name__)
 
 # --- Configuration ---
 OLLAMA_HOST = os.getenv("OLLAMA_HOST_URL")
+OLLAMA_EMBEDDING_MODEL = os.getenv("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text:v1.5")
 CONTEXT_SUMMARY_COUNT = int(os.getenv("CONTEXT_SUMMARY_COUNT", 10))
 
-# --- Initialize Model for Embeddings ---
-log.info("Loading sentence transformer model...")
-embedding_model = SentenceTransformer(
-    "nomic-ai/nomic-embed-text-v1.5", trust_remote_code=True
-)
-log.info("Sentence transformer model loaded")
+# --- Initialize App ---
 app = FastAPI()
 
 
@@ -59,6 +54,21 @@ def sanitize_input(prompt: str) -> str:
     return sanitized.strip()
 
 
+def get_ollama_embedding(text_to_embed: str, model: str) -> list[float]:
+    """Generates an embedding for a given text using the Ollama API."""
+    try:
+        response = requests.post(
+            f"{OLLAMA_HOST}/api/embeddings",
+            json={"model": model, "prompt": text_to_embed},
+            timeout=30,
+        )
+        response.raise_for_status()
+        return response.json().get("embedding")
+    except requests.RequestException as e:
+        log.error(f"Failed to get embedding from Ollama for model '{model}': {e}")
+        raise
+
+
 # --- Background Task for Saving and Profiling ---
 def process_and_save_background(
     username: str,
@@ -71,10 +81,15 @@ def process_and_save_background(
     Saves chat, then generates or updates the user profile based on context.
     """
     try:
-        # Step 1: Save the current interaction (no changes here)
+        # Save the current interaction
         log.debug(f"Saving current chat for '{username}'.")
-        prompt_embedding = embedding_model.encode(prompt)
-        response_embedding = embedding_model.encode(response)
+        log.debug(
+            f"Generating embeddings with Ollama model '{OLLAMA_EMBEDDING_MODEL}'."
+        )
+        # Call the new function to get embeddings from Ollama
+        prompt_embedding = get_ollama_embedding(prompt, OLLAMA_EMBEDDING_MODEL)
+        response_embedding = get_ollama_embedding(response, OLLAMA_EMBEDDING_MODEL)
+
         vector_db.save_chat(
             username,
             prompt,
@@ -84,7 +99,7 @@ def process_and_save_background(
             search_queries,
         )
 
-        # Step 2: NEW LOGIC - Check for existing user context/profile
+        # Check for existing user context/profile
         log.debug(f"Checking for existing profile for '{username}'.")
         existing_profile = vector_db.get_user_context(username)
         profile_prompt = None
@@ -116,7 +131,7 @@ def process_and_save_background(
                 )
                 return
 
-        # Step 3: Generate the new/updated profile
+        # Generate the new/updated profile
         log.info(f"Generating new/updated user profile for '{username}'.")
         profile_response = requests.post(
             f"{OLLAMA_HOST}/api/generate",
@@ -126,7 +141,7 @@ def process_and_save_background(
         profile_response.raise_for_status()
         new_profile = profile_response.json().get("response", "").strip()
 
-        # Step 4: Save the new profile
+        # Save the new profile
         if new_profile:
             vector_db.update_user_profile(username, new_profile)
         else:
@@ -223,7 +238,7 @@ async def get_user_context_endpoint(username: str):
     log.info(f"Received request for context for user '{username}'.")
     user_context = vector_db.get_user_context(username)
     if not user_context:
-        raise HTTPException(status_code=404, detail="No context found for this user.")
+        raise HTTPException(status_code=44, detail="No context found for this user.")
     return {"username": username, "context": user_context}
 
 

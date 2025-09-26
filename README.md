@@ -109,6 +109,5 @@ docker compose up -d
 
 ## Todo
 
-- move embedding model to ollama for a lighter container
 - Get better output using trained models instead of system prompts
 - Queue system for multiple request
