@@ -60,7 +60,7 @@ def get_ollama_embedding(text_to_embed: str, model: str) -> list[float]:
         response = requests.post(
             f"{OLLAMA_HOST}/api/embeddings",
             json={"model": model, "prompt": text_to_embed},
-            timeout=30,
+            timeout=60,
         )
         response.raise_for_status()
         return response.json().get("embedding")

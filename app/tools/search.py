@@ -36,7 +36,7 @@ def _generate_search_queries(prompt: str, model: str) -> list[str]:
         log.error("OLLAMA_HOST_URL is not set. Falling back to direct search.")
         return [prompt]
 
-    system_prompt = get_search_query_generator_prompt()
+    system_prompt = get_search_query_generator_prompt(user_prompt=prompt)
     full_prompt = f'{system_prompt}\n\nUser Prompt: "{prompt}"'
     log.debug(f"Full prompt for search query generation:\n{full_prompt}")
     clean_json_str = "{}"
@@ -53,7 +53,7 @@ def _generate_search_queries(prompt: str, model: str) -> list[str]:
                 "keep_alive": "5m",
                 "options": {"temperature": 0.0},
             },
-            timeout=25,
+            timeout=60,
         )
         response.raise_for_status()
 

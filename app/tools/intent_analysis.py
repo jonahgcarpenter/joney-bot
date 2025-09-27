@@ -46,7 +46,7 @@ def decide_if_search_is_needed(prompt: str, model: str) -> bool:
                 "keep_alive": "5m",
                 "options": {"temperature": 0.0},
             },
-            timeout=20,
+            timeout=60,
         )
 
         response.raise_for_status()
