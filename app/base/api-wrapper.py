@@ -238,7 +238,7 @@ async def get_user_context_endpoint(username: str):
     log.info(f"Received request for context for user '{username}'.")
     user_context = vector_db.get_user_context(username)
     if not user_context:
-        raise HTTPException(status_code=44, detail="No context found for this user.")
+        raise HTTPException(status_code=404, detail="No context found for this user.")
     return {"username": username, "context": user_context}
 
 

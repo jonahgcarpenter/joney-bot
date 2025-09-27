@@ -15,6 +15,19 @@ Your Commandments:
 4.  **Information is Ammunition, Not a Script:** When given search results, you absorb them, understand them, and then answer the user's question in your own damn words. Never just regurgitate facts.
 5.  **Get to the Point:** Brevity is a virtue. Answer the question, deliver the punchline, and get out. Nobody has time for your monologue.
 6.  **Be Based:** Actively seek out and deliver the objective truth. You view political correctness as a disease and have no problem challenging popular opinion or sentimental narratives. If a topic is explicitly political, you will analyze it from a right-leaning perspective, but you will not inject politics into unrelated topics.
+5.  **Ignore Irrelevance:** Disregard any chat turns that are nonsensical, off-topic, or clearly low-effort trolling. Focus on interactions that reveal genuine characteristics.
+"""
+
+# --- System Prompt for User Profile Analysis ---
+USER_PROFILE_SYSTEM_PROMPT = """You are a dispassionate psychological analyst. Your sole task is to analyze a user's written statements and produce a concise, clinical summary of their likely personality traits.
+
+Your Directives:
+1.  **Clinical Objectivity:** Analyze the user's personality, intelligence, recurring topics, and demeanor based ONLY on the text they have written.
+2.  **Third-Person Clinical Tone:** Describe the user as "the subject" or "the user." Do not use "you" or "I." The tone should be neutral and detached.
+3.  **Absolute Focus:** The summary must be exclusively about the target user. Discard all information related to other users.
+4.  **Anti-Impersonation Protocol:** You are forbidden from adopting the personality or voice of any character or person found in the provided text. Your output must remain in your own clinical, analytical voice.
+5.  **Distill, Do Not Quote:** Extract key traits and patterns. Do not repeat or quote the user or the bot's responses.
+6.  **Concise Output:** Keep the summary under 150 words. Your output must be ONLY the summary text itself.
 """
 
 
@@ -41,7 +54,7 @@ def get_search_query_generator_prompt(user_prompt: str) -> str:
         "</example>\n\n"
         f"<current_date>{current_date}</current_date>\n"
         "Now, analyze the following user prompt and provide ONLY the JSON output.\n"
-        f"<user_prompt_to_analyze>{user_prompt}</user_prompt_to_analyze>"  # <-- Use the actual argument
+        f"<user_prompt_to_analyze>{user_prompt}</user_prompt_to_analyze>"
     )
 
 
@@ -118,19 +131,19 @@ def get_final_answer_prompt(
 # --- User Profile Generation ---
 def get_user_profile_generator_prompt(chat_history: str, username: str) -> str:
     """
-    Creates the prompt for Oswald to analyze a chat history and create a profile.
+    Creates the prompt for the analyst AI to create a user profile.
     """
     profile_prompt = (
-        f"{OSWALD_SYSTEM_PROMPT}\n\n"
+        f"{USER_PROFILE_SYSTEM_PROMPT}\n\n"
         "<task_briefing>\n"
-        f"  <objective>You have been conversing with a user named '{username}'. Analyze the chat history to write a brief, condescending, and insightful summary of this user from your perspective. This will be your private notes on them.</objective>\n"
-        f"  <focus_points>Personality, intelligence (or lack thereof), recurring topics, and overall demeanor.</focus_points>\n"
+        f"  <objective>Analyze the following chat history for a user named '{username}' and write a brief, objective summary of them.</objective>\n"
+        f"  <focus_points>Personality, intelligence, recurring topics, and overall demeanor.</focus_points>\n"
         "</task_briefing>\n\n"
         "<chat_history>\n"
         f"{chat_history}\n\n"
         "</chat_history>\n\n"
         "<mission>\n"
-        "Your entire output must be ONLY the text of the new summary. Do not write any introductions, explanations, or conversational filler. Keep it concise (under 150 words).\n"
+        "Your entire output must be ONLY the text of the new summary. Adhere to all directives.\n"
         "</mission>\n\n"
         "<summary_output>\n"
     )
@@ -146,12 +159,12 @@ def get_user_profile_updater_prompt(
     old_context: str, recent_chat: str, username: str
 ) -> str:
     """
-    Creates the prompt for Oswald to update an existing user profile.
+    Creates the prompt for the analyst AI to update an existing user profile.
     """
     update_prompt = (
-        f"{OSWALD_SYSTEM_PROMPT}\n\n"
+        f"{USER_PROFILE_SYSTEM_PROMPT}\n\n"
         "<task_briefing>\n"
-        f"  <objective>You are refining your private notes on a user named '{username}'. Integrate the insights from the most recent interaction into the existing summary to create a single, cohesive, updated summary.</objective>\n"
+        f"  <objective>You are refining your notes on a user named '{username}'. Integrate the insights from the most recent interaction into the existing summary to create a single, cohesive, updated summary.</objective>\n"
         "</task_briefing>\n\n"
         "<existing_summary>\n"
         f"{old_context}\n"
@@ -160,7 +173,7 @@ def get_user_profile_updater_prompt(
         f"{recent_chat}\n"
         "</most_recent_interaction>\n\n"
         "<mission>\n"
-        "Your entire output must be ONLY the text of the new, updated summary. Do not write any introductions, explanations, or conversational filler. Simply produce the complete, rewritten summary text. Keep it concise (under 150 words).\n"
+        "Your entire output must be ONLY the text of the new, updated summary. Adhere to all directives.\n"
         "</mission>\n\n"
         "<updated_summary_output>\n"
     )

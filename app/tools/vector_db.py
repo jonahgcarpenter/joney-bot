@@ -125,39 +125,40 @@ def get_user_context(username: str) -> str | None:
 
 
 def get_recent_chats(username: str, limit: int) -> str:
-    """Retrieves the most recent chat interactions for a user."""
+    """Retrieves only the user's most recent prompts for analysis."""
     conn = get_db_connection()
     if conn is None:
         return ""
 
-    chat_history = []
+    user_prompts = []
     try:
         with conn.cursor() as cur:
             schema_name = os.getenv("DB_SCHEMA")
             cur.execute(
                 f"""
-                SELECT prompt, response FROM {schema_name}.chat_logs
+                SELECT prompt FROM {schema_name}.chat_logs
                 WHERE username = %s
                 ORDER BY created_at DESC
                 LIMIT %s;
                 """,
                 (username, limit),
             )
-            # Fetch results and format them, then reverse to get chronological order
-            results = cur.fetchall()
-            for prompt, response in reversed(results):
-                chat_history.append(f"User: {prompt}\nOswald: {response}")
+            # Fetch just the prompts and reverse for chronological order
+            results = reversed(cur.fetchall())
+            for row in results:
+                user_prompts.append(row[0])
     except Exception as e:
         log.error(f"Error retrieving recent chats for user '{username}': {e}")
     finally:
         if conn:
             conn.close()
 
-    return "\n\n".join(chat_history)
+    # Join prompts into a single block of text for analysis
+    return "\n".join(user_prompts)
 
 
 def get_single_most_recent_chat(username: str) -> str | None:
-    """Retrieves only the single most recent chat interaction for a user."""
+    """Retrieves only the user's single most recent prompt for analysis."""
     conn = get_db_connection()
     if conn is None:
         return None
@@ -167,7 +168,7 @@ def get_single_most_recent_chat(username: str) -> str | None:
             schema_name = os.getenv("DB_SCHEMA")
             cur.execute(
                 f"""
-                SELECT prompt, response FROM {schema_name}.chat_logs
+                SELECT prompt FROM {schema_name}.chat_logs
                 WHERE username = %s
                 ORDER BY created_at DESC
                 LIMIT 1;
@@ -176,8 +177,8 @@ def get_single_most_recent_chat(username: str) -> str | None:
             )
             result = cur.fetchone()
             if result:
-                prompt, response = result
-                return f"User: {prompt}\nOswald: {response}"
+                # Return only the prompt text
+                return result[0]
     except Exception as e:
         log.error(f"Error retrieving most recent chat for user '{username}': {e}")
     finally:
