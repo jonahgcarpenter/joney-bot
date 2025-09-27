@@ -3,7 +3,4 @@ __pycache__/
 .env
 
 # Model Training
-training/
-!training/requirements.txt
-!training/training.ipynb
 *.gguf
