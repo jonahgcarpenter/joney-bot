@@ -24,8 +24,8 @@ type Config struct {
 	LLMGatewayEmbeddingModel        string          // Optional LLM gateway embedding model used for semantic durable-memory retrieval
 	LLMGatewayAPIKey                string          // Optional bearer token for LLM gateway requests
 	LLMGatewayVirtualKey            string          // Optional gateway routing key for LLM gateway requests
-	ModelContextWindow              int             // Optional model context-window override for prompt budgeting
-	ModelMaxOutputTokens            int             // Optional model output-token reserve override for prompt budgeting
+	ModelContextWindow              int             // Optional model context window for prompt budgeting; non-positive uses the package fallback
+	ModelMaxOutputTokens            int             // Optional model output-token reserve for prompt budgeting; non-positive uses the package fallback
 	DiscordToken                    string          // Optional Discord bot token
 	BraveAPIKey                     string          // Optional Brave Search API subscription token
 	SearxngURL                      string          // Optional SearXNG base URL for web search
