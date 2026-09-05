@@ -399,7 +399,7 @@ Behavior:
 - Session keys are `homeassistant:<ha-user-id>:<conversation-id>`; different users and conversations remain isolated
 - Emits request-correlated `thinking`, `content`, `tool_call`, and `tool_result` frames followed by exactly one `result` or `error` frame
 - Closes the socket normally after the terminal frame; account invalidation can close an active matching user connection
-- Supports text requests only; images and command attachments are not supported
+- Supports text requests only; textual command attachments are returned inline as plain text, while images and binary attachments are not supported
 - `/bootstrap <code>` may be claimed by an authenticated Home Assistant user
 
 ### Discord Gateway
