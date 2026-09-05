@@ -60,7 +60,7 @@ func (e *LLMExtractor) Compact(ctx context.Context, previous *usermemory.Session
 	temperature := 0.0
 	resp, err := e.client.Chat(ctx, llm.ChatRequest{
 		Model: e.model, Messages: messages, Tools: []llm.Tool{e.tool}, ToolChoice: llm.ToolChoiceRequired,
-		ParallelToolCalls: &parallelToolCalls, Temperature: &temperature, MaxTokens: e.maxTokens,
+		ParallelToolCalls: &parallelToolCalls, Temperature: &temperature, MaxTokens: e.maxTokens, Stream: true,
 	}, nil)
 	if err != nil {
 		if llm.IsPermanentChatProviderError(err) {

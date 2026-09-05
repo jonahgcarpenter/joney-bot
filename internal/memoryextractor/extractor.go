@@ -178,7 +178,7 @@ func (e *LLMExtractor) ExtractPatterns(ctx context.Context, turns []usermemory.S
 	parallelToolCalls := false
 	temperature := 0.0
 	prompt := patternExtractionPolicyPrompt + structuredRetryInstruction(previousErrorCode, userMemoryPatternToolName, `{"patterns":[]}`)
-	resp, err := e.client.Chat(ctx, llm.ChatRequest{Model: e.model, Messages: []llm.ChatMessage{{Role: "system", Content: prompt}, {Role: "user", Content: string(payload)}}, Tools: []llm.Tool{e.patternTool}, ToolChoice: llm.ToolChoiceRequired, ParallelToolCalls: &parallelToolCalls, Temperature: &temperature, MaxTokens: e.maxTokens}, nil)
+	resp, err := e.client.Chat(ctx, llm.ChatRequest{Model: e.model, Messages: []llm.ChatMessage{{Role: "system", Content: prompt}, {Role: "user", Content: string(payload)}}, Tools: []llm.Tool{e.patternTool}, ToolChoice: llm.ToolChoiceRequired, ParallelToolCalls: &parallelToolCalls, Temperature: &temperature, MaxTokens: e.maxTokens, Stream: true}, nil)
 	if err != nil {
 		if llm.IsPermanentChatProviderError(err) {
 			return usermemory.MemoryPatternBatch{}, errors.Join(ErrPermanentExtraction, fmt.Errorf("memory pattern extraction: %w", err))
@@ -247,6 +247,7 @@ func (e *LLMExtractor) Extract(ctx context.Context, turn usermemory.StoredSessio
 		ParallelToolCalls: &parallelToolCalls,
 		Temperature:       &temperature,
 		MaxTokens:         e.maxTokens,
+		Stream:            true,
 	}, nil)
 	if err != nil {
 		if llm.IsPermanentChatProviderError(err) {

@@ -25,6 +25,7 @@ type fakeExtractor struct {
 	submitted     int
 	malformed     int
 	err           error
+	preempt       func()
 	calls         int
 	lastErrorCode string
 }
@@ -36,6 +37,7 @@ type fakePatternExtractor struct {
 	patternCalls  int
 	turnIDs       []int64
 	lastErrorCode string
+	preempt       func()
 }
 
 func (f *fakePatternExtractor) ExtractPatterns(_ context.Context, turns []usermemory.StoredSessionTurn, lastErrorCode string) (usermemory.MemoryPatternBatch, error) {
@@ -44,6 +46,9 @@ func (f *fakePatternExtractor) ExtractPatterns(_ context.Context, turns []userme
 	f.turnIDs = f.turnIDs[:0]
 	for _, turn := range turns {
 		f.turnIDs = append(f.turnIDs, turn.ID)
+	}
+	if f.preempt != nil {
+		f.preempt()
 	}
 	return f.patterns, f.patternErr
 }
@@ -59,6 +64,16 @@ type canceledLowPriorityGate struct{}
 func (canceledLowPriorityGate) TryAcquireLowPriority(parent context.Context) (context.Context, func(), bool) {
 	ctx, cancel := context.WithCancel(parent)
 	cancel()
+	return ctx, func() {}, true
+}
+
+type preemptibleLowPriorityGate struct {
+	cancel context.CancelFunc
+}
+
+func (g *preemptibleLowPriorityGate) TryAcquireLowPriority(parent context.Context) (context.Context, func(), bool) {
+	ctx, cancel := context.WithCancel(parent)
+	g.cancel = cancel
 	return ctx, func() {}, true
 }
 
@@ -111,6 +126,9 @@ func TestFormationWarningRetryAndDeadStatuses(t *testing.T) {
 func (f *fakeExtractor) Extract(_ context.Context, _ usermemory.StoredSessionTurn, lastErrorCode string) (usermemory.MemorySaveBatch, error) {
 	f.calls++
 	f.lastErrorCode = lastErrorCode
+	if f.preempt != nil {
+		f.preempt()
+	}
 	submitted := f.submitted
 	if submitted == 0 && len(f.candidates) > 0 {
 		submitted = len(f.candidates)
@@ -630,6 +648,57 @@ func TestServiceRefundsFormationSubmissionBeforeProviderAcceptance(t *testing.T)
 	var submissions int
 	if err := db.SQL().QueryRow(`SELECT model_submission_count FROM durable_jobs WHERE id = ?`, job.ID).Scan(&submissions); err != nil || submissions != 0 {
 		t.Fatalf("pre-acceptance submissions=%d err=%v", submissions, err)
+	}
+}
+
+func TestServiceForegroundPreemptionNeverConsumesFormationBudget(t *testing.T) {
+	store, db := formationTestStoreWithDB(t)
+	turnID := formationTestTurn(t, store, "I use Go", "started-preempt")
+	gate := &preemptibleLowPriorityGate{}
+	extractor := &fakeExtractor{preempt: func() { gate.cancel() }, err: &llm.ProviderRequestStartedError{Cause: context.Canceled}}
+	service := NewService(store, extractor, "model", config.NewLogger(config.LevelError))
+	service.SetLowPriorityGate(gate)
+	jobID, err := store.EnqueueFormationJob(context.Background(), usermemory.FormationSource{RequestID: "started-preempt", SessionID: "session", SessionGeneration: 1, TurnID: turnID, Model: "model", ExtractorVersion: usermemory.FormationExtractorVersion}, "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 5; i++ {
+		service.drain(context.Background())
+		var state, code string
+		var attempts, submissions int
+		if err := db.SQL().QueryRow(`SELECT state, attempt_count, last_error_code, model_submission_count FROM durable_jobs WHERE id = ?`, jobID).Scan(&state, &attempts, &code, &submissions); err != nil {
+			t.Fatal(err)
+		}
+		if state != "retry" || attempts != 0 || submissions != 0 || code != "foreground_preempted" || extractor.calls != i+1 {
+			t.Fatalf("iteration=%d state=%q attempts=%d submissions=%d code=%q calls=%d", i, state, attempts, submissions, code, extractor.calls)
+		}
+		makeFormationJobReady(t, db, jobID)
+	}
+}
+
+func TestServiceForegroundPreemptionRefundsPatternSubmission(t *testing.T) {
+	store, db := formationTestStoreWithDB(t)
+	_ = formationTestTurn(t, store, "I keep reviews concise.", "pattern-preempt-1")
+	anchorID := formationTestTurn(t, store, "I still keep reviews concise.", "pattern-preempt-2")
+	gate := &preemptibleLowPriorityGate{}
+	extractor := &fakePatternExtractor{patternErr: &llm.ProviderRequestStartedError{Cause: context.Canceled}}
+	extractor.preempt = func() { gate.cancel() }
+	service := NewService(store, extractor, "model", config.NewLogger(config.LevelError))
+	service.SetLowPriorityGate(gate)
+	jobID, created, err := store.EnqueuePatternFormationJob(context.Background(), usermemory.FormationSource{RequestID: "pattern-preempt-2", SessionID: "session", SessionGeneration: 1, TurnID: anchorID, Model: "model"}, "user-1")
+	if err != nil || !created {
+		t.Fatalf("enqueue id=%d created=%v err=%v", jobID, created, err)
+	}
+
+	service.drain(context.Background())
+	var state, code string
+	var attempts, submissions int
+	if err := db.SQL().QueryRow(`SELECT state, attempt_count, last_error_code, model_submission_count FROM durable_jobs WHERE id = ?`, jobID).Scan(&state, &attempts, &code, &submissions); err != nil {
+		t.Fatal(err)
+	}
+	if state != "retry" || attempts != 0 || submissions != 0 || code != "foreground_preempted" || extractor.patternCalls != 1 {
+		t.Fatalf("state=%q attempts=%d submissions=%d code=%q calls=%d", state, attempts, submissions, code, extractor.patternCalls)
 	}
 }
 

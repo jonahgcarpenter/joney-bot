@@ -54,8 +54,8 @@ func TestLLMExtractorParsesStructuredSummaryWithEmptyCandidates(t *testing.T) {
 	if request.Temperature == nil || *request.Temperature != 0 {
 		t.Fatalf("temperature=%v", request.Temperature)
 	}
-	if request.MaxTokens != 8192 || request.Format != "" {
-		t.Fatalf("max tokens=%d format=%q", request.MaxTokens, request.Format)
+	if request.MaxTokens != 8192 || request.Format != "" || !request.Stream {
+		t.Fatalf("max tokens=%d format=%q stream=%t", request.MaxTokens, request.Format, request.Stream)
 	}
 	if len(request.Tools) != 1 || request.Tools[0].Function.Name != sessionSummarySaveToolName {
 		t.Fatalf("tools=%+v", request.Tools)

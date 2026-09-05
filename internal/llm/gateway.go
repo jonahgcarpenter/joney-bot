@@ -247,21 +247,29 @@ type asyncHTTPError struct {
 	Body       string
 }
 
-// AsyncJobWaitError marks a failure that happened after Bifrost accepted an
-// async job. The remote inference may continue after local cancellation.
-type AsyncJobWaitError struct {
+// ProviderRequestStartedError marks a failure after Bifrost accepted a model
+// request. The provider may have performed work before cancellation completed.
+type ProviderRequestStartedError struct {
 	Cause error
 }
 
-func (e *AsyncJobWaitError) Error() string {
-	return fmt.Sprintf("wait for accepted LLM gateway async job: %v", e.Cause)
+func (e *ProviderRequestStartedError) Error() string {
+	return fmt.Sprintf("wait for accepted LLM gateway request: %v", e.Cause)
 }
-func (e *AsyncJobWaitError) Unwrap() error { return e.Cause }
+func (e *ProviderRequestStartedError) Unwrap() error { return e.Cause }
+
+// AsyncJobWaitError is retained as the accepted-request marker for async callers.
+type AsyncJobWaitError = ProviderRequestStartedError
+
+// WasProviderRequestStarted reports whether Bifrost accepted the request before it failed locally.
+func WasProviderRequestStarted(err error) bool {
+	var startedErr *ProviderRequestStartedError
+	return errors.As(err, &startedErr)
+}
 
 // WasAsyncJobSubmitted reports whether Bifrost accepted the request before it failed locally.
 func WasAsyncJobSubmitted(err error) bool {
-	var waitErr *AsyncJobWaitError
-	return errors.As(err, &waitErr)
+	return WasProviderRequestStarted(err)
 }
 
 func (e *asyncHTTPError) Error() string {
@@ -444,7 +452,14 @@ func (c *GatewayClient) Chat(ctx context.Context, req ChatRequest, chatStreamCal
 		if chatStreamCallback == nil {
 			chatStreamCallback = func(ChatMessage) {}
 		}
-		return c.readChatStream(ctx, resp, req.Model, startedAt, chatStreamCallback)
+		chatResp, streamErr := c.readChatStream(ctx, resp, req.Model, startedAt, chatStreamCallback)
+		if streamErr != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			if ctx.Err() != nil {
+				streamErr = ctx.Err()
+			}
+			return nil, &ProviderRequestStartedError{Cause: streamErr}
+		}
+		return chatResp, streamErr
 	}
 	rawBody, _, err := c.runAsync(ctx, "/v1/async/chat/completions", payloadBytes)
 	if err != nil {

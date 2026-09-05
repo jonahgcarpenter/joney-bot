@@ -458,6 +458,83 @@ func TestGatewayClientChatStreamAccumulatesContentThinkingAndTools(t *testing.T)
 	}
 }
 
+func TestGatewayClientChatStreamSupportsNilCallback(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("stream path = %q", r.URL.Path)
+		}
+		var request struct {
+			Stream bool `json:"stream"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		if !request.Stream {
+			t.Fatal("streaming request did not set stream=true")
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"memory.save\",\"arguments\":\"{\\\"ok\\\":\"}}]}}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"finish_reason\":\"tool_calls\",\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"true}\"}}]}}]}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	client := newTestGatewayClient(server.URL, "", "", config.NewLogger(config.LevelError))
+	resp, err := client.Chat(context.Background(), ChatRequest{Model: "model", Stream: true}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Message.ToolCalls) != 1 || resp.Message.ToolCalls[0].Function.Arguments["ok"] != true {
+		t.Fatalf("tool calls=%+v", resp.Message.ToolCalls)
+	}
+}
+
+func TestGatewayClientChatStreamCancellationStopsAcceptedRequest(t *testing.T) {
+	established := make(chan struct{}, 1)
+	disconnected := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"reasoning\":\"started\"}}]}\n\n"))
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+		close(disconnected)
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	client := newTestGatewayClient(server.URL, "", "", config.NewLogger(config.LevelError))
+	result := make(chan error, 1)
+	go func() {
+		_, err := client.Chat(ctx, ChatRequest{Model: "model", Stream: true}, func(ChatMessage) {
+			select {
+			case established <- struct{}{}:
+			default:
+			}
+		})
+		result <- err
+	}()
+
+	select {
+	case <-established:
+	case <-time.After(time.Second):
+		t.Fatal("stream was not established")
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) || !WasProviderRequestStarted(err) {
+			t.Fatalf("error=%v started=%t", err, WasProviderRequestStarted(err))
+		}
+	case <-time.After(time.Second):
+		t.Fatal("stream cancellation did not return promptly")
+	}
+	select {
+	case <-disconnected:
+	case <-time.After(time.Second):
+		t.Fatal("server did not observe stream cancellation")
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func newTestGatewayClient(baseURL, apiKey, virtualKey string, log *config.Logger) *GatewayClient {

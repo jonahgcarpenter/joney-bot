@@ -1224,8 +1224,8 @@ WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ?`, job.I
 	return 0, ErrStaleFormationJobLease
 }
 
-// RefundFormationModelSubmission restores only the reservation owned by the
-// exact live lease when provider submission was never accepted.
+// RefundFormationModelSubmission restores the current reservation owned by
+// the exact live lease when foreground work intentionally preempts it.
 func (s *Store) RefundFormationModelSubmission(ctx context.Context, job FormationJob) error {
 	if job.Purpose == FormationPurposeAgentSave || job.ModelSubmissionCount <= 0 {
 		return fmt.Errorf("refund memory formation model submission: invalid reservation")

@@ -362,6 +362,7 @@ func (s *Service) generateArtifact(ctx context.Context, job *usermemory.SessionC
 	}
 	var artifact usermemory.SummaryArtifact
 	renewedJob := *job
+	submissionReserved := false
 	err = leaseruntime.Run(extractParent, s.lease,
 		func(renewCtx context.Context) error {
 			leaseUntil, renewErr := s.store.RenewSessionCompactionJobLease(renewCtx, renewedJob, s.lease)
@@ -379,6 +380,7 @@ func (s *Service) generateArtifact(ctx context.Context, job *usermemory.SessionC
 				return reserveErr
 			}
 			renewedJob.ModelSubmissionCount = count
+			submissionReserved = true
 			artifact, compactErr = s.extractor.Compact(extractCtx, previous, turns, renewedJob.CorrectiveErrorCode)
 			return compactErr
 		},
@@ -388,14 +390,13 @@ func (s *Service) generateArtifact(ctx context.Context, job *usermemory.SessionC
 	release()
 	release = func() {}
 	if wasPreempted {
-		if err != nil && !llm.WasAsyncJobSubmitted(err) && renewedJob.ModelSubmissionCount > 0 {
+		if submissionReserved {
 			if refundErr := s.store.RefundSessionCompactionModelSubmission(context.Background(), renewedJob); refundErr != nil {
 				return usermemory.SummaryArtifact{}, refundErr
 			}
 			job.ModelSubmissionCount--
-			return usermemory.SummaryArtifact{}, errLowPriorityUnavailable
 		}
-		return usermemory.SummaryArtifact{}, errProviderPreempted
+		return usermemory.SummaryArtifact{}, errLowPriorityUnavailable
 	}
 	if err != nil {
 		return usermemory.SummaryArtifact{}, err
