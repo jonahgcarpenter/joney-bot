@@ -4,12 +4,11 @@ import (
 	"encoding/json"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
-	"github.com/jonahgcarpenter/oswald-ai/internal/modelinfo"
 )
 
 const (
-	defaultContextWindow   = 4096
-	defaultResponseReserve = 1024
+	defaultContextWindow   = 32768
+	defaultResponseReserve = 8192
 	defaultToolReserve     = 768
 	defaultSafetyMargin    = 256
 	messageTokenOverhead   = 12
@@ -24,7 +23,6 @@ type ContextBudget struct {
 	ToolReserve     int
 	SafetyMargin    int
 	PromptLimit     int
-	Source          string
 }
 
 // UsableInputLimit returns the model input capacity after output and safety
@@ -58,26 +56,20 @@ func (b ContextBudget) PromptBudget() int {
 	return limit
 }
 
-// FromModelDetails derives prompt-budget settings from discovered model metadata.
-func FromModelDetails(details modelinfo.Details) ContextBudget {
+// NewContextBudget derives prompt-budget settings from configured model limits.
+// Non-positive limits use conservative package defaults.
+func NewContextBudget(contextWindow, maxOutputTokens int) ContextBudget {
 	budget := ContextBudget{
 		ContextWindow:   defaultContextWindow,
 		ResponseReserve: defaultResponseReserve,
 		ToolReserve:     defaultToolReserve,
 		SafetyMargin:    defaultSafetyMargin,
-		Source:          "fallback",
 	}
-	if details.ContextWindow > 0 {
-		budget.ContextWindow = details.ContextWindow
+	if contextWindow > 0 {
+		budget.ContextWindow = contextWindow
 	}
-	if details.MaxInputTokens > 0 {
-		budget.PromptLimit = details.MaxInputTokens
-	}
-	if details.MaxOutputTokens > 0 {
-		budget.ResponseReserve = details.MaxOutputTokens
-	}
-	if details.Source != "" {
-		budget.Source = details.Source
+	if maxOutputTokens > 0 {
+		budget.ResponseReserve = maxOutputTokens
 	}
 	return budget
 }

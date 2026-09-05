@@ -5,19 +5,35 @@ import (
 	"testing"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
-	"github.com/jonahgcarpenter/oswald-ai/internal/modelinfo"
 )
 
-func TestContextBudgetUsesTightestRealInputLimit(t *testing.T) {
-	budget := FromModelDetails(modelinfo.Details{ContextWindow: 10000, MaxInputTokens: 4321, MaxOutputTokens: 999, Source: "test"})
-	if budget.UsableInputLimit() != 4065 || budget.ResponseReserve != 999 || budget.Source != "test" {
-		t.Fatalf("unexpected budget: %+v", budget)
+func TestNewContextBudgetUsesConfiguredLimitsAndFallbacks(t *testing.T) {
+	tests := []struct {
+		name                 string
+		contextWindow        int
+		maxOutputTokens      int
+		wantContextWindow    int
+		wantResponseReserve  int
+		wantUsableInputLimit int
+	}{
+		{name: "configured", contextWindow: 10000, maxOutputTokens: 999, wantContextWindow: 10000, wantResponseReserve: 999, wantUsableInputLimit: 8745},
+		{name: "defaults", wantContextWindow: 32768, wantResponseReserve: 8192, wantUsableInputLimit: 24320},
+		{name: "context configured", contextWindow: 16000, wantContextWindow: 16000, wantResponseReserve: 8192, wantUsableInputLimit: 7552},
+		{name: "output configured", maxOutputTokens: 2048, wantContextWindow: 32768, wantResponseReserve: 2048, wantUsableInputLimit: 30464},
+		{name: "negative values", contextWindow: -1, maxOutputTokens: -1, wantContextWindow: 32768, wantResponseReserve: 8192, wantUsableInputLimit: 24320},
 	}
-	if budget.PromptBudget() != 3297 {
-		t.Fatalf("legacy prompt budget = %d, want 3297", budget.PromptBudget())
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			budget := NewContextBudget(tt.contextWindow, tt.maxOutputTokens)
+			if budget.ContextWindow != tt.wantContextWindow || budget.ResponseReserve != tt.wantResponseReserve || budget.UsableInputLimit() != tt.wantUsableInputLimit {
+				t.Fatalf("unexpected budget: %+v", budget)
+			}
+		})
 	}
+}
 
-	budget = ContextBudget{ContextWindow: 100, ResponseReserve: 100, ToolReserve: 100, SafetyMargin: 100}
+func TestContextBudgetCannotExceedCapacity(t *testing.T) {
+	budget := NewContextBudget(100, 100)
 	if budget.UsableInputLimit() != 0 || budget.PromptBudget() != 0 {
 		t.Fatalf("budget must not exceed actual capacity: %+v", budget)
 	}

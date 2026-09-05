@@ -21,7 +21,6 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/maintenanceruntime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/mcp"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memoryextractor"
-	"github.com/jonahgcarpenter/oswald-ai/internal/modelinfo"
 	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/runtimeinvalidation"
 	"github.com/jonahgcarpenter/oswald-ai/internal/sessionruntime"
@@ -55,20 +54,13 @@ func main() {
 
 	llmClient := llm.NewGatewayClient(cfg.LLMGatewayURL, cfg.LLMGatewayAPIKey, cfg.LLMGatewayVirtualKey, rootLog)
 
-	details, budgetErr := modelinfo.Resolve(context.Background(), cfg, rootLog)
-	budget := promptbudget.FromModelDetails(details)
-	if budgetErr != nil {
-		log.Warn("app.context_budget.resolve_failed", "failed to discover context budget",
-			config.F("model", cfg.LLMGatewayModel),
-			config.ErrorField(budgetErr),
-		)
-	}
-	log.Info("app.context_budget.resolved", "resolved context budget",
+	budget := promptbudget.NewContextBudget(cfg.ModelContextWindow, cfg.ModelMaxOutputTokens)
+	log.Info("app.context_budget.configured", "configured context budget",
 		config.F("model", cfg.LLMGatewayModel),
-		config.F("provider", details.Provider),
 		config.F("context_window", budget.ContextWindow),
+		config.F("max_output_tokens", budget.ResponseReserve),
+		config.F("usable_input_limit", budget.UsableInputLimit()),
 		config.F("prompt_budget", budget.PromptBudget()),
-		config.F("source", budget.Source),
 	)
 
 	// The operator-managed soul file is read fresh for every request and used as

@@ -50,10 +50,9 @@ Current layers:
 18. `internal/mcp/` — MCP client sessions and discovered tools
 19. `internal/media/` — image validation, normalization, and unsupported-file prompt notes
 20. `internal/llm/` — OpenAI-compatible LLM gateway client and provider-neutral request/response schema
-21. `internal/modelinfo/` — model metadata resolution with environment overrides and safe defaults
-22. `internal/indexruntime/` - serialized derived-index outbox and shadow-revision worker
-23. `internal/maintenanceruntime/` - serialized retention, consistency, and SQLite hygiene worker
-24. `internal/runtimeinvalidation/` - in-process authorization and gateway-cache invalidation
+21. `internal/indexruntime/` - serialized derived-index outbox and shadow-revision worker
+22. `internal/maintenanceruntime/` - serialized retention, consistency, and SQLite hygiene worker
+23. `internal/runtimeinvalidation/` - in-process authorization and gateway-cache invalidation
 
 ## Startup Flow
 
@@ -63,7 +62,7 @@ Current layers:
 2. Create the shared logger and validate required LLM gateway settings
 3. Prepare the configured LLM gateway endpoint and authentication
 4. Create the LLM gateway client
-5. Resolve context budget from `MODEL_*` environment overrides or package defaults
+5. Configure the context budget from `MODEL_*` environment values or package defaults
 6. Create the soul store
 7. Open the user-memory SQLite handle, install retention policy, and apply or validate the permanent ordered schema migrations
 8. Open separate MCP and account-link handles to the same database; each open reruns idempotent ordered initialization under the process schema mutex
@@ -361,11 +360,10 @@ Prompt-budget behavior:
 
 Context budgeting lives in `internal/promptbudget/`.
 
-- Oswald uses an OpenAI-compatible model gateway at runtime, but does not depend on live model-provider access during tests
-- `MODEL_CONTEXT_WINDOW` and `MODEL_MAX_OUTPUT_TOKENS` provide explicit context-budget overrides
-- Max input tokens are derived as context window minus max output tokens when possible
-- If overrides do not provide a field, package defaults are used
-- Startup always attempts a public OpenRouter model-catalog request before applying overrides and fallbacks. Catalog failure is logged as degraded and does not stop startup; deployments that block outbound access should set `MODEL_CONTEXT_WINDOW` and `MODEL_MAX_OUTPUT_TOKENS` explicitly for accurate budgeting
+- Oswald uses an OpenAI-compatible model gateway at runtime and does not perform model-metadata discovery
+- `MODEL_CONTEXT_WINDOW` and `MODEL_MAX_OUTPUT_TOKENS` directly configure prompt budgeting and should match the limits configured in the model gateway
+- A non-positive context-window value uses the package default of 32,768 tokens; a non-positive output-token value uses the package default of 8,192 tokens
+- Max input tokens are derived as context window minus max output tokens and the safety margin
 
 The prompt budget is the context window minus reserves for:
 
@@ -559,13 +557,12 @@ Files:
 - `internal/llm/gateway.go`
 - `internal/llm/schema.go`
 - `internal/llm/types.go`
-- `internal/modelinfo/`
 
 Notes:
 
 - `LLM_GATEWAY_URL` points at an OpenAI-compatible model gateway
 - `LLM_GATEWAY_VIRTUAL_KEY` can pass an optional gateway routing key when supported by the configured gateway
-- `MODEL_*` environment overrides take precedence over discovered model metadata and package defaults for prompt budgeting
+- `MODEL_CONTEXT_WINDOW` and `MODEL_MAX_OUTPUT_TOKENS` directly configure prompt budgeting; non-positive values use package defaults
 - Streaming chat uses synchronous `/v1/chat/completions`; it is never routed through an async endpoint
 - Non-streaming chat and tool-calling iterations use `POST /v1/async/chat/completions` followed by authenticated polling of `GET /v1/async/chat/completions/<job-id>` until Bifrost reports completion or failure
 - Embeddings use `POST /v1/async/embeddings` followed by authenticated polling when `LLM_GATEWAY_EMBEDDING_MODEL` is set
@@ -839,7 +836,6 @@ Current startup requirements:
 | `internal/routing/routing.go`                  | Shared gateway routing policy                |
 | `internal/routing/types.go`                    | Gateway-neutral routing types                |
 | `internal/llm/gateway.go`                      | LLM gateway HTTP client                      |
-| `internal/modelinfo/`                          | Model metadata discovery                     |
 | `internal/database/`                           | SQLite schema and database helpers           |
 | `internal/tools/registry/`                     | Tool schema loading and execution            |
 | `internal/tools/governance/`                   | Request-local tool policy and limits         |

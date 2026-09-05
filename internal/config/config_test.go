@@ -46,6 +46,19 @@ func TestEnvHelpersParseConfiguredValues(t *testing.T) {
 	}
 }
 
+func TestLoadModelBudgetConfig(t *testing.T) {
+	t.Setenv("MODEL_CONTEXT_WINDOW", "65536")
+	t.Setenv("MODEL_MAX_OUTPUT_TOKENS", "4096")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ModelContextWindow != 65536 || cfg.ModelMaxOutputTokens != 4096 {
+		t.Fatalf("unexpected model budget config: context=%d output=%d", cfg.ModelContextWindow, cfg.ModelMaxOutputTokens)
+	}
+}
+
 func TestLoadToolGovernanceLimits(t *testing.T) {
 	t.Setenv("MAX_TOOL_CALLS_PER_REQUEST", "15")
 	t.Setenv("MAX_TOOL_ITERATIONS_PER_REQUEST", "9")
