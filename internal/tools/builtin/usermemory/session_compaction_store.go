@@ -724,8 +724,8 @@ WHERE id = ? AND job_kind = 'session_compaction' AND canonical_user_id = ?`, job
 	return 0, ErrStaleSessionCompactionJobLease
 }
 
-// RefundSessionCompactionModelSubmission restores only the reservation owned
-// by the exact live lease when provider submission was never accepted.
+// RefundSessionCompactionModelSubmission restores the current reservation
+// owned by the exact live lease when foreground work intentionally preempts it.
 func (s *Store) RefundSessionCompactionModelSubmission(ctx context.Context, job SessionCompactionJob) error {
 	if job.ModelSubmissionCount <= 0 {
 		return fmt.Errorf("refund session compaction model submission: invalid reservation")

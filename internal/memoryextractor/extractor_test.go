@@ -59,7 +59,7 @@ func TestLLMExtractorParsesStrictJSON(t *testing.T) {
 	if len(client.request.Tools) != 1 || client.request.Tools[0].Function.Name != userMemorySaveToolName || client.request.ToolChoice != llm.ToolChoiceRequired || client.request.ParallelToolCalls == nil || *client.request.ParallelToolCalls {
 		t.Fatalf("request did not force the private memory save tool: %+v", client.request)
 	}
-	if client.request.Temperature == nil || *client.request.Temperature != 0 || client.request.MaxTokens != 8192 {
+	if client.request.Temperature == nil || *client.request.Temperature != 0 || client.request.MaxTokens != 8192 || !client.request.Stream {
 		t.Fatalf("request did not apply deterministic extraction controls: %+v", client.request)
 	}
 	for _, required := range []string{"all 13 fields", "Evidence must be the complete user turn", "identity -> identity.*", "identity.name, never identity_name", "topic mention does not establish", "importance must be an integer from 1 to 5", `"category":"communication_preferences"`, `"claim_slot":"communication.reply_style"`, `{"memories":[]}`} {
@@ -162,7 +162,7 @@ func TestLLMExtractorUsesSeparateStrictPatternToolAndUserTurnsOnly(t *testing.T)
 	if err != nil || len(batch.Patterns) != 1 || len(batch.Patterns[0].Observations) != 2 {
 		t.Fatalf("batch=%+v err=%v", batch, err)
 	}
-	if len(client.request.Tools) != 1 || client.request.Tools[0].Function.Name != userMemoryPatternToolName || client.request.ToolChoice != llm.ToolChoiceRequired {
+	if len(client.request.Tools) != 1 || client.request.Tools[0].Function.Name != userMemoryPatternToolName || client.request.ToolChoice != llm.ToolChoiceRequired || !client.request.Stream {
 		t.Fatalf("pattern request=%+v", client.request)
 	}
 	patternSchema := client.request.Tools[0].Function.Parameters.Properties["patterns"].Items

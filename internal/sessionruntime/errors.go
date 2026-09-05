@@ -14,7 +14,6 @@ var (
 	errPermanentProvider       = errors.New("permanent session compaction provider failure")
 	errTerminalCompaction      = errors.New("terminal session compaction failure")
 	errLowPriorityUnavailable  = errors.New("low-priority model capacity unavailable")
-	errProviderPreempted       = errors.New("session compaction provider call preempted")
 )
 
 type invalidCompactionOutputError struct {
@@ -72,9 +71,6 @@ func compactionErrorCode(err error) string {
 	}
 	if errors.Is(err, errPermanentProvider) {
 		return "provider_request_rejected"
-	}
-	if errors.Is(err, errProviderPreempted) {
-		return "transient_preempted_after_start"
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return "transient_timeout"

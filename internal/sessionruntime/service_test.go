@@ -242,7 +242,7 @@ func TestServiceDiscardsSuccessfulCompactionAfterForegroundPreemption(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := service.process(context.Background(), &job); !errors.Is(err, errProviderPreempted) {
+	if err := service.process(context.Background(), &job); !errors.Is(err, errLowPriorityUnavailable) {
 		t.Fatalf("process error=%v", err)
 	}
 	if _, err := store.LatestSessionSummary(context.Background(), "user-1", "session-1", profile.Generation); err == nil {
@@ -328,28 +328,31 @@ func TestServiceSkipsPermanentCompactionProviderFailure(t *testing.T) {
 	}
 }
 
-func TestServiceChargesProviderStartedPreemption(t *testing.T) {
+func TestServiceForegroundPreemptionNeverConsumesCompactionBudget(t *testing.T) {
 	store, db := newSessionRuntimeStoreWithDB(t)
 	profile, err := seedCompactionRuntimeTurns(t, store, "session-1", 25)
 	if err != nil {
 		t.Fatal(err)
 	}
 	gate := &canceledLowPriorityGate{}
-	extractor := &fakeSummaryExtractor{preempt: func() { gate.cancel() }, err: &llm.AsyncJobWaitError{Cause: context.Canceled}}
+	extractor := &fakeSummaryExtractor{preempt: func() { gate.cancel() }, err: &llm.ProviderRequestStartedError{Cause: context.Canceled}}
 	service := NewService(store, extractor, "model", promptbudget.ContextBudget{PromptLimit: 100000}, config.NewLogger(config.LevelError))
 	service.SetLowPriorityGate(gate)
 	jobID, err := service.plan(context.Background(), "user-1", "session-1", profile.Generation)
 	if err != nil {
 		t.Fatal(err)
 	}
-	service.drain(context.Background())
-	var state, code string
-	var attempts, submissions int
-	if err := db.SQL().QueryRow(`SELECT state, attempt_count, last_error_code, model_submission_count FROM durable_jobs WHERE id = ?`, jobID).Scan(&state, &attempts, &code, &submissions); err != nil {
-		t.Fatal(err)
-	}
-	if state != "retry" || attempts != 1 || submissions != 1 || code != "transient_preempted_after_start" || extractor.calls != 1 {
-		t.Fatalf("state=%q attempts=%d submissions=%d code=%q calls=%d", state, attempts, submissions, code, extractor.calls)
+	for i := 0; i < 5; i++ {
+		service.drain(context.Background())
+		var state, code string
+		var attempts, submissions int
+		if err := db.SQL().QueryRow(`SELECT state, attempt_count, last_error_code, model_submission_count FROM durable_jobs WHERE id = ?`, jobID).Scan(&state, &attempts, &code, &submissions); err != nil {
+			t.Fatal(err)
+		}
+		if state != "retry" || attempts != 0 || submissions != 0 || code != "foreground_preempted" || extractor.calls != i+1 {
+			t.Fatalf("iteration=%d state=%q attempts=%d submissions=%d code=%q calls=%d", i, state, attempts, submissions, code, extractor.calls)
+		}
+		makeCompactionJobReady(t, db, jobID)
 	}
 }
 

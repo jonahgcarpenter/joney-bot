@@ -255,6 +255,7 @@ func (s *Service) process(ctx context.Context, job *usermemory.FormationJob) err
 		}
 		defer release()
 		renewedJob := *job
+		submissionReserved := false
 		err = leaseruntime.Run(extractParent, s.jobLease,
 			func(renewCtx context.Context) error {
 				leaseUntil, renewErr := s.store.RenewFormationJobLease(renewCtx, renewedJob, s.jobLease)
@@ -272,6 +273,7 @@ func (s *Service) process(ctx context.Context, job *usermemory.FormationJob) err
 					return reserveErr
 				}
 				renewedJob.ModelSubmissionCount = count
+				submissionReserved = true
 				extracted, extractErr = s.extractor.Extract(extractCtx, turn, renewedJob.CorrectiveErrorCode)
 				return extractErr
 			},
@@ -281,10 +283,7 @@ func (s *Service) process(ctx context.Context, job *usermemory.FormationJob) err
 		release()
 		release = func() {}
 		if wasPreempted {
-			if llm.WasAsyncJobSubmitted(err) {
-				return err
-			}
-			if err != nil && renewedJob.ModelSubmissionCount > 0 {
+			if submissionReserved {
 				if refundErr := s.store.RefundFormationModelSubmission(context.Background(), renewedJob); refundErr != nil {
 					return refundErr
 				}
@@ -370,6 +369,7 @@ func (s *Service) processPattern(ctx context.Context, job *usermemory.FormationJ
 		}
 		defer release()
 		renewedJob := *job
+		submissionReserved := false
 		err = leaseruntime.Run(extractParent, s.jobLease, func(renewCtx context.Context) error {
 			leaseUntil, renewErr := s.store.RenewFormationJobLease(renewCtx, renewedJob, s.jobLease)
 			if renewErr == nil {
@@ -385,6 +385,7 @@ func (s *Service) processPattern(ctx context.Context, job *usermemory.FormationJ
 				return reserveErr
 			}
 			renewedJob.ModelSubmissionCount = count
+			submissionReserved = true
 			extracted, extractErr = patternExtractor.ExtractPatterns(extractCtx, window.Turns, renewedJob.CorrectiveErrorCode)
 			return extractErr
 		})
@@ -393,10 +394,7 @@ func (s *Service) processPattern(ctx context.Context, job *usermemory.FormationJ
 		release()
 		release = func() {}
 		if wasPreempted {
-			if llm.WasAsyncJobSubmitted(err) {
-				return err
-			}
-			if err != nil && renewedJob.ModelSubmissionCount > 0 {
+			if submissionReserved {
 				if refundErr := s.store.RefundFormationModelSubmission(context.Background(), renewedJob); refundErr != nil {
 					return refundErr
 				}
