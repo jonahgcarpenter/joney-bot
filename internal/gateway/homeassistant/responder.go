@@ -2,7 +2,10 @@ package homeassistant
 
 import (
 	"fmt"
+	"mime"
+	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
@@ -20,13 +23,37 @@ func (r *runtimeResponder) StartProcessing() (func(), error) { return nil, nil }
 func (r *runtimeResponder) SendFallback(text string) error { return r.sendResult(text, "", nil) }
 
 func (r *runtimeResponder) SendCommandResponse(result commands.Result) error {
-	if err := result.ValidateAttachments(); err != nil {
+	text, supported, err := commandResponseText(result)
+	if err != nil {
 		return err
 	}
-	if len(result.OrderedAttachments()) > 0 {
+	if !supported {
 		return r.sendError("command_attachments_unsupported", "Home Assistant does not support command attachments.")
 	}
-	return r.sendResult(result.Text, "", nil)
+	return r.sendResult(text, "", nil)
+}
+
+func commandResponseText(result commands.Result) (string, bool, error) {
+	if err := result.ValidateAttachments(); err != nil {
+		return "", false, err
+	}
+	attachments := result.OrderedAttachments()
+	if len(attachments) == 0 {
+		return result.Text, true, nil
+	}
+
+	var text strings.Builder
+	for _, attachment := range attachments {
+		mediaType, _, err := mime.ParseMediaType(strings.TrimSpace(attachment.MIMEType))
+		if err != nil {
+			return "", false, err
+		}
+		if !strings.HasPrefix(mediaType, "text/") || !utf8.Valid(attachment.Data) {
+			return "", false, nil
+		}
+		_, _ = text.Write(attachment.Data)
+	}
+	return text.String(), true, nil
 }
 
 func (r *runtimeResponder) SendAgentError(_ string) error {
