@@ -2,6 +2,7 @@ package compaction
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -247,6 +248,104 @@ func TestServiceDiscardsSuccessfulCompactionAfterForegroundPreemption(t *testing
 	}
 	if _, err := store.LatestSessionSummary(context.Background(), "user-1", "session-1", profile.Generation); err == nil {
 		t.Fatal("preempted compaction published a summary")
+	}
+}
+
+func TestServiceCompactionPreservesRenewedLease(t *testing.T) {
+	for _, preempt := range []bool{false, true} {
+		t.Run(fmt.Sprintf("preempt=%t", preempt), func(t *testing.T) {
+			store, db := newCompactionTestStoreWithDB(t)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			profile, err := seedCompactionRuntimeTurns(t, store, "session-1", 3)
+			if err != nil {
+				t.Fatal(err)
+			}
+			gate := &canceledLowPriorityGate{}
+			compactor := &fakeSummaryCompactor{}
+			service := NewService(store, compactor, "model", budget.ContextBudget{PromptLimit: 100000}, nil)
+			service.lease = 900 * time.Millisecond
+			service.SetLowPriorityGate(gate)
+			if id, err := service.plan(ctx, "user-1", "session-1", profile.Generation); err != nil || id == 0 {
+				t.Fatalf("plan=%d err=%v", id, err)
+			}
+			job, err := store.ClaimSessionCompactionJob(ctx, service.owner, service.lease, "model", SummaryGeneratorVersion)
+			if err != nil {
+				t.Fatal(err)
+			}
+			originalLease := job.LeaseUntil
+			var observedLease time.Time
+			var observationErr error
+			compactor.preempt = func() {
+				// The model cannot finish until the real heartbeat commits a new token.
+				// This separate database handle only observes; it never renews the lease.
+				ticker := time.NewTicker(5 * time.Millisecond)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-ctx.Done():
+						observationErr = ctx.Err()
+						compactor.err = observationErr
+						return
+					case <-ticker.C:
+						var token string
+						observationErr = db.SQL().QueryRowContext(ctx, `SELECT lease_until FROM durable_jobs WHERE id = ?`, job.ID).Scan(&token)
+						if observationErr == nil {
+							observedLease, observationErr = time.Parse(time.RFC3339Nano, token)
+						}
+						if observationErr != nil {
+							compactor.err = observationErr
+							return
+						}
+						if observedLease.After(originalLease) {
+							if preempt {
+								gate.cancel()
+								compactor.err = context.Canceled
+							}
+							return
+						}
+					}
+				}
+			}
+			err = service.process(ctx, &job)
+			if observationErr != nil || !observedLease.After(originalLease) || job.LeaseUntil.Before(observedLease) || compactor.calls != 1 {
+				t.Fatalf("renewal: original=%v observed=%v returned=%v calls=%d observation error=%v process error=%v", originalLease, observedLease, job.LeaseUntil, compactor.calls, observationErr, err)
+			}
+			wantState, wantCount := "succeeded", 1
+			if preempt {
+				if !errors.Is(err, errLowPriorityUnavailable) || job.ModelSubmissionCount != 0 {
+					t.Fatalf("preemption: submissions=%d err=%v", job.ModelSubmissionCount, err)
+				}
+				var token string
+				if err := db.SQL().QueryRowContext(ctx, `SELECT lease_until FROM durable_jobs WHERE id = ?`, job.ID).Scan(&token); err != nil || token != job.LeaseUntil.UTC().Format(time.RFC3339Nano) {
+					t.Fatalf("latest token=%q returned=%v err=%v", token, job.LeaseUntil, err)
+				}
+				if err := store.DeferSessionCompactionJob(ctx, job, time.Second); err != nil {
+					t.Fatalf("defer renewed job: %v", err)
+				}
+				wantState, wantCount = "retry", 0
+			} else if err != nil || job.ModelSubmissionCount != 1 {
+				t.Fatalf("complete renewed job: submissions=%d err=%v", job.ModelSubmissionCount, err)
+			}
+			var state, payload string
+			var submissions, attempts int
+			var summaryID sql.NullInt64
+			var token sql.NullString
+			if err := db.SQL().QueryRowContext(ctx, `SELECT state, model_submission_count, attempt_count, artifact_payload, artifact_summary_id, lease_until FROM durable_jobs WHERE id = ?`, job.ID).Scan(&state, &submissions, &attempts, &payload, &summaryID, &token); err != nil {
+				t.Fatal(err)
+			}
+			if state != wantState || submissions != wantCount || attempts != wantCount || token.Valid || (payload != "") != !preempt || summaryID.Valid != !preempt {
+				t.Fatalf("state=%q submissions=%d attempts=%d artifact=%t summary=%v lease=%v", state, submissions, attempts, payload != "", summaryID, token)
+			}
+			summary, err := store.LatestSessionSummary(ctx, "user-1", "session-1", profile.Generation)
+			if preempt {
+				if !errors.Is(err, sql.ErrNoRows) {
+					t.Fatalf("preempted summary: %+v err=%v", summary, err)
+				}
+			} else if err != nil || len(summary.SourceTurnIDs) != 3 || summary.ID != summaryID.Int64 {
+				t.Fatalf("published summary: %+v err=%v", summary, err)
+			}
+		})
 	}
 }
 

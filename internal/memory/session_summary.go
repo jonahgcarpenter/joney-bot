@@ -78,7 +78,8 @@ ORDER BY covered_through_turn_id DESC, id DESC LIMIT 1`, userID, sessionID, gene
 }
 
 // PublishSessionSummary atomically publishes the saved artifact, all source
-// links, and the job's canonical artifact reference.
+// links, and the job's canonical artifact reference under the exact live lease.
+// Replaying an existing publication is a scope-checked read, independent of lease.
 func (s *Store) PublishSessionSummary(ctx context.Context, job SessionCompactionJob) (SessionSummary, error) {
 	tx, err := s.sql.BeginTx(ctx, nil)
 	if err != nil {
@@ -99,7 +100,7 @@ func (s *Store) PublishSessionSummary(ctx context.Context, job SessionCompaction
 		}
 		return summary, nil
 	}
-	if current.State != "running" || current.LeaseOwner == "" || current.LeaseOwner != job.LeaseOwner || !current.LeaseUntil.After(time.Now().UTC()) {
+	if current.State != "running" || current.LeaseOwner == "" || current.LeaseOwner != job.LeaseOwner || !current.LeaseUntil.Equal(job.LeaseUntil) || !current.LeaseUntil.After(time.Now().UTC()) {
 		return SessionSummary{}, fmt.Errorf("publish session summary: job is not owned by active lease")
 	}
 	var active int
@@ -143,8 +144,8 @@ RETURNING id`, current.UserID, current.SessionID, current.SessionGeneration,
 	result, err := tx.ExecContext(ctx, `
 	UPDATE durable_jobs SET artifact_summary_id = ?, updated_at = ?
 WHERE id = ? AND job_kind = 'session_compaction' AND canonical_user_id = ? AND state = 'running' AND artifact_summary_id IS NULL
-		AND lease_owner = ? AND julianday(lease_until) > julianday(?)`, summaryID,
-		formatTime(now), current.ID, current.UserID, current.LeaseOwner, formatTime(now))
+		AND lease_owner = ? AND lease_until = ? AND julianday(lease_until) > julianday(?)`, summaryID,
+		formatTime(now), current.ID, current.UserID, current.LeaseOwner, formatTime(job.LeaseUntil), formatTime(now))
 	if err != nil {
 		return SessionSummary{}, fmt.Errorf("attach canonical session summary: %w", err)
 	}

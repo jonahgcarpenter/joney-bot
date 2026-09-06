@@ -334,7 +334,8 @@ WHERE id = ? AND job_kind = 'session_compaction' AND canonical_user_id = ?
 	return nil
 }
 
-// SaveSessionCompactionArtifact persists canonical JSON for the first result only.
+// SaveSessionCompactionArtifact persists the first canonical result under the
+// caller's exact live lease.
 func (s *Store) SaveSessionCompactionArtifact(ctx context.Context, job SessionCompactionJob, artifact SummaryArtifact) error {
 	if artifact.GenerationModel != job.Model || artifact.GeneratorVersion != job.GeneratorVersion {
 		return fmt.Errorf("save session compaction artifact: contract mismatch")
@@ -349,9 +350,9 @@ SET artifact_payload = CASE WHEN artifact_payload = '' THEN ? ELSE artifact_payl
 	updated_at = ?
 WHERE id = ? AND job_kind = 'session_compaction' AND canonical_user_id = ? AND session_id = ? AND session_generation = ?
 	AND covered_from_turn_id = ? AND covered_through_turn_id = ?
-	AND state = 'running' AND lease_owner = ? AND julianday(lease_until) > julianday(?)`,
+	AND state = 'running' AND lease_owner = ? AND lease_until = ? AND julianday(lease_until) > julianday(?)`,
 		payload, formatTime(time.Now().UTC()),
-		job.ID, job.UserID, job.SessionID, job.SessionGeneration, job.CoveredFromTurnID, job.CoveredThroughTurnID, job.LeaseOwner, formatTime(time.Now().UTC()))
+		job.ID, job.UserID, job.SessionID, job.SessionGeneration, job.CoveredFromTurnID, job.CoveredThroughTurnID, job.LeaseOwner, formatTime(job.LeaseUntil), formatTime(time.Now().UTC()))
 	if err != nil {
 		return fmt.Errorf("save session compaction artifact: %w", err)
 	}
@@ -381,7 +382,8 @@ func (s *Store) SessionCompactionArtifact(ctx context.Context, job SessionCompac
 	return decodeSummaryArtifact(payload)
 }
 
-// CompleteSessionCompactionJob records successful publication or an intentional skip.
+// CompleteSessionCompactionJob records successful publication or an intentional
+// skip under the caller's exact live lease.
 func (s *Store) CompleteSessionCompactionJob(ctx context.Context, job SessionCompactionJob, skipped bool) error {
 	state := "succeeded"
 	artifactCondition := "AND artifact_summary_id IS NOT NULL"
@@ -390,7 +392,7 @@ func (s *Store) CompleteSessionCompactionJob(ctx context.Context, job SessionCom
 		artifactCondition = ""
 	}
 	now := time.Now().UTC()
-	result, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET state = ?, completed_at = ?, lease_owner = '', lease_until = NULL, last_error_code = '', corrective_error_code = '', updated_at = ? WHERE id = ? AND job_kind = 'session_compaction' AND canonical_user_id = ? AND state = 'running' AND lease_owner = ? AND julianday(lease_until) > julianday(?) `+artifactCondition, state, formatTime(now), formatTime(now), job.ID, job.UserID, job.LeaseOwner, formatTime(now))
+	result, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET state = ?, completed_at = ?, lease_owner = '', lease_until = NULL, last_error_code = '', corrective_error_code = '', updated_at = ? WHERE id = ? AND job_kind = 'session_compaction' AND canonical_user_id = ? AND state = 'running' AND lease_owner = ? AND lease_until = ? AND julianday(lease_until) > julianday(?) `+artifactCondition, state, formatTime(now), formatTime(now), job.ID, job.UserID, job.LeaseOwner, formatTime(job.LeaseUntil), formatTime(now))
 	if err != nil {
 		return fmt.Errorf("complete session compaction job: %w", err)
 	}
