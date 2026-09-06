@@ -58,7 +58,7 @@ func (s *Store) appendFixtureOrphanTurn(ctx context.Context, sessionID, userID, 
 
 // appendFixturePendingTurn seeds a legacy turn without pressure metadata.
 func (s *Store) appendFixturePendingTurn(ctx context.Context, sessionID, userID string, generation int, userText, assistantText string, toolNames []string, ttl time.Duration) (StoredSessionTurn, error) {
-	return s.appendSessionTurnWithForegroundMemory(ctx, sessionID, userID, generation, userText, assistantText, toolNames, EmptyToolHistory(), nil, ttl, nil)
+	return s.appendSessionTurnWithForegroundMemory(ctx, SessionTurnWrite{SessionID: sessionID, UserID: userID, Generation: generation, UserText: userText, AssistantText: assistantText, ToolNames: toolNames, History: EmptyToolHistory(), TTL: ttl}, nil)
 }
 
 func (s *Store) appendFixtureDeliveredTurn(ctx context.Context, sessionID, userID string, generation int, userText, assistantText string, toolNames []string, ttl time.Duration) error {

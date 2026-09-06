@@ -37,6 +37,7 @@ func (g *Gateway) processReceivedMessage(msg webhookMessage, requestID string, r
 		return
 	}
 
+	publicUserText := msg.Text
 	text := strings.TrimSpace(msg.Text)
 	replyGUID := msg.replyTargetGUID()
 	isGroup := chat.Style == chatStyleGroup || strings.Contains(chat.GUID, ";+;")
@@ -150,16 +151,17 @@ func (g *Gateway) processReceivedMessage(msg webhookMessage, requestID string, r
 			ExternalID:      normalizedSenderID,
 			Assurance:       identity.AssuranceBlueBubblesWebhook,
 		},
-		DisplayName:  displayName,
-		SessionKey:   sessionKey,
-		IsDirect:     !isGroup,
-		IsGroup:      isGroup,
-		IsMention:    mentionsBot,
-		IsReplyToBot: currentIsReplyToBot,
-		Text:         textWithoutMention,
-		Images:       images,
-		Unsupported:  unsupported,
-		Reply:        reply,
+		DisplayName:    displayName,
+		SessionKey:     sessionKey,
+		IsDirect:       !isGroup,
+		IsGroup:        isGroup,
+		IsMention:      mentionsBot,
+		IsReplyToBot:   currentIsReplyToBot,
+		Text:           textWithoutMention,
+		PublicUserText: publicUserText,
+		Images:         images,
+		Unsupported:    unsupported,
+		Reply:          reply,
 	}, g.runtimeDependencies(), &runtimeResponder{
 		gateway:             g,
 		requestID:           requestID,

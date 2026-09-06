@@ -61,6 +61,7 @@ func (dg *Gateway) handleReceivedMessage(msg MessageCreate, requestID string, re
 		replyToID = msg.ID
 	}
 
+	publicUserText := msg.Content
 	re := regexp.MustCompile(`<a?:([^:]+):\d+>`)
 	text := strings.ReplaceAll(msg.Content, mention1, "")
 	text = strings.ReplaceAll(text, mention2, "")
@@ -162,16 +163,17 @@ func (dg *Gateway) handleReceivedMessage(msg MessageCreate, requestID string, re
 			ExternalID:      normalizedAuthorID,
 			Assurance:       identity.AssuranceDiscordGateway,
 		},
-		DisplayName:  msg.Author.Username,
-		SessionKey:   sessionKey,
-		IsDirect:     msg.GuildID == "",
-		IsGroup:      msg.GuildID != "",
-		IsMention:    mentionsBot,
-		IsReplyToBot: isReplyToBot,
-		Text:         text,
-		Images:       images,
-		Unsupported:  unsupported,
-		Reply:        reply,
-		StreamFunc:   responder.Stream,
+		DisplayName:    msg.Author.Username,
+		SessionKey:     sessionKey,
+		IsDirect:       msg.GuildID == "",
+		IsGroup:        msg.GuildID != "",
+		IsMention:      mentionsBot,
+		IsReplyToBot:   isReplyToBot,
+		Text:           text,
+		PublicUserText: publicUserText,
+		Images:         images,
+		Unsupported:    unsupported,
+		Reply:          reply,
+		StreamFunc:     responder.Stream,
 	}, dg.runtimeDependencies(), responder)
 }

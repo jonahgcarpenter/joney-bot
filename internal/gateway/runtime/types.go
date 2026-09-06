@@ -58,10 +58,13 @@ type Request struct {
 	IsMention    bool
 	IsReplyToBot bool
 
-	Text        string
-	Images      []llm.InputImage
-	Unsupported []string
-	Reply       *routing.ReplyContext
+	// PublicUserText is the exact inbound transport text, captured before any
+	// mention, emoji, URL, reply, or attachment transformations. Empty stays empty.
+	PublicUserText string
+	Text           string
+	Images         []llm.InputImage
+	Unsupported    []string
+	Reply          *routing.ReplyContext
 
 	StreamFunc func(agent.StreamChunk)
 }

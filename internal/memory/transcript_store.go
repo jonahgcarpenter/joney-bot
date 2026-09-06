@@ -42,8 +42,9 @@ type TranscriptToolCall struct {
 
 // TranscriptExcerpt is one complete historical exchange with source provenance.
 type TranscriptExcerpt struct {
-	SessionID         string             `json:"session_id"`
-	SessionGeneration int                `json:"session_generation"`
+	SessionID         string             `json:"session_id,omitempty"`
+	SessionGeneration int                `json:"session_generation,omitempty"`
+	CanonicalUserID   string             `json:"canonical_user_id,omitempty"`
 	TurnID            int64              `json:"turn_id"`
 	CreatedAt         string             `json:"created_at"`
 	DeliveredAt       string             `json:"delivered_at"`
@@ -63,6 +64,9 @@ func (s *Store) SearchTranscript(ctx context.Context, userID, sessionID string, 
 		return nil, fmt.Errorf("transcript search query is required")
 	}
 	revision, err := s.LiveIndexRevision(ctx, IndexKindTranscriptFTS)
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	if err != nil || validateGeneratedTable(revision.TableName) != nil {
 		return nil, ErrTranscriptSearchUnavailable
 	}
@@ -98,7 +102,7 @@ WHERE `+table+` MATCH ?
 	AND julianday(sessions.expires_at) > julianday(?)
 	AND turns.delivered_at IS NOT NULL
 	AND turns.delivery_failed_at IS NULL
-ORDER BY bm25(`+table+`, 0.0, 0.0, 0.0, 1.0, 1.0, 0.75), turns.created_at DESC, turns.id DESC
+ORDER BY bm25(`+table+`, 0.0, 0.0, 0.0, 1.0, 1.0, 0.75, 0.0, 0.0, 0.0), turns.created_at DESC, turns.id DESC
 LIMIT ?`, match, userID, sessionID, generation, userID, sessionID, generation,
 		userID, sessionID, generation, now, maxTranscriptCandidateLimit)
 	if err != nil {

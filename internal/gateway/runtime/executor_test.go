@@ -49,7 +49,8 @@ func TestExecuteHandlesIgnoreFallbackCommandAndLLM(t *testing.T) {
 		t.Fatalf("unexpected command outcome=%+v responder=%+v", cmd, cmdResponder)
 	}
 	groupCmdResponder := &fakeResponder{}
-	groupCmd := Execute(Request{Principal: testPrincipal("user"), IsGroup: true, IsMention: true, Text: "/ping"}, deps, groupCmdResponder)
+	groupPrincipal := identity.Principal{CanonicalUserID: "user", Gateway: "discord", ExternalID: "external-user", Assurance: identity.AssuranceDiscordGateway}
+	groupCmd := Execute(Request{Principal: groupPrincipal, ChatID: "group", IsGroup: true, IsMention: true, Text: "/ping"}, deps, groupCmdResponder)
 	if groupCmd.Action != cmd.Action || groupCmdResponder.command.Text != cmdResponder.command.Text {
 		t.Fatalf("group command differs from direct: direct=%+v/%+v group=%+v/%+v", cmd, cmdResponder.command, groupCmd, groupCmdResponder.command)
 	}

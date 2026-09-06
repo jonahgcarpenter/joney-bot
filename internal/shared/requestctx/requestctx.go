@@ -96,6 +96,11 @@ type Metadata struct {
 	SessionGeneration int
 	Model             string
 	CurrentUserText   string
+	// Group provenance is set only by a trusted gateway runtime. PublicUserText
+	// is the inbound text before reply, attachment, or model enrichment.
+	GroupGateway      string
+	GroupChatID       string
+	PublicUserText    string
 	Workload          string
 	OperationID       string
 	ParentOperationID string

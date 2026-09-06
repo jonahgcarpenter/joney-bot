@@ -488,6 +488,35 @@ func TestIMessageAcceptedMessageStartsTypingAndMarksRead(t *testing.T) {
 	}
 }
 
+func TestIMessageGroupPublicTextPreservesMidSentenceOswald(t *testing.T) {
+	bb := newFakeBlueBubbles(t)
+	defer bb.server.Close()
+	g, b, chat := newIMessageTestGateway(t, bb.server.URL)
+	defer b.Shutdown()
+	const raw = "  Please ask Oswald about the meeting  "
+	g.processIncomingMessage(webhookMessage{
+		GUID: "msg-public", Text: raw,
+		Handle: messageHandle{Address: "+15551234567"},
+		Chats:  []messageChat{{GUID: "chat;+;group", Style: chatStyleGroup}},
+	})
+	if !bb.waitForPath("/api/v1/chat/chat%3B+%3Bgroup/typing") {
+		t.Fatal("processing indicator did not finish")
+	}
+	chat.mu.Lock()
+	defer chat.mu.Unlock()
+	primary := primaryIMessageRequests(chat.requests)
+	if len(primary) != 1 {
+		t.Fatalf("model requests=%d", len(primary))
+	}
+	prompt := primary[0].Messages[len(primary[0].Messages)-1].Content
+	if prompt != "Please ask  about the meeting" {
+		t.Fatalf("unexpected cleaned prompt: %q", prompt)
+	}
+	if chat.metadata.GroupGateway != "imessage" || chat.metadata.GroupChatID != "chat;+;group" || chat.metadata.PublicUserText != raw {
+		t.Fatalf("raw public metadata lost: %+v", chat.metadata)
+	}
+}
+
 func TestIMessageWebhookIgnoresTapback(t *testing.T) {
 	bb := newFakeBlueBubbles(t)
 	g, b, chat := newIMessageTestGateway(t, bb.server.URL)
@@ -763,6 +792,7 @@ func TestChooseContactDisplayNameFallbackOrder(t *testing.T) {
 
 type imFakeChatter struct {
 	mu        sync.Mutex
+	metadata  requestctx.Metadata
 	requests  []llm.ChatRequest
 	principal identity.Principal
 }
@@ -771,6 +801,7 @@ func (f *imFakeChatter) Chat(ctx context.Context, req llm.ChatRequest, cb func(l
 	f.mu.Lock()
 	f.requests = append(f.requests, req)
 	f.principal, _ = requestctx.PrincipalFromContext(ctx)
+	f.metadata = requestctx.MetadataFromContext(ctx)
 	f.mu.Unlock()
 	if req.Format == "json_object" {
 		return &llm.ChatResponse{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: `{"session_updates":{"summary":"","open_threads":[],"decisions":[],"user_goals":[]},"memory_candidates":[]}`}}, nil

@@ -57,6 +57,7 @@ type GlobalMemoryIndexRecord struct {
 type TranscriptIndexRecord struct {
 	ID                                                   int64
 	UserID, SessionID, UserText, AssistantText, ToolText string
+	GroupGateway, GroupChatID, PublicUserText            string
 	Generation                                           int
 	Version                                              string
 }
@@ -121,7 +122,7 @@ func (s *Store) CreateIndexRevision(ctx context.Context, kind, provider, model s
 	}
 	ddl := `CREATE VIRTUAL TABLE ` + table + ` USING fts5(canonical_user_id, statement, evidence)`
 	if kind == IndexKindTranscriptFTS {
-		ddl = `CREATE VIRTUAL TABLE ` + table + ` USING fts5(canonical_user_id, session_id, session_generation, user_text, assistant_text, tool_text)`
+		ddl = `CREATE VIRTUAL TABLE ` + table + ` USING fts5(canonical_user_id, session_id, session_generation, user_text, assistant_text, tool_text, group_gateway, group_chat_id, public_user_text)`
 	} else if kind == IndexKindMemoryVector {
 		ddl = fmt.Sprintf(`CREATE VIRTUAL TABLE %s USING vec0(canonical_user_id text, embedding_model text, canonical_version text, scope text, category text, embedding float[%d])`, table, dimension)
 	} else if kind == IndexKindGlobalMemoryFTS {
@@ -135,6 +136,9 @@ func (s *Store) CreateIndexRevision(ctx context.Context, kind, provider, model s
 	schemaVersion := 1
 	if kind == IndexKindMemoryVector || kind == IndexKindGlobalMemoryVector || kind == IndexKindTranscriptFTS {
 		schemaVersion = 2
+	}
+	if kind == IndexKindTranscriptFTS {
+		schemaVersion = 3
 	}
 	now := formatTime(time.Now().UTC())
 	result, err := tx.ExecContext(ctx, `INSERT INTO derived_index_revisions(index_kind, model, dimension, schema_version, revision, table_name, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'building', ?, ?)`, kind, strings.TrimSpace(model), dimension, schemaVersion, revision, table, now, now)
@@ -214,7 +218,7 @@ func (s *Store) DeliveredTranscriptIndexRecords(ctx context.Context, afterID int
 	if limit <= 0 {
 		limit = 100
 	}
-	rows, err := s.sql.QueryContext(ctx, `SELECT turns.id, turns.canonical_user_id, turns.session_id, turns.session_generation, turns.user_text, turns.assistant_text, turns.tool_search_text, turns.delivered_at FROM session_turns turns JOIN sessions active ON active.canonical_user_id = turns.canonical_user_id AND active.session_id = turns.session_id AND active.generation = turns.session_generation WHERE turns.id > ? AND turns.delivered_at IS NOT NULL AND turns.delivery_failed_at IS NULL AND active.is_active = 1 AND active.expires_at > ? ORDER BY turns.id LIMIT ?`, afterID, formatTime(time.Now().UTC()), limit)
+	rows, err := s.sql.QueryContext(ctx, `SELECT turns.id, turns.canonical_user_id, turns.session_id, turns.session_generation, turns.user_text, turns.assistant_text, turns.tool_search_text, turns.delivered_at, turns.group_gateway, turns.group_chat_id, turns.public_user_text FROM session_turns turns JOIN sessions active ON active.canonical_user_id = turns.canonical_user_id AND active.session_id = turns.session_id AND active.generation = turns.session_generation WHERE turns.id > ? AND turns.delivered_at IS NOT NULL AND turns.delivery_failed_at IS NULL AND active.is_active = 1 AND active.expires_at > ? ORDER BY turns.id LIMIT ?`, afterID, formatTime(time.Now().UTC()), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -222,7 +226,7 @@ func (s *Store) DeliveredTranscriptIndexRecords(ctx context.Context, afterID int
 	var records []TranscriptIndexRecord
 	for rows.Next() {
 		var record TranscriptIndexRecord
-		if err := rows.Scan(&record.ID, &record.UserID, &record.SessionID, &record.Generation, &record.UserText, &record.AssistantText, &record.ToolText, &record.Version); err != nil {
+		if err := rows.Scan(&record.ID, &record.UserID, &record.SessionID, &record.Generation, &record.UserText, &record.AssistantText, &record.ToolText, &record.Version, &record.GroupGateway, &record.GroupChatID, &record.PublicUserText); err != nil {
 			return nil, err
 		}
 		records = append(records, record)
@@ -247,7 +251,7 @@ func (s *Store) GlobalMemoryIndexRecordByID(ctx context.Context, id int64) (Glob
 // TranscriptIndexRecordByID resolves delivered active-generation eligibility.
 func (s *Store) TranscriptIndexRecordByID(ctx context.Context, id int64, userID string) (TranscriptIndexRecord, error) {
 	var record TranscriptIndexRecord
-	err := s.sql.QueryRowContext(ctx, `SELECT turns.id, turns.canonical_user_id, turns.session_id, turns.session_generation, turns.user_text, turns.assistant_text, turns.tool_search_text, turns.delivered_at FROM session_turns turns JOIN sessions active ON active.canonical_user_id = turns.canonical_user_id AND active.session_id = turns.session_id AND active.generation = turns.session_generation WHERE turns.id = ? AND turns.canonical_user_id = ? AND turns.delivered_at IS NOT NULL AND turns.delivery_failed_at IS NULL AND active.is_active = 1 AND active.expires_at > ?`, id, userID, formatTime(time.Now().UTC())).Scan(&record.ID, &record.UserID, &record.SessionID, &record.Generation, &record.UserText, &record.AssistantText, &record.ToolText, &record.Version)
+	err := s.sql.QueryRowContext(ctx, `SELECT turns.id, turns.canonical_user_id, turns.session_id, turns.session_generation, turns.user_text, turns.assistant_text, turns.tool_search_text, turns.delivered_at, turns.group_gateway, turns.group_chat_id, turns.public_user_text FROM session_turns turns JOIN sessions active ON active.canonical_user_id = turns.canonical_user_id AND active.session_id = turns.session_id AND active.generation = turns.session_generation WHERE turns.id = ? AND turns.canonical_user_id = ? AND turns.delivered_at IS NOT NULL AND turns.delivery_failed_at IS NULL AND active.is_active = 1 AND active.expires_at > ?`, id, userID, formatTime(time.Now().UTC())).Scan(&record.ID, &record.UserID, &record.SessionID, &record.Generation, &record.UserText, &record.AssistantText, &record.ToolText, &record.Version, &record.GroupGateway, &record.GroupChatID, &record.PublicUserText)
 	return record, err
 }
 
@@ -323,7 +327,7 @@ func (s *Store) WriteTranscriptIndexRecord(ctx context.Context, revision Derived
 	}
 	defer tx.Rollback() // nolint:errcheck
 	var current TranscriptIndexRecord
-	err = tx.QueryRowContext(ctx, `SELECT turns.id, turns.canonical_user_id, turns.session_id, turns.session_generation, turns.user_text, turns.assistant_text, turns.tool_search_text, turns.delivered_at FROM session_turns turns JOIN sessions active ON active.canonical_user_id = turns.canonical_user_id AND active.session_id = turns.session_id AND active.generation = turns.session_generation WHERE turns.id = ? AND turns.canonical_user_id = ? AND turns.delivered_at IS NOT NULL AND turns.delivery_failed_at IS NULL AND active.is_active = 1 AND active.expires_at > ?`, record.ID, record.UserID, formatTime(time.Now().UTC())).Scan(&current.ID, &current.UserID, &current.SessionID, &current.Generation, &current.UserText, &current.AssistantText, &current.ToolText, &current.Version)
+	err = tx.QueryRowContext(ctx, `SELECT turns.id, turns.canonical_user_id, turns.session_id, turns.session_generation, turns.user_text, turns.assistant_text, turns.tool_search_text, turns.delivered_at, turns.group_gateway, turns.group_chat_id, turns.public_user_text FROM session_turns turns JOIN sessions active ON active.canonical_user_id = turns.canonical_user_id AND active.session_id = turns.session_id AND active.generation = turns.session_generation WHERE turns.id = ? AND turns.canonical_user_id = ? AND turns.delivered_at IS NOT NULL AND turns.delivery_failed_at IS NULL AND active.is_active = 1 AND active.expires_at > ?`, record.ID, record.UserID, formatTime(time.Now().UTC())).Scan(&current.ID, &current.UserID, &current.SessionID, &current.Generation, &current.UserText, &current.AssistantText, &current.ToolText, &current.Version, &current.GroupGateway, &current.GroupChatID, &current.PublicUserText)
 	if errors.Is(err, sql.ErrNoRows) || (err == nil && current != record) {
 		if _, deleteErr := tx.ExecContext(ctx, `DELETE FROM `+revision.TableName+` WHERE rowid = ? AND canonical_user_id = ?`, record.ID, record.UserID); deleteErr != nil {
 			return deleteErr
@@ -342,7 +346,13 @@ func (s *Store) WriteTranscriptIndexRecord(ctx context.Context, revision Derived
 	if _, err := tx.ExecContext(ctx, `DELETE FROM `+revision.TableName+` WHERE rowid = ? AND canonical_user_id = ?`, record.ID, record.UserID); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO `+revision.TableName+`(rowid, canonical_user_id, session_id, session_generation, user_text, assistant_text, tool_text) VALUES (?, ?, ?, ?, ?, ?, ?)`, record.ID, record.UserID, record.SessionID, record.Generation, record.UserText, record.AssistantText, record.ToolText); err != nil {
+	// Keep the persisted older live projection writable while its replacement builds.
+	if revision.SchemaVersion < 3 {
+		_, err = tx.ExecContext(ctx, `INSERT INTO `+revision.TableName+`(rowid, canonical_user_id, session_id, session_generation, user_text, assistant_text, tool_text) VALUES (?, ?, ?, ?, ?, ?, ?)`, record.ID, record.UserID, record.SessionID, record.Generation, record.UserText, record.AssistantText, record.ToolText)
+	} else {
+		_, err = tx.ExecContext(ctx, `INSERT INTO `+revision.TableName+`(rowid, canonical_user_id, session_id, session_generation, user_text, assistant_text, tool_text, group_gateway, group_chat_id, public_user_text) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, record.ID, record.UserID, record.SessionID, record.Generation, record.UserText, record.AssistantText, record.ToolText, record.GroupGateway, record.GroupChatID, record.PublicUserText)
+	}
+	if err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -406,7 +416,7 @@ func (s *Store) IndexRevisionNeedsRebuild(ctx context.Context, kind string) (boo
 	if err := s.sql.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&exists); err != nil {
 		return true, err
 	}
-	if code != "" || exists == 0 || (kind == IndexKindTranscriptFTS && schemaVersion != 2) {
+	if code != "" || exists == 0 || (kind == IndexKindTranscriptFTS && schemaVersion != 3) {
 		return true, nil
 	}
 	if err := validateGeneratedTable(table); err != nil {
@@ -486,8 +496,8 @@ func (s *Store) ValidateAndPublishIndexRevision(ctx context.Context, id int64) (
 	if err := validateRevisionTableIdentity(revision); err != nil {
 		return DerivedIndexRevision{}, err
 	}
-	if revision.Kind == IndexKindTranscriptFTS && revision.SchemaVersion != 2 {
-		return DerivedIndexRevision{}, fmt.Errorf("derived transcript schema version mismatch: metadata=%d want=2", revision.SchemaVersion)
+	if revision.Kind == IndexKindTranscriptFTS && revision.SchemaVersion != 3 {
+		return DerivedIndexRevision{}, fmt.Errorf("derived transcript schema version mismatch: metadata=%d want=3", revision.SchemaVersion)
 	}
 	if revision.Kind == IndexKindMemoryVector || revision.Kind == IndexKindGlobalMemoryVector {
 		if generatedIndexTable.MatchString(revision.TableName) && revision.SchemaVersion != 2 {
@@ -543,6 +553,9 @@ func canonicalValidationSQL(revision DerivedIndexRevision) (string, string) {
 	if revision.Kind == IndexKindTranscriptFTS {
 		expected = `SELECT COUNT(*) FROM session_turns turns JOIN sessions active ON active.canonical_user_id = turns.canonical_user_id AND active.session_id = turns.session_id AND active.generation = turns.session_generation WHERE turns.delivered_at IS NOT NULL AND turns.delivery_failed_at IS NULL AND active.is_active = 1 AND active.expires_at > ?`
 		valid = `SELECT COUNT(*) FROM ` + revision.TableName + ` idx JOIN session_turns turns ON turns.id = idx.rowid AND turns.canonical_user_id = idx.canonical_user_id AND turns.session_id = idx.session_id AND turns.session_generation = CAST(idx.session_generation AS INTEGER) JOIN sessions active ON active.canonical_user_id = turns.canonical_user_id AND active.session_id = turns.session_id AND active.generation = turns.session_generation WHERE turns.delivered_at IS NOT NULL AND turns.delivery_failed_at IS NULL AND active.is_active = 1 AND active.expires_at > ? AND idx.user_text = turns.user_text AND idx.assistant_text = turns.assistant_text AND idx.tool_text = turns.tool_search_text`
+		if revision.SchemaVersion >= 3 {
+			valid += ` AND idx.group_gateway = turns.group_gateway AND idx.group_chat_id = turns.group_chat_id AND idx.public_user_text = turns.public_user_text`
+		}
 	}
 	if revision.Kind == IndexKindGlobalMemoryFTS {
 		expected = `SELECT COUNT(*) FROM global_memories`
