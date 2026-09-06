@@ -51,7 +51,7 @@ func (dg *Gateway) pruneReplyIndexLocked() int {
 }
 
 func (dg *Gateway) resolveReplyContext(msg MessageCreate, emojiRE *regexp.Regexp, currentImages []llm.InputImage, requestID string) *routing.ReplyContext {
-	log := dg.log()
+	log := dg.log().With(config.F("request_id", requestID))
 	referenced := msg.ReferencedMessage
 	if referenced == nil {
 		return nil
@@ -69,7 +69,7 @@ func (dg *Gateway) resolveReplyContext(msg MessageCreate, emojiRE *regexp.Regexp
 		if len(cached.Attachments) > 0 {
 			remainingImageSlots := media.MaxImagesPerRequest - len(currentImages)
 			if remainingImageSlots > 0 {
-				reply.Images, reply.Unsupported = dg.loadImagesLimit(cached.Attachments, remainingImageSlots)
+				reply.Images, reply.Unsupported = dg.loadImagesLimit(cached.Attachments, remainingImageSlots, log)
 			} else {
 				reply.Unsupported = discordAttachmentLabels(cached.Attachments)
 			}
@@ -77,7 +77,7 @@ func (dg *Gateway) resolveReplyContext(msg MessageCreate, emojiRE *regexp.Regexp
 		if len(cached.Embeds) > 0 {
 			remainingImageSlots := media.MaxImagesPerRequest - len(currentImages) - len(reply.Images)
 			if remainingImageSlots > 0 {
-				embedImages, embedUnsupported := dg.loadEmbedImagesLimit(cached.Embeds, remainingImageSlots)
+				embedImages, embedUnsupported := dg.loadEmbedImagesLimit(cached.Embeds, remainingImageSlots, log)
 				reply.Images = append(reply.Images, embedImages...)
 				reply.Unsupported = append(reply.Unsupported, embedUnsupported...)
 				if len(embedImages) > 0 {
@@ -104,7 +104,7 @@ func (dg *Gateway) resolveReplyContext(msg MessageCreate, emojiRE *regexp.Regexp
 	if len(referenced.Attachments) > 0 {
 		remainingImageSlots := media.MaxImagesPerRequest - len(currentImages)
 		if remainingImageSlots > 0 {
-			reply.Images, reply.Unsupported = dg.loadImagesLimit(referenced.Attachments, remainingImageSlots)
+			reply.Images, reply.Unsupported = dg.loadImagesLimit(referenced.Attachments, remainingImageSlots, log)
 		} else {
 			reply.Unsupported = discordAttachmentLabels(referenced.Attachments)
 		}
@@ -112,7 +112,7 @@ func (dg *Gateway) resolveReplyContext(msg MessageCreate, emojiRE *regexp.Regexp
 	if len(referenced.Embeds) > 0 {
 		remainingImageSlots := media.MaxImagesPerRequest - len(currentImages) - len(reply.Images)
 		if remainingImageSlots > 0 {
-			embedImages, embedUnsupported := dg.loadEmbedImagesLimit(referenced.Embeds, remainingImageSlots)
+			embedImages, embedUnsupported := dg.loadEmbedImagesLimit(referenced.Embeds, remainingImageSlots, log)
 			reply.Images = append(reply.Images, embedImages...)
 			reply.Unsupported = append(reply.Unsupported, embedUnsupported...)
 			if len(embedImages) > 0 {
@@ -133,7 +133,7 @@ func (dg *Gateway) resolveReplyContext(msg MessageCreate, emojiRE *regexp.Regexp
 			if len(fetched.Attachments) > 0 {
 				remainingImageSlots := media.MaxImagesPerRequest - len(currentImages)
 				if remainingImageSlots > 0 {
-					reply.Images, reply.Unsupported = dg.loadImagesLimit(fetched.Attachments, remainingImageSlots)
+					reply.Images, reply.Unsupported = dg.loadImagesLimit(fetched.Attachments, remainingImageSlots, log)
 				} else {
 					reply.Unsupported = discordAttachmentLabels(fetched.Attachments)
 				}
@@ -141,7 +141,7 @@ func (dg *Gateway) resolveReplyContext(msg MessageCreate, emojiRE *regexp.Regexp
 			if len(fetched.Embeds) > 0 {
 				remainingImageSlots := media.MaxImagesPerRequest - len(currentImages) - len(reply.Images)
 				if remainingImageSlots > 0 {
-					embedImages, embedUnsupported := dg.loadEmbedImagesLimit(fetched.Embeds, remainingImageSlots)
+					embedImages, embedUnsupported := dg.loadEmbedImagesLimit(fetched.Embeds, remainingImageSlots, log)
 					reply.Images = append(reply.Images, embedImages...)
 					reply.Unsupported = append(reply.Unsupported, embedUnsupported...)
 					if len(embedImages) > 0 {

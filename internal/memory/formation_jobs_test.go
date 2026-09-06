@@ -161,7 +161,8 @@ func TestFormationLeaseMutationsFailAfterSourceBecomesUnsuccessful(t *testing.T)
 	_, _, err = store.ProposeCandidate(context.Background(), "user", CandidateProposal{Output: output, Source: FormationSource{RequestID: "request", SessionID: "session", SessionGeneration: 1, TurnID: turnID}, FormationJob: &job})
 	assertStale("propose", err)
 	assertStale("complete", store.CompleteFormationJob(context.Background(), job, false))
-	assertStale("retry", store.RetryFormationJob(context.Background(), job, "transient", 5))
+	_, retryErr := store.RetryFormationJob(context.Background(), job, "transient", 5)
+	assertStale("retry", retryErr)
 	assertStale("invalid retry", store.RetryInvalidFormationJob(context.Background(), job, "invalid_batch_shape"))
 	assertStale("defer", store.DeferFormationJob(context.Background(), job, time.Second))
 	assertStale("skip", store.SkipFormationJob(context.Background(), job, "invalid"))
@@ -243,7 +244,7 @@ func TestFormationModelSubmissionBudgetCannotBeResetByClaims(t *testing.T) {
 		if submission == DurableModelSubmissionLimit {
 			break
 		}
-		if err := store.RetryFormationJob(context.Background(), job, "transient_provider", DurableModelSubmissionLimit); err != nil {
+		if _, err := store.RetryFormationJob(context.Background(), job, "transient_provider", DurableModelSubmissionLimit); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := store.sql.Exec(`UPDATE durable_jobs SET available_at = ? WHERE id = ?`, formatTime(time.Now().UTC().Add(-time.Second)), job.ID); err != nil {
@@ -256,6 +257,14 @@ func TestFormationModelSubmissionBudgetCannotBeResetByClaims(t *testing.T) {
 	}
 	if _, err := store.ReserveFormationModelSubmission(context.Background(), job); !errors.Is(err, ErrModelSubmissionBudgetExhausted) {
 		t.Fatalf("fourth reservation error=%v", err)
+	}
+	state, err := store.RetryFormationJob(context.Background(), job, "model_submission_budget_exhausted", 5)
+	if err != nil || state != "dead" {
+		t.Fatalf("exhausted transition=%q err=%v", state, err)
+	}
+	persisted, err := store.FormationJobState(context.Background(), job.UserID, job.ID)
+	if err != nil || persisted != state {
+		t.Fatalf("returned=%q persisted=%q err=%v", state, persisted, err)
 	}
 }
 

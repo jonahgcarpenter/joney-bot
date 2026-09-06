@@ -6,20 +6,23 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 )
 
 // handleWebhook validates and dispatches incoming BlueBubbles webhook events.
 func (g *Gateway) handleWebhook(w http.ResponseWriter, r *http.Request) {
-	log := g.log()
+	receivedAt := time.Now()
+	requestID := config.NewRequestID()
+	log := g.log().With(config.F("request_id", requestID))
 	if r.Method != http.MethodPost {
-		g.logIgnoredMessage("invalid_method", "", webhookMessage{}, config.F("method", r.Method))
+		g.logIgnoredMessage("invalid_method", "", webhookMessage{}, config.F("request_id", requestID))
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
 	if !g.validWebhookCredential(r) {
-		g.logIgnoredMessage("invalid_webhook_credential", "", webhookMessage{})
+		g.logIgnoredMessage("invalid_webhook_credential", "", webhookMessage{}, config.F("request_id", requestID))
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
@@ -28,7 +31,6 @@ func (g *Gateway) handleWebhook(w http.ResponseWriter, r *http.Request) {
 
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		g.logIgnoredMessage("webhook_body_read_failed", "", webhookMessage{}, config.ErrorField(err))
 		log.Warn("gateway.webhook.read_failed", "failed to read imessage webhook body", config.ErrorField(err))
 		w.WriteHeader(http.StatusBadRequest)
 		return
@@ -36,7 +38,6 @@ func (g *Gateway) handleWebhook(w http.ResponseWriter, r *http.Request) {
 
 	var event webhookEvent
 	if err := json.Unmarshal(body, &event); err != nil {
-		g.logIgnoredMessage("webhook_decode_failed", "", webhookMessage{}, config.ErrorField(err))
 		log.Warn("gateway.webhook.decode_failed", "failed to decode imessage webhook body", config.ErrorField(err))
 		w.WriteHeader(http.StatusBadRequest)
 		return
@@ -46,41 +47,41 @@ func (g *Gateway) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	switch eventType {
 	case "new-message":
 		if event.Data.IsFromMe {
-			g.logIgnoredMessage("self_authored", eventType, event.Data)
+			g.logIgnoredMessage("self_authored", eventType, event.Data, config.F("request_id", requestID))
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 		if isTapbackMessage(event.Data) {
-			g.logIgnoredMessage("tapback", eventType, event.Data)
+			g.logIgnoredMessage("tapback", eventType, event.Data, config.F("request_id", requestID))
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 		if !hasMessageContent(event.Data) {
-			g.logIgnoredMessage("no_message_content", eventType, event.Data)
+			g.logIgnoredMessage("no_message_content", eventType, event.Data, config.F("request_id", requestID))
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
-		go g.processIncomingMessage(event.Data)
+		go g.processReceivedMessage(event.Data, requestID, receivedAt)
 		w.WriteHeader(http.StatusAccepted)
 	case "typing-indicator":
-		g.logIgnoredMessage("typing_indicator", eventType, event.Data)
+		g.logIgnoredMessage("typing_indicator", eventType, event.Data, config.F("request_id", requestID))
 		w.WriteHeader(http.StatusNoContent)
 	default:
-		g.logIgnoredMessage("unsupported_event_type", eventType, event.Data)
+		g.logIgnoredMessage("unsupported_event_type", eventType, event.Data, config.F("request_id", requestID))
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
 
 func (g *Gateway) logIgnoredMessage(reason, eventType string, msg webhookMessage, fields ...config.Field) {
-	chat := msg.primaryChat()
+	switch eventType {
+	case "", "new-message", "typing-indicator":
+	default:
+		eventType = "unknown"
+	}
 	baseFields := []config.Field{
-		config.F("reason", reason),
+		config.F("reason_code", reason),
 		config.F("event_type", eventType),
-		config.F("message_guid", msg.GUID),
-		config.F("chat_id", chat.GUID),
-		config.F("user_id", strings.TrimSpace(msg.Handle.Address)),
 		config.F("is_from_me", msg.IsFromMe),
-		config.F("associated_type", associatedMessageTypeString(msg.AssociatedMessageType)),
 		config.F("has_text", strings.TrimSpace(msg.Text) != ""),
 		config.F("attachment_count", len(msg.Attachments)),
 	}
@@ -138,15 +139,4 @@ func associatedMessageTypeInt(raw json.RawMessage) (int, bool) {
 		return 0, false
 	}
 	return parsed, true
-}
-
-func associatedMessageTypeString(raw json.RawMessage) string {
-	if len(raw) == 0 || string(raw) == "null" {
-		return ""
-	}
-	var text string
-	if err := json.Unmarshal(raw, &text); err == nil {
-		return text
-	}
-	return string(raw)
 }

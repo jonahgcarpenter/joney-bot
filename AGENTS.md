@@ -149,6 +149,7 @@ Tests must run without project secrets or live LLM, Discord, BlueBubbles, MCP, B
 Cleanup is registered as resources are acquired and runs on both ordinary shutdown and partial initialization failure. The order is **maintenance, broker, formation, compaction, indexing, MCP clients, accounts DB, MCP DB, global-memory DB, user-memory DB**. It is intentionally not reverse acquisition order.
 
 - Startup returns `startup.Error` with the original event, message, and cause only after cleanup. MCP close failures are warnings; database close errors are discarded here and do not replace initialization errors.
+- Startup logs build metadata and initialization/cleanup phase boundaries. `app.shutdown.complete` follows every acquired resource's cleanup callback, including partial initialization failure, and reports cleanup duration and reason. It does not establish a gateway-stop/readiness contract.
 - Signal cancellation triggers cleanup; it is not the parent of every worker context. Worker `Stop` methods must complete before their databases close.
 - Pre-cancellation and explicit initialization-boundary checks return normally. Cancellation does not interrupt every initializer or override every simultaneous initialization error.
 - Gateway `Start` failures are logged asynchronously. There is no readiness handshake or graceful gateway-stop interface. Real listeners may outlive `Run` until process exit; it is not a restartable in-process application API.
@@ -475,20 +476,115 @@ These are the 22 application variables loaded by `config.Load`. Defaults below a
 
 ## Structured Logging
 
-Production logs are single-line JSON on stderr. Human-readable banner/bootstrap output is stdout. Without a container TTY, collectors can keep these streams separate; TTY stream merging also exposes ANSI output. Logger sanitization is defense-in-depth, not proof that arbitrary strings are safe to log.
+The issue126 monitoring contract applies to all code and future contributions: operational data must be available at the default INFO threshold, even when no current dashboard or immediate consumer needs it. Instrument meaningful operation boundaries, outcomes, counts, latency, usage, and health rather than every line or payload. DEBUG may add safe diagnostics, but must not be the only source of required monitoring. The implementation details below describe current behavior; the contributor rules also govern new work.
 
-Every log has `ts`, `level`, `service`, `log_type`, `component`, `event`, and `msg`. Service is `oswald-ai`; log type is `server` or `agent`. Use stable dotted events, not formatted variable text as event names.
+Production logs are single-line JSON on stderr. Ingest stderr only. Human-readable banner/bootstrap output is stdout and can contain a bootstrap secret; exclude it from ordinary log ingestion, or apply a separate secret-safe filter if the collector cannot separate streams. Container TTYs merge streams and expose ANSI output. No additional application environment variables or database schema are required for this logging contract.
 
-The following are contribution requirements; existing event fields and levels are defined by source, not a claim of universal conformity to these conventions.
+### Schema And Safety
 
-- Use `log.Server(component)` for transport, startup, storage, broker, registry, and provider infrastructure.
-- Use `log.Agent(component, requestID, sessionID, userID, gateway, model)` for request-scoped agent behavior. All agent logs need that foundation; all request-scoped infrastructure logs need `request_id` too.
-- Add fields with `config.F` and sanitized errors with `config.ErrorField`. Do not reintroduce printf-style logging or log provider bodies/messages that can echo private input.
-- Field conventions: IDs end in `_id`, counts in `_count`, durations in `_ms`, text sizes in `_chars`, and booleans begin with `is_`. Preserve existing field units and historical keys when renaming Go counters.
-- Status vocabulary is `ok`, `error`, `rejected`, `retry`, or `degraded`.
-- Prefer info for lifecycle, successful delivery, durable/security mutations, and concise operational summaries; debug for loop internals and high-cardinality diagnostics; warn for recoverable degradation; error for failed operations. These are contribution standards, not a claim that every existing event is emitted at info.
-- Never log full prompts/responses, raw reasoning, complete tool results, image/base64 bytes, credentials, bootstrap codes, or duplicate fingerprints. Prefer lengths, counts, status codes, latencies, and bounded reason codes.
-- Loki labels should be low-cardinality: service, level, log type, component, event, optionally gateway. Do not label by request/user/session/chat ID or tool name.
+`internal/config/logging.go`, `logging_fields.go`, and `logging_errors.go` define the output boundary. Every record has `ts`, `level`, `service`, `log_type`, `component`, `event`, `msg`, `log_schema_version`, `instance_id`, and `record_kind`. Schema version is `1`, service is `oswald-ai`, and log type is `server` or `agent`. The root logger generates an instance ID shared by its scoped children. `record_kind` defaults to `event`; callers override it with `measurement` for individual operations, `summary` for aggregate outcomes, or `snapshot` for point-in-time gauges.
+
+- Use `log.Server(component)` for transport, startup, storage, broker, registry, and provider infrastructure. Use `log.Agent(component, requestID, canonicalUserID, gateway, model)` for request-scoped agent behavior: five string arguments, with no session argument. Request-scoped infrastructure also carries `request_id`; use `requestctx.LogFields` for available canonical/server-generated correlation.
+- Events, components, and messages must be fixed developer-owned text. Use stable dotted event names and `config.F` with literal field keys. String keys require review in `stringLogFields`; the source must also allowlist or validate the actual values, not merely their keys. A syntactically valid label can still be private content. The output string filter is not a secret detector.
+- Reviewed string labels are bounded to 256 UTF-8 bytes; invalid or oversized generic labels become `redacted`. Static messages are bounded to 1,024 bytes. Records are limited to 16 KiB; supported scalar arrays/slices retain at most 16 items. Safe numeric/bool metrics remain extensible. Named and unnamed scalar primitives are read without invoking custom string or JSON methods. Unknown string keys and private keys are omitted; unsupported objects, nonfinite numbers, or invalid/oversized payloads produce `logger.marshal_failed` with safe available correlation instead of serializing arbitrary objects.
+- `config.ErrorField` emits only a fixed `error_code`, never raw error text. Typed SQLite numeric driver codes select storage classifications without logging SQLite messages. Do not restore `RawErrorField` or raw-error fields. `SafeErrorText` is for user responses only, not log content; unknown errors intentionally lose their details in logs.
+- Safety applies equally at INFO and DEBUG. Never log prompts, responses, reasoning, tool arguments/results, URLs, external identities, phone numbers, email addresses, raw session/chat keys, image/base64 bytes, credentials, bootstrap codes, or duplicate fingerprints. Canonical user IDs and gateway names are allowed. Use reviewed operational labels, counts, sizes, durations, and reason codes instead of private content.
+- IDs end in `_id`, counts in `_count`, durations in `_ms`, text sizes in `_chars`, and booleans begin with `is_`. Preserve existing units and historical keys when renaming Go counters. Keep numeric fields numeric in JSON. `status` is `ok`, `error`, `rejected`, `retry`, or `degraded`; `outcome` supplies additional meaning, such as `canceled`. Intentional cancellation is not itself an operational failure.
+
+### Measurement Boundaries
+
+`internal/llm/telemetry.go` owns one INFO `provider.gateway.chat.complete` or `provider.gateway.embed.complete` measurement per `Chat`/`Embed` invocation, including error and cancellation returns. These provider records are the authoritative observed token meter across foreground rounds, retries, formation, compaction, and indexing. Their `operation` values are `chat` and `embedding`, respectively. A call is not necessarily a submission: `is_submitted` is true only when a submission attempt is made, not during pre-submission validation/cancellation. Async status polls are not extra model submissions.
+
+- `is_usage_reported` means at least one numeric usage field was reported, not that all usage is known. `is_usage_complete` requires success and available nonnegative prompt/total counts, plus completion counts for chat. `is_usage_invalid` marks observed negative usage. Only reported nonnegative token fields are logged; missing fields are not invented as zero or calculated from other fields.
+- Cancellation/error can leave observed usage partial or unknown. A later invalid negative report does not erase a previously observed valid count. `internal/shared/requestctx/telemetry.go` collects only reported valid nonnegative counts, separating chat and embedding meters. A zero aggregate without its reported/complete flags does not prove zero remote work. Missing remote usage and collector loss prevent claims of complete billing or exactly-once ingestion.
+- `duration_ms` is invocation wall time, including provider wait, network, and async polling, not raw decode time. `effective_output_tps` is reported completion tokens divided by that duration. `time_to_first_output_ms` is present only when streaming thinking/content is observable; it is not an async estimate or a first-tool-call timestamp.
+- Provider per-call tokens, gateway `request_*` aggregates, and broker `execution_*` aggregates are different views of overlapping work. Never add all three levels together. Use provider records for observed usage totals, gateway summaries for addressed-request delivery, and execution summaries for actual processor completion.
+
+`internal/gateway/runtime/executor.go` emits one INFO `gateway.request.received` after authentication and access checks admit a prompt or command, and one INFO `gateway.request.complete` per addressed runtime operation. Ignored messages do not become these request events. Pre-runtime transport/authentication rejections are separate gateway diagnostics, not admitted prompts. A runtime fallback or rejection can have a completion with `is_admitted=false` and no received record.
+
+`request_kind` is `prompt`, `command`, or `fallback`. `prompt_type` is `text`, `text_image`, `image`, `unsupported`, or `empty`, classified from inbound content before generated reply/context enrichment. Completion includes `duration_ms`, `queue_wait_ms`, `agent_duration_ms`, `delivery_duration_ms`, separate `execution_status`, `delivery_status`, `persistence_status`, and request tool/model/embedding counters with usage flags. Delivery timing in `internal/gateway/runtime/telemetry.go` covers response sends, not indicators or durable post-delivery bookkeeping.
+
+Stop can return immediately with broker result `ExecutionComplete=false`, before the current provider call reports usage. The gateway summary then has `is_execution_complete=false`, incomplete usage flags, and `persistence_status=unknown`; its counters can omit late work. `internal/broker/telemetry.go` emits `broker.request.execution.complete` on actual `Process` return, with eventual `execution_*` totals even after gateway completion. The execution snapshot is separate from the response, retaining counters when completion has an error and a nil response. Do not delay cancellation or add a goroutine just to wait for telemetry. `is_execution_complete` certifies processor return, not complete remote usage or delivery.
+
+`internal/agent/agent.go` emits `agent.response.complete` for generation outcome and `agent.tool.complete` for each actual handler execution, with tool name/scope, operation correlation, duration, status/outcome, and bounded reason code. `agent.tool.blocked` records governance/authorization blocking separately; it is not an execution. Provider-specific tool diagnostics do not count as another tool execution. Request error rates come from terminal `gateway.request.complete` status, not the number of ERROR logs: `gateway.request.failed` is a separate diagnostic for the same failed operation.
+
+### Background And Health
+
+Workload values are `foreground`, `formation`, `compaction`, `indexing`, `maintenance`, and `system`. `memory_formation` is a `job_kind`, not a workload. Formation and compaction services use fresh attempt operation IDs, workload, job ID/kind, canonical ownership, and available persisted source-request/turn correlation. Workers do not fabricate gateway external identities; gateway and parent-operation information unavailable in persisted jobs is not reconstructed from private session keys. Foreground compaction overrides workload while preserving the request's usage collector and parent operation.
+
+`internal/memory/formation/service.go` logs formation completion only after durable completion succeeds, including local saves, empty extraction, and artifact replay. Retry APIs return the successfully persisted state; `internal/compaction/service.go` uses stored submission/artifact state for retry/dead reporting rather than attempt-count guesses. Worker cancellation/preemption/refund outcomes are INFO; independent storage failures remain warnings.
+
+`broker.health` is an INFO snapshot at broker lifecycle boundaries and every 30 seconds, with worker, queued, active, outstanding, capacity, oldest-queued-age, accepting, and background-active fields. `internal/memory/indexing/service.go` uses its existing 30-second indexing schedule for `memory.jobs.health`, `index.availability`, and `app.health`. A busy serialized indexing cycle can delay these snapshots. Snapshot reads share a scoped five-second timeout; failed reads emit diagnostic WARNs and omit unavailable data rather than claim zero backlogs.
+
+Job gauges include queued/active/retry/dead/succeeded/skipped counts and `expired_lease_count`. `oldest_ready_age_ms` measures queued/retry time past `available_at`, not job creation age. Index availability is INFO when available and WARN when degraded. Failed rebuilds are WARN with no invented coverage/counts; successful rebuilds report validated live counts. Process gauges include goroutines, heap bytes, GC count, and `is_last_maintenance_known`. Last successful maintenance is process-local and unknown after restart until a sweep succeeds; `last_maintenance_age_ms` is omitted while unknown.
+
+`internal/database/maintenance/service.go` reports every sweep at INFO or WARN, including unchanged sweeps: immediately at worker start, then hourly under the default policy. Successful ordinary sweeps emit INFO `maintenance.sweep.complete`; live-index degradation and failed phases emit WARN, and cancellation emits INFO. Counts include only committed mutations, retaining earlier committed phase counts if a later transaction rolls back. `rows_changed` counts committed operations, not distinct rows. Do not synthesize a successful zero-count summary after failure. `internal/database/migrations.go` logs migration application at INFO only after commit and foreign-key restoration, with applied count and prior/target release; unchanged opens are silent. `internal/startup/app.go` reports build metadata, initialization/cleanup boundaries, and `app.shutdown.complete` after acquired-resource cleanup, without implying gateway readiness or graceful listener shutdown.
+
+### Contributor Rules
+
+- Add safe INFO-level monitoring alongside every new operational path, even if nobody queries it today. Use bounded summaries and periodic gauges rather than payloads or hot-loop noise. WARN/ERROR diagnostics remain visible at the INFO threshold; DEBUG is supplemental only.
+- Assign one owner to each terminal measurement/summary and emit it exactly once on all applicable success, failure, cancellation, rejection, empty-result, and replay paths. Distinguish attempts, retries, committed mutations, delivery outcomes, and final execution outcomes. Do not duplicate error diagnostics across layers or count diagnostics as additional operations.
+- Propagate available request/operation/parent/job correlation and canonical ownership; never manufacture unavailable identity metadata. Record unknown/incomplete states explicitly. Preserve immediate cancellation, transaction/lease fencing, and committed-only counts rather than changing behavior to improve a metric.
+- Test emission counts, levels, correlation, field types, missing/partial/negative usage, nil-response errors, late cancellation, rollback, and private-data canaries at INFO and DEBUG when changing those paths. `internal/config/logging_contract_test.go` is a limited AST guard for recognized logger/config-field conventions, not a general analyzer or proof of safety. Keep runtime logging boundary tests and source-value review.
+- Keep Loki index labels low-cardinality: service, level, log type, component, event, optionally gateway. Request/operation/instance/user/job IDs, tool names, model names, and numeric measurements remain JSON fields, not high-cardinality ingestion labels. Query-time extraction/grouping does not require promoting them to index labels. Preserve the schema and document changed event semantics here.
+
+### LogQL Recipes
+
+These examples assume the collector promotes `service` to a Loki label, so `{service="oswald-ai"}` selects stderr JSON records. Adjust that selector to the environment. Other fields are extracted at query time; use canonical `user_id`, never external identity. Filter `__error__=""` after JSON parsing and again after numeric `unwrap` to exclude parse/conversion errors. Windows and grouping are examples, not dashboards or ingestion guarantees.
+
+1. Admitted prompt count over one hour, by gateway, canonical user, and inbound prompt type (excludes commands):
+
+```logql
+sum by (gateway, user_id, prompt_type) (count_over_time({service="oswald-ai"} | json | __error__="" | event="gateway.request.received" | request_kind="prompt" | is_admitted="true" [1h]))
+```
+
+2. Admitted addressed-request p95 end-to-end latency in milliseconds:
+
+```logql
+quantile_over_time(0.95, {service="oswald-ai"} | json | __error__="" | event="gateway.request.complete" | is_admitted="true" | unwrap duration_ms | __error__="" [5m]) by (gateway)
+```
+
+3. Observed chat total tokens, including reported usage from failed/canceled calls; calls reporting only prompt/completion counts cannot contribute a total:
+
+```logql
+sum by (user_id, gateway, model, workload) (sum_over_time({service="oswald-ai"} | json | __error__="" | event="provider.gateway.chat.complete" | operation="chat" | is_usage_reported="true" | total_tokens!="" | unwrap total_tokens | __error__="" [1h]))
+```
+
+4. Mean per-call effective output TPS for chat calls with complete usage (not fleet decode throughput):
+
+```logql
+avg_over_time({service="oswald-ai"} | json | __error__="" | event="provider.gateway.chat.complete" | operation="chat" | is_usage_complete="true" | effective_output_tps!="" | unwrap effective_output_tps | __error__="" [5m]) by (model)
+```
+
+5. Actual tool executions by name, excluding blocked calls:
+
+```logql
+sum by (tool_name) (count_over_time({service="oswald-ai"} | json | __error__="" | event="agent.tool.complete" [1h]))
+```
+
+6. Tool execution failure fraction by name (canceled/degraded outcomes are not `status=error`):
+
+```logql
+sum by (tool_name) (rate({service="oswald-ai"} | json | __error__="" | event="agent.tool.complete" | status="error" [5m]))
+/
+sum by (tool_name) (rate({service="oswald-ai"} | json | __error__="" | event="agent.tool.complete" [5m]))
+```
+
+7. Admitted request failure fraction by gateway, based on terminal summaries rather than ERROR-line counts:
+
+```logql
+sum by (gateway) (rate({service="oswald-ai"} | json | __error__="" | event="gateway.request.complete" | is_admitted="true" | status="error" [5m]))
+/
+sum by (gateway) (rate({service="oswald-ai"} | json | __error__="" | event="gateway.request.complete" | is_admitted="true" [5m]))
+```
+
+8. Latest queued-job gauge per kind and instance, not the sum of historical snapshots:
+
+```logql
+last_over_time({service="oswald-ai"} | json event="event", job_kind="job_kind", instance_id="instance_id", queued_count="queued_count" | __error__="" | event="memory.jobs.health" | unwrap queued_count | __error__="" [5m]) by (job_kind, instance_id)
+```
+
+An absent rate series is not necessarily an explicit zero; a missing snapshot may be delayed or failed. The gauge can be stale within its lookback window. Do not sum database-wide gauges from multiple instances sharing a database. For investigation, filter parsed `request_id`/`operation_id` or `job_id` on log queries rather than adding index labels. None of these queries can recover unreported provider usage, lost log records, or deduplicate collector re-ingestion automatically.
 
 ## Extension Checklist
 

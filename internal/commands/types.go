@@ -50,9 +50,18 @@ type Attachment = media.OutputAttachment
 
 // Result is the user-facing command response.
 type Result struct {
+	Outcome      Outcome `json:"-"`
 	Text         string
 	Attachments  []Attachment
 	Invalidation *invalidation.Event `json:"-"`
+}
+
+// Outcome is bounded operational telemetry, independent of user-facing text.
+// IsChanged is set only after a committed mutation or an effective cancellation.
+type Outcome struct {
+	Status, ReasonCode, Operation                           string
+	IsChanged                                               bool
+	AffectedCount, ActiveCanceledCount, QueuedCanceledCount int
 }
 
 // ValidateAttachments validates per-file and aggregate transport limits.

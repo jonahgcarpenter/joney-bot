@@ -12,10 +12,11 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/database"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
+	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
 )
 
 // EnsureAccount resolves an external account to a canonical user ID, creating one when needed.
-func (s *Service) EnsureAccount(gateway, identifier, displayName string) (string, error) {
+func (s *Service) EnsureAccount(ctx context.Context, gateway, identifier, displayName string) (string, error) {
 	identifier, err := NormalizeIdentifier(gateway, identifier)
 	if err != nil {
 		return "", err
@@ -71,11 +72,11 @@ func (s *Service) EnsureAccount(gateway, identifier, displayName string) (string
 	if err := s.saveLocked(data); err != nil {
 		return "", err
 	}
+	s.log.With(requestctx.LogFields(ctx)...).Info("account_link.canonical_user.created", "created canonical user", config.F("target_user_id", canonicalID), config.F("status", "ok"))
 	if err := s.memories.SyncSpeakerIntro(canonicalID, FormatSpeakerLine(data.Users[canonicalID].Accounts)); err != nil {
 		return "", err
 	}
 
-	s.log.Info("account_link.canonical_user.created", "created canonical user", config.F("target_user_id", canonicalID), config.F("account", key))
 	return canonicalID, nil
 }
 
@@ -209,12 +210,12 @@ func (s *Service) DisconnectAccountAs(ctx context.Context, principal identity.Pr
 
 		var targetOwner string
 		if err := tx.QueryRowContext(ctx, `SELECT canonical_user_id FROM linked_accounts WHERE gateway = ? AND identifier = ?`, gateway, identifier).Scan(&targetOwner); err == sql.ErrNoRows {
-			return fmt.Errorf("linked account not found")
+			return policyError("not_found", "linked account not found")
 		} else if err != nil {
 			return fmt.Errorf("resolve disconnect target: %w", err)
 		}
 		if targetOwner != canonicalUserID {
-			return fmt.Errorf("linked account not found")
+			return policyError("not_found", "linked account not found")
 		}
 
 		var accountCount int
@@ -222,7 +223,7 @@ func (s *Service) DisconnectAccountAs(ctx context.Context, principal identity.Pr
 			return fmt.Errorf("count linked accounts: %w", err)
 		}
 		if accountCount <= 1 {
-			return fmt.Errorf("cannot disconnect the last linked account")
+			return policyError("last_account", "cannot disconnect the last linked account")
 		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM linked_accounts WHERE canonical_user_id = ? AND gateway = ? AND identifier = ?`, canonicalUserID, gateway, identifier); err != nil {
 			return fmt.Errorf("delete linked account: %w", err)
@@ -274,7 +275,7 @@ func (s *Service) DisconnectAccountAs(ctx context.Context, principal identity.Pr
 	if err != nil {
 		return DisconnectDescriptor{}, err
 	}
-	s.log.Info("account_link.account.disconnected", "disconnected account", config.F("account", descriptor.ExternalIdentities[0]), config.F("target_user_id", canonicalUserID), config.F("status", "ok"))
+	s.log.With(requestctx.LogFields(ctx)...).Info("account_link.account.disconnected", "disconnected account", config.F("request_id", requestID), config.F("actor_user_id", canonicalUserID), config.F("target_user_id", canonicalUserID), config.F("status", "ok"))
 	return descriptor, nil
 }
 

@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -68,7 +69,7 @@ func (m *Manager) UserDeleteCommitted(userID string) {
 	}
 	m.mu.Unlock()
 	for _, closeFn := range closeFns {
-		closeFn() // nolint:errcheck
+		m.closeSession(closeFn)
 	}
 }
 
@@ -96,7 +97,7 @@ func (m *Manager) UserMergeCommitted(winnerID, loserID string) {
 	}
 	m.mu.Unlock()
 	for _, closeFn := range closeFns {
-		closeFn() // nolint:errcheck
+		m.closeSession(closeFn)
 	}
 }
 
@@ -107,7 +108,7 @@ func (m *Manager) ServerInfos(ctx context.Context, userID string) []ServerInfo {
 	}
 	configs, err := m.store.ListForUser(ctx, userID)
 	if err != nil {
-		m.log.Warn("mcp.server_configs.list_failed", "failed to list MCP servers", config.F("status", "degraded"), config.ErrorField(err))
+		m.requestLog(ctx).Warn("mcp.server_configs.list_failed", "failed to list MCP servers", config.F("status", "degraded"), config.ErrorField(err))
 		return nil
 	}
 	infos := make([]ServerInfo, 0, len(configs))
@@ -153,6 +154,7 @@ func (m *Manager) ServerInfo(ctx context.Context, userID string, name string) (S
 func (m *Manager) ToolSpecs(ctx context.Context, userID string) []ToolSpec {
 	configs, err := m.store.ListForUser(ctx, userID)
 	if err != nil {
+		m.requestLog(ctx).Warn("mcp.server_configs.list_failed", "failed to list MCP servers", config.F("status", "degraded"), config.ErrorField(err))
 		return nil
 	}
 	var specs []ToolSpec
@@ -162,7 +164,6 @@ func (m *Manager) ToolSpecs(ctx context.Context, userID string) []ToolSpec {
 		}
 		srv, err := m.ensureConnected(ctx, cfg)
 		if err != nil {
-			m.log.Warn("mcp.server.connect_failed", "failed to connect MCP server", config.F("server", cfg.Name), config.F("scope", cfg.Scope), config.F("status", "degraded"), config.ErrorField(err))
 			continue
 		}
 		specs = append(specs, srv.tools...)
@@ -177,9 +178,11 @@ func (m *Manager) ServerToolSpecs(ctx context.Context, userID, name string) ([]T
 	}
 	cfg, ok, err := m.resolveConfig(ctx, userID, name)
 	if err != nil {
+		m.requestLog(ctx).Warn("mcp.server_config.resolve_failed", "failed to resolve MCP server", config.F("status", "degraded"), config.ErrorField(err))
 		return nil, ServerInfo{}, err
 	}
 	if !ok {
+		m.requestLog(ctx).Debug("mcp.server_config.not_found", "MCP server is not configured", config.F("status", "rejected"))
 		return nil, ServerInfo{}, fmt.Errorf("no configured MCP server named %q", name)
 	}
 	info := ServerInfo{Name: cfg.Name, Description: cfg.Description, Scope: cfg.Scope, OwnerUserID: cfg.OwnerUserID, Status: serverStatusNotConnected}
@@ -227,7 +230,7 @@ func (m *Manager) Close() error {
 	var errs []error
 	for key, srv := range m.sessions {
 		if srv.close != nil {
-			if err := srv.close(); err != nil {
+			if err := m.closeSession(srv.close); err != nil {
 				errs = append(errs, fmt.Errorf("close %s MCP session: %w", key, err))
 			}
 		}
@@ -248,7 +251,7 @@ func (m *Manager) Invalidate(scope, ownerUserID, name string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if srv := m.sessions[key]; srv != nil && srv.close != nil {
-		srv.close() // nolint:errcheck
+		m.closeSession(srv.close)
 	}
 	delete(m.sessions, key)
 }
@@ -270,7 +273,7 @@ func (m *Manager) resolveConfig(ctx context.Context, userID, name string) (Serve
 	return m.store.Get(ctx, ScopeUser, userID, name)
 }
 
-func (m *Manager) ensureConnected(ctx context.Context, cfg ServerConfig) (*server, error) {
+func (m *Manager) ensureConnected(ctx context.Context, cfg ServerConfig) (_ *server, err error) {
 	key := scopeKey(cfg)
 	m.mu.Lock()
 	srv := m.sessions[key]
@@ -279,6 +282,35 @@ func (m *Manager) ensureConnected(ctx context.Context, cfg ServerConfig) (*serve
 	if srv != nil && srv.reason == "" {
 		return srv, nil
 	}
+	started := time.Now()
+	meta := requestctx.MetadataFromContext(ctx)
+	parent := meta.OperationID
+	if parent == "" {
+		parent = meta.ParentOperationID
+	}
+	meta.OperationID, meta.ParentOperationID = rand.Text(), parent
+	ctx = requestctx.WithMetadata(ctx, meta)
+	connectionLog := m.requestLog(ctx).With(config.F("server_id", cfg.ID), config.F("scope", cfg.Scope))
+	phase := "validate"
+	defer func() {
+		status, outcome := "ok", "ok"
+		if err != nil {
+			status, outcome = "error", "error"
+			if errors.Is(err, context.Canceled) {
+				status, outcome = "ok", "canceled"
+			}
+		}
+		fields := []config.Field{config.F("record_kind", "measurement"), config.F("operation", "connect"), config.F("phase", phase), config.F("duration_ms", time.Since(started).Milliseconds()), config.F("status", status), config.F("outcome", outcome)}
+		if err != nil {
+			fields = append(fields, config.ErrorField(err))
+		} else if srv != nil {
+			fields = append(fields, config.F("tool_count", len(srv.tools)))
+		}
+		connectionLog.Info("mcp.server.connect.complete", "MCP connection completed", fields...)
+		if err != nil && !errors.Is(err, context.Canceled) {
+			connectionLog.Warn("mcp.server.connect_failed", "MCP server unavailable", config.F("status", "degraded"), config.ErrorField(err))
+		}
+	}()
 	if cfg.Scope == ScopeUser {
 		current, ok, err := m.store.Get(ctx, cfg.Scope, cfg.OwnerUserID, cfg.Name)
 		if err != nil {
@@ -298,14 +330,16 @@ func (m *Manager) ensureConnected(ctx context.Context, cfg ServerConfig) (*serve
 		m.rememberError(key, cfg, generation, err)
 		return nil, err
 	}
+	phase = "connect"
 	session, closeFn, err := connectStreamableHTTP(ctx, cfg)
 	if err != nil {
 		m.rememberError(key, cfg, generation, err)
 		return nil, err
 	}
+	phase = "catalog"
 	tools, err := loadToolSpecs(ctx, cfg, session, m.log)
 	if err != nil {
-		closeFn() // nolint:errcheck
+		m.closeSession(closeFn)
 		m.rememberError(key, cfg, generation, err)
 		return nil, err
 	}
@@ -313,16 +347,31 @@ func (m *Manager) ensureConnected(ctx context.Context, cfg ServerConfig) (*serve
 	m.mu.Lock()
 	if cfg.Scope == ScopeUser && m.userGenerations[cfg.OwnerUserID] != generation {
 		m.mu.Unlock()
-		closeFn() // nolint:errcheck
+		m.closeSession(closeFn)
 		return nil, fmt.Errorf("MCP server ownership changed while connecting")
 	}
 	if old := m.sessions[key]; old != nil && old.close != nil {
-		old.close() // nolint:errcheck
+		m.closeSession(old.close)
 	}
 	m.sessions[key] = srv
 	m.mu.Unlock()
-	m.log.Info("mcp.server.connect.complete", "connected MCP server", config.F("server", cfg.Name), config.F("scope", cfg.Scope), config.F("tool_count", len(tools)), config.F("status", "ok"))
 	return srv, nil
+}
+
+func (m *Manager) requestLog(ctx context.Context) *config.Logger {
+	return m.log.With(requestctx.LogFields(ctx)...)
+}
+
+func (m *Manager) closeSession(closeFn func() error) error {
+	started := time.Now()
+	err := closeFn()
+	fields := []config.Field{config.F("operation_id", rand.Text()), config.F("operation", "close"), config.F("duration_ms", time.Since(started).Milliseconds())}
+	if err != nil {
+		m.log.Warn("mcp.server.close_failed", "failed to close MCP session", append(fields, config.F("status", "degraded"), config.ErrorField(err))...)
+	} else {
+		m.log.Info("mcp.server.close.complete", "closed MCP session", append(fields, config.F("status", "ok"))...)
+	}
+	return err
 }
 
 func (m *Manager) rememberError(key string, cfg ServerConfig, generation uint64, err error) {
@@ -355,6 +404,12 @@ func connectStreamableHTTP(ctx context.Context, cfg ServerConfig) (*gomcp.Client
 
 func loadToolSpecs(ctx context.Context, cfg ServerConfig, session *gomcp.ClientSession, log *config.Logger) ([]ToolSpec, error) {
 	var specs []ToolSpec
+	skipped := 0
+	defer func() {
+		if skipped > 0 && ctx.Err() == nil {
+			log.With(requestctx.LogFields(ctx)...).Warn("mcp.tool.skipped", "skipped unsupported MCP catalog entries", config.F("skipped_count", skipped), config.F("status", "degraded"))
+		}
+	}()
 	cursor := ""
 	for {
 		result, err := session.ListTools(ctx, &gomcp.ListToolsParams{Cursor: cursor})
@@ -363,15 +418,16 @@ func loadToolSpecs(ctx context.Context, cfg ServerConfig, session *gomcp.ClientS
 		}
 		for _, tool := range result.Tools {
 			if tool == nil {
+				skipped++
 				continue
 			}
 			if strings.EqualFold(strings.TrimSpace(tool.Name), "tools") {
-				log.Warn("mcp.tool.skipped", "skipped MCP tool with reserved name", config.F("server", cfg.Name), config.F("tool_name", tool.Name), config.F("status", "degraded"))
+				skipped++
 				continue
 			}
 			spec, err := toolSpec(cfg, tool, session, log)
 			if err != nil {
-				log.Warn("mcp.tool.skipped", "skipped MCP tool", config.F("server", cfg.Name), config.F("tool_name", tool.Name), config.F("status", "degraded"), config.ErrorField(err))
+				skipped++
 				continue
 			}
 			specs = append(specs, spec)
@@ -404,7 +460,7 @@ func toolSpec(cfg ServerConfig, tool *gomcp.Tool, session *gomcp.ClientSession, 
 	return ToolSpec{Name: localName, Description: description, ServerID: cfg.ID, Server: cfg.Name, Scope: cfg.Scope, OwnerUserID: cfg.OwnerUserID, RemoteName: remoteName, Parameters: params, Handler: func(ctx context.Context, arguments map[string]interface{}) (governance.Result, error) {
 		meta := requestctx.MetadataFromContext(ctx)
 		principal, _ := requestctx.PrincipalFromContext(ctx)
-		reqLog := log.Agent("agent.tool.mcp", meta.RequestID, meta.SessionID, principal.CanonicalUserID, principal.Gateway, meta.Model)
+		reqLog := log.Agent("agent.tool.mcp", meta.RequestID, principal.CanonicalUserID, principal.Gateway, meta.Model).With(requestctx.LogFields(ctx)...)
 		reqLog.Debug("agent.tool.mcp.start", "starting MCP tool execution", config.F("tool_name", localName), config.F("remote_tool_name", remoteName), config.F("server", cfg.Name), config.F("scope", cfg.Scope))
 		result, err := session.CallTool(ctx, &gomcp.CallToolParams{Name: remoteName, Arguments: arguments})
 		if err != nil {

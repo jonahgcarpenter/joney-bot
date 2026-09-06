@@ -94,7 +94,7 @@ func authenticatedPrincipal(ctx context.Context) (identity.Principal, error) {
 func requestLog(log *config.Logger, ctx context.Context) *config.Logger {
 	meta := requestctx.MetadataFromContext(ctx)
 	principal, _ := requestctx.PrincipalFromContext(ctx)
-	return log.Agent("agent.tool.global_memory", meta.RequestID, meta.SessionID, principal.CanonicalUserID, principal.Gateway, meta.Model)
+	return log.Agent("agent.tool.global_memory", meta.RequestID, principal.CanonicalUserID, principal.Gateway, meta.Model).With(requestctx.LogFields(ctx)...)
 }
 
 func stringArg(args map[string]interface{}, key string) string {

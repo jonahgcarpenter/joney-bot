@@ -11,6 +11,7 @@ import (
 
 // MaintenanceCounts contains aggregate results from one sweep.
 type MaintenanceCounts struct {
+	Phase                   string               `json:"-"`
 	SessionCleanup          SessionCleanupCounts `json:"session_cleanup"`
 	PendingDeliveriesFailed int64                `json:"pending_deliveries_failed"`
 	CandidatesDeleted       int64                `json:"candidates_deleted"`
@@ -32,9 +33,8 @@ func (c MaintenanceCounts) Changed() int64 {
 }
 
 // MaintenanceSweep performs one bounded, serialized retention and consistency pass.
-func (s *Store) MaintenanceSweep(ctx context.Context, now time.Time, policy config.RetentionPolicy) (MaintenanceCounts, error) {
-	var counts MaintenanceCounts
-	var err error
+func (s *Store) MaintenanceSweep(ctx context.Context, now time.Time, policy config.RetentionPolicy) (counts MaintenanceCounts, err error) {
+	counts.Phase = "precheck"
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
@@ -43,11 +43,20 @@ func (s *Store) MaintenanceSweep(ctx context.Context, now time.Time, policy conf
 	if err := maintenanceForeignKeyCheckDB(ctx, s.sql); err != nil {
 		return counts, err
 	}
+	counts.Phase = "expiry"
 	counts.SessionCleanup, err = s.cleanupExpiredSessions(ctx, now, policy)
 	if err != nil {
 		return counts, err
 	}
 
+	counts.Phase = "retention"
+	committed := counts
+	retentionCommitted := false
+	defer func() {
+		if !retentionCommitted {
+			counts = committed
+		}
+	}()
 	tx, err := s.sql.BeginTx(ctx, nil)
 	if err != nil {
 		return counts, fmt.Errorf("begin maintenance sweep: %w", err)
@@ -83,8 +92,10 @@ func (s *Store) MaintenanceSweep(ctx context.Context, now time.Time, policy conf
 	if err := tx.Commit(); err != nil {
 		return counts, fmt.Errorf("commit maintenance retention: %w", err)
 	}
+	retentionCommitted = true
 	s.signalDerivedIndex()
 
+	counts.Phase = "indexes"
 	indexCounts, indexErr := s.MaintainDerivedIndexes(ctx, now, policy.RetiredIndexRetention, policy.BatchSize)
 	counts.IndexRowsDeleted = indexCounts.RowsDeleted
 	counts.IndexRevisionsDegraded = indexCounts.RevisionsDegraded
@@ -92,13 +103,19 @@ func (s *Store) MaintenanceSweep(ctx context.Context, now time.Time, policy conf
 	if indexErr != nil {
 		return counts, indexErr
 	}
+	counts.Phase = "reconcile"
 	if err := s.ReconcileDerivedIndexChanges(ctx); err != nil {
 		return counts, fmt.Errorf("reconcile derived index outbox: %w", err)
 	}
+	counts.Phase = "hygiene"
 	if err := s.databaseHygiene(ctx, now, policy, &counts); err != nil {
 		return counts, err
 	}
 	s.signalDerivedIndex()
+	counts.Phase = "complete"
+	s.mutationMu.Lock()
+	s.lastMaintenanceAt = now
+	s.mutationMu.Unlock()
 	return counts, nil
 }
 

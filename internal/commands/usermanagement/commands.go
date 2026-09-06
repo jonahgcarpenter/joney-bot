@@ -66,24 +66,24 @@ func (h *handler) ResolveFenceTargets(_ context.Context, req commands.Request) (
 }
 
 // Execute processes one admin command.
-func (h *handler) Execute(_ context.Context, req commands.Request) (commands.Result, error) {
+func (h *handler) Execute(ctx context.Context, req commands.Request) (commands.Result, error) {
 	switch req.Name {
 	case "users":
 		return h.handleUsers()
 	case "user":
 		return h.handleUser(req.Args)
 	case "admin":
-		return h.handleSetAdmin(req.Principal, req.Args, true)
+		return h.handleSetAdmin(ctx, req.Principal, req.Args, true)
 	case "unadmin":
-		return h.handleSetAdmin(req.Principal, req.Args, false)
+		return h.handleSetAdmin(ctx, req.Principal, req.Args, false)
 	case "ban":
-		return h.handleBan(req.Principal, req.Args)
+		return h.handleBan(ctx, req.Principal, req.Args)
 	case "deleteuser":
-		return h.handleDeleteUser(req.Principal, req.Args)
+		return h.handleDeleteUser(ctx, req.Principal, req.Args)
 	case "unban":
-		return h.handleUnban(req.Principal, req.Args)
+		return h.handleUnban(ctx, req.Principal, req.Args)
 	default:
-		return commands.Result{Text: "Unknown command: /" + req.Name}, nil
+		return commands.Result{Text: "Unknown command: /" + req.Name, Outcome: commands.Outcome{Status: "rejected", ReasonCode: "unknown_command"}}, nil
 	}
 }
 
@@ -106,7 +106,7 @@ func (h *handler) handleUsers() (commands.Result, error) {
 
 func (h *handler) handleUser(args []string) (commands.Result, error) {
 	if len(args) != 1 {
-		return commands.Result{Text: commands.UsageText(h.definition)}, nil
+		return commands.Result{Text: commands.UsageText(h.definition), Outcome: commands.Outcome{Status: "rejected", ReasonCode: "invalid_arguments"}}, nil
 	}
 	targetID := strings.TrimSpace(args[0])
 	user, ok, err := h.users.User(targetID)
@@ -114,59 +114,73 @@ func (h *handler) handleUser(args []string) (commands.Result, error) {
 		return commands.Result{}, err
 	}
 	if !ok {
-		return commands.Result{Text: fmt.Sprintf("User %s not found.", targetID)}, nil
+		return commands.Result{Text: fmt.Sprintf("User %s not found.", targetID), Outcome: commands.Outcome{Status: "rejected", ReasonCode: "not_found"}}, nil
 	}
 	return commands.Result{Text: renderUser(user)}, nil
 }
 
-func (h *handler) handleSetAdmin(principal identity.Principal, args []string, isAdmin bool) (commands.Result, error) {
+func (h *handler) handleSetAdmin(ctx context.Context, principal identity.Principal, args []string, isAdmin bool) (commands.Result, error) {
 	if len(args) != 1 {
-		return commands.Result{Text: commands.UsageText(h.definition)}, nil
+		return commands.Result{Text: commands.UsageText(h.definition), Outcome: commands.Outcome{Status: "rejected", ReasonCode: "invalid_arguments"}}, nil
 	}
 	targetID := strings.TrimSpace(args[0])
-	if err := h.users.SetAdminAs(principal, targetID, isAdmin); err != nil {
-		return commands.Result{Text: fmt.Sprintf("Could not update admin status: %v", err)}, nil
+	changed, err := h.users.SetAdminAs(ctx, principal, targetID, isAdmin)
+	if err != nil {
+		return policyResult("Could not update admin status", err)
+	}
+	outcome := commands.Outcome{Status: "ok", IsChanged: changed}
+	if !changed {
+		outcome.ReasonCode = "no_op"
+	} else {
+		outcome.AffectedCount = 1
 	}
 	if isAdmin {
-		return commands.Result{Text: fmt.Sprintf("Marked %s as admin.", targetID)}, nil
+		return commands.Result{Text: fmt.Sprintf("Marked %s as admin.", targetID), Outcome: outcome}, nil
 	}
-	return commands.Result{Text: fmt.Sprintf("Removed admin from %s.", targetID)}, nil
+	return commands.Result{Text: fmt.Sprintf("Removed admin from %s.", targetID), Outcome: outcome}, nil
 }
 
-func (h *handler) handleBan(principal identity.Principal, args []string) (commands.Result, error) {
+func (h *handler) handleBan(ctx context.Context, principal identity.Principal, args []string) (commands.Result, error) {
 	if len(args) < 1 {
-		return commands.Result{Text: commands.UsageText(h.definition)}, nil
+		return commands.Result{Text: commands.UsageText(h.definition), Outcome: commands.Outcome{Status: "rejected", ReasonCode: "invalid_arguments"}}, nil
 	}
 	targetID := strings.TrimSpace(args[0])
 	reason := ""
 	if len(args) > 1 {
 		reason = strings.Join(args[1:], " ")
 	}
-	if err := h.users.BanUserAs(principal, targetID, reason); err != nil {
-		return commands.Result{Text: fmt.Sprintf("Could not ban user: %v", err)}, nil
+	if err := h.users.BanUserAs(ctx, principal, targetID, reason); err != nil {
+		return policyResult("Could not ban user", err)
 	}
 	return commands.Result{Text: fmt.Sprintf("Banned %s.", targetID)}, nil
 }
 
-func (h *handler) handleUnban(principal identity.Principal, args []string) (commands.Result, error) {
+func (h *handler) handleUnban(ctx context.Context, principal identity.Principal, args []string) (commands.Result, error) {
 	if len(args) != 1 {
-		return commands.Result{Text: commands.UsageText(h.definition)}, nil
+		return commands.Result{Text: commands.UsageText(h.definition), Outcome: commands.Outcome{Status: "rejected", ReasonCode: "invalid_arguments"}}, nil
 	}
 	targetID := strings.TrimSpace(args[0])
-	if err := h.users.UnbanUserAs(principal, targetID); err != nil {
-		return commands.Result{Text: fmt.Sprintf("Could not unban user: %v", err)}, nil
+	changed, err := h.users.UnbanUserAs(ctx, principal, targetID)
+	if err != nil {
+		return policyResult("Could not unban user", err)
 	}
-	return commands.Result{Text: fmt.Sprintf("Unbanned %s.", targetID)}, nil
+	outcome := commands.Outcome{Status: "ok", IsChanged: changed}
+	if !changed {
+		outcome.ReasonCode = "no_op"
+	} else {
+		outcome.AffectedCount = 1
+	}
+	return commands.Result{Text: fmt.Sprintf("Unbanned %s.", targetID), Outcome: outcome}, nil
 }
 
-func (h *handler) handleDeleteUser(principal identity.Principal, args []string) (commands.Result, error) {
+func (h *handler) handleDeleteUser(ctx context.Context, principal identity.Principal, args []string) (commands.Result, error) {
 	if len(args) != 1 {
-		return commands.Result{Text: commands.UsageText(h.definition)}, nil
+		return commands.Result{Text: commands.UsageText(h.definition), Outcome: commands.Outcome{Status: "rejected", ReasonCode: "invalid_arguments"}}, nil
 	}
 	targetID := strings.TrimSpace(args[0])
-	descriptor, err := h.users.DeleteUserAsWithRuntimeInvalidation(principal, targetID)
+	descriptor, err := h.users.DeleteUserAs(ctx, principal, targetID)
 	if err != nil {
-		return commands.Result{Text: fmt.Sprintf("Could not delete user: %v", err)}, nil
+		return policyResult("Could not delete user", err)
 	}
 	event := invalidation.Event{ExternalIdentities: descriptor.ExternalIdentities, SessionIDs: descriptor.SessionIDs, CloseConnections: true}
 	return commands.Result{Text: fmt.Sprintf("Deleted %s.", targetID), Invalidation: &event}, nil
@@ -185,6 +199,13 @@ func renderAccounts(accounts []database.LinkedAccount) string {
 		parts = append(parts, label)
 	}
 	return strings.Join(parts, ", ")
+}
+
+func policyResult(prefix string, err error) (commands.Result, error) {
+	if reason, expected := accounts.PolicyReason(err); expected {
+		return commands.Result{Text: fmt.Sprintf("%s: %v", prefix, err), Outcome: commands.Outcome{Status: "rejected", ReasonCode: reason}}, nil
+	}
+	return commands.Result{}, err
 }
 
 func renderUser(user accounts.UserSummary) string {

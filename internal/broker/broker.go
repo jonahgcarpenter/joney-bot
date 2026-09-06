@@ -7,11 +7,13 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
 )
 
 const requestQueueSize = 10
@@ -40,6 +42,8 @@ type LaneKey struct {
 
 // Request carries a single user request from a gateway into the broker.
 type Request struct {
+	Usage            *requestctx.UsageCollector
+	Metadata         requestctx.Metadata
 	RequestID        string
 	ChatID           string
 	Principal        identity.Principal
@@ -55,26 +59,34 @@ type Request struct {
 
 // Result is the response payload delivered to the originating gateway.
 type Result struct {
-	Response  *agent.Response
-	Principal identity.Principal
-	Err       error
+	// ExecutionComplete is false for immediate cancellation of still-running work.
+	ExecutionComplete bool
+	QueueWaitMS       int64
+	AgentDurationMS   int64
+	Response          *agent.Response
+	Principal         identity.Principal
+	Err               error
 }
 
 type work struct {
-	key             LaneKey
-	run             func() error
-	finish          func(error)
-	request         *Request
-	fences          []*userFence
-	reservedReaders []bool
-	releasedFences  []bool
-	exclusive       bool
-	gated           bool
-	ctx             context.Context
-	cancel          context.CancelCauseFunc
-	ownerUserID     string
-	state           workState
-	deliverOnce     sync.Once
+	queuedAt          time.Time
+	workerActive      bool
+	processStartedAt  time.Time
+	executionFinished bool
+	key               LaneKey
+	run               func() error
+	finish            func(error)
+	request           *Request
+	fences            []*userFence
+	reservedReaders   []bool
+	releasedFences    []bool
+	exclusive         bool
+	gated             bool
+	ctx               context.Context
+	cancel            context.CancelCauseFunc
+	ownerUserID       string
+	state             workState
+	deliverOnce       sync.Once
 }
 
 type workState uint8
@@ -223,6 +235,21 @@ func (b *Broker) Start() {
 			b.makeReady(head)
 		}
 		b.log.Info("broker.started", "started broker worker pool", config.F("worker_count", b.workerCount))
+		b.logHealth()
+		b.workerWG.Add(1)
+		go func() {
+			defer b.workerWG.Done()
+			ticker := time.NewTicker(30 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					b.logHealth()
+				case <-b.lifecycleCtx.Done():
+					return
+				}
+			}
+		}()
 	})
 }
 
@@ -231,14 +258,35 @@ func (b *Broker) Submit(req *Request) error {
 	if req.ResponseChan == nil {
 		req.ResponseChan = make(chan Result, 1)
 	}
+	if req.Usage == nil {
+		req.Usage = requestctx.NewUsageCollector()
+	}
 	requestCtx, cancel := context.WithCancelCause(b.lifecycleCtx)
+	meta := req.Metadata
+	meta.RequestID = req.RequestID
+	if meta.Workload == "" {
+		meta.Workload = "foreground"
+	}
+	requestCtx = requestctx.WithMetadata(requestCtx, meta)
+	requestCtx = requestctx.WithPrincipal(requestCtx, req.Principal)
+	requestCtx = requestctx.WithUsageCollector(requestCtx, req.Usage)
 	w := &work{key: laneKey(req.Principal, req.SessionKey), request: req, ctx: requestCtx, cancel: cancel, ownerUserID: req.Principal.CanonicalUserID}
 	deliver := func(result Result) {
+		b.mu.Lock()
+		if !w.queuedAt.IsZero() {
+			if w.processStartedAt.IsZero() {
+				result.QueueWaitMS = time.Since(w.queuedAt).Milliseconds()
+			} else {
+				result.QueueWaitMS = w.processStartedAt.Sub(w.queuedAt).Milliseconds()
+				result.AgentDurationMS = time.Since(w.processStartedAt).Milliseconds()
+			}
+		}
+		b.mu.Unlock()
 		w.deliverOnce.Do(func() { deliverResult(req.ResponseChan, result) })
 	}
 	w.run = func() error {
 		if cause := context.Cause(w.ctx); cause != nil {
-			deliver(Result{Err: cause})
+			deliver(Result{Err: cause, ExecutionComplete: true})
 			return nil
 		}
 		if req.RefreshPrincipal != nil {
@@ -247,7 +295,7 @@ func (b *Broker) Submit(req *Request) error {
 				previousUserID := req.Principal.CanonicalUserID
 				principal, err := req.RefreshPrincipal(req.Principal)
 				if err != nil {
-					deliver(Result{Principal: req.Principal, Err: err})
+					deliver(Result{Principal: req.Principal, Err: err, ExecutionComplete: true})
 					return nil
 				}
 				req.Principal = principal
@@ -262,29 +310,36 @@ func (b *Broker) Submit(req *Request) error {
 			}
 			if !resolved {
 				err := fmt.Errorf("principal ownership changed too many times while queued")
-				deliver(Result{Principal: req.Principal, Err: err})
+				deliver(Result{Principal: req.Principal, Err: err, ExecutionComplete: true})
 				return nil
 			}
 		}
 		if cause := context.Cause(w.ctx); cause != nil {
-			deliver(Result{Principal: req.Principal, Err: cause})
+			deliver(Result{Principal: req.Principal, Err: cause, ExecutionComplete: true})
 			return nil
 		}
-		resp, err := b.agent.Process(w.ctx, agent.Request{
+		b.mu.Lock()
+		w.processStartedAt = time.Now()
+		b.mu.Unlock()
+		resp, err := b.agent.Process(requestctx.WithPrincipal(w.ctx, req.Principal), agent.Request{
 			RequestID: req.RequestID, Principal: req.Principal, DisplayName: req.DisplayName,
 			SessionKey: req.SessionKey, Prompt: req.Prompt, Images: req.Images, StreamFunc: req.StreamFunc,
 			IsDirect: req.IsDirect,
 		})
+		b.logExecutionComplete(requestctx.WithPrincipal(w.ctx, req.Principal), req.Usage, resp, err)
 		if cause := context.Cause(w.ctx); cause != nil {
 			err = cause
 			resp = nil
 		}
-		deliver(Result{Response: resp, Principal: req.Principal, Err: err})
+		deliver(Result{Response: resp, Principal: req.Principal, Err: err, ExecutionComplete: true})
 		return nil
 	}
 	w.finish = func(err error) {
 		if err != nil {
-			deliver(Result{Err: err})
+			b.mu.Lock()
+			complete := !w.workerActive || w.executionFinished
+			b.mu.Unlock()
+			deliver(Result{Err: err, ExecutionComplete: complete})
 		}
 	}
 	b.log.Debug("broker.request.queued", "queued broker request",
@@ -301,7 +356,7 @@ func (b *Broker) Submit(req *Request) error {
 		b.log.Warn("broker.request.rejected", "rejected broker request",
 			config.F("request_id", req.RequestID), config.F("gateway", req.Principal.Gateway),
 			config.F("chat_id", req.ChatID), config.F("status", "rejected"), config.F("reason", reason))
-		deliverResult(req.ResponseChan, Result{Response: &agent.Response{Response: config.SafeText(text)}})
+		deliverResult(req.ResponseChan, Result{Response: &agent.Response{Response: config.SafeText(text)}, ExecutionComplete: true})
 		return err
 	}
 	return nil
@@ -347,7 +402,7 @@ func (b *Broker) cancelAgentWork(matches func(*work) bool) CancelReport {
 	}
 	b.mu.Unlock()
 	for _, w := range canceled {
-		w.deliverOnce.Do(func() { deliverResult(w.request.ResponseChan, Result{Err: ErrAgentWorkCanceled}) })
+		w.finish(ErrAgentWorkCanceled)
 	}
 	return report
 }
@@ -416,6 +471,7 @@ func (b *Broker) enqueue(w *work) error {
 		}
 	}
 	b.lanes[w.key] = append(lane, w)
+	w.queuedAt = time.Now()
 	b.outstanding++
 	b.workWG.Add(1)
 	isHead := len(lane) == 0
@@ -475,6 +531,7 @@ func (b *Broker) Shutdown() {
 		}
 		close(b.ready)
 		b.workerWG.Wait()
+		b.logHealth()
 		b.log.Info("broker.shutdown.complete", "broker shutdown complete")
 	})
 }
@@ -500,6 +557,7 @@ func (b *Broker) runWorker(id int) {
 	b.log.Debug("broker.worker.started", "broker worker started", config.F("worker_id", id))
 	for w := range b.ready {
 		b.mu.Lock()
+		w.workerActive = true
 		canceled := w.state == workCanceled
 		if !canceled {
 			w.state = workRunning
@@ -516,6 +574,9 @@ func (b *Broker) runWorker(id int) {
 		} else {
 			err = safeRun(w.run)
 		}
+		b.mu.Lock()
+		w.executionFinished = true
+		b.mu.Unlock()
 		w.finish(err)
 		if w.gated {
 			for i := len(w.fences) - 1; i >= 0; i-- {

@@ -80,7 +80,7 @@ func Register(reg *registry.Registry, cfg *config.Config, userMemStore *memory.S
 	fallback := ""
 	switch {
 	case braveClient != nil && searxngClient != nil:
-		searcher = websearch.NewFallbackSearcher(braveClient, searxngClient)
+		searcher = websearch.NewFallbackSearcher(braveClient, searxngClient, log)
 		primary, fallback = "brave", "searxng"
 	case braveClient != nil:
 		searcher = braveClient

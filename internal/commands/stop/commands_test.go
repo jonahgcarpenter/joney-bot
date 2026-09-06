@@ -42,9 +42,20 @@ func TestStopCurrentAndAdminAll(t *testing.T) {
 	if err != nil || result.Text != "Stopped the current response." || canceler.userID != "user" || canceler.sessionID != "session" {
 		t.Fatalf("current result=%+v err=%v canceler=%+v", result, err, canceler)
 	}
+	if result.Outcome.Operation != "stop.session" || !result.Outcome.IsChanged || result.Outcome.ActiveCanceledCount != 1 {
+		t.Fatalf("current outcome=%+v", result.Outcome)
+	}
 	result, err = service.Execute(context.Background(), commands.Request{Principal: principal, Raw: "/stop all"})
 	if err != nil || result.Text != "Stopped 2 active and 3 queued foreground requests." || !canceler.allCalled {
 		t.Fatalf("all result=%+v err=%v canceler=%+v", result, err, canceler)
+	}
+	if result.Outcome.Operation != "stop.all" || !result.Outcome.IsChanged || result.Outcome.ActiveCanceledCount != 2 || result.Outcome.QueuedCanceledCount != 3 || result.Outcome.AffectedCount != 5 {
+		t.Fatalf("all outcome=%+v", result.Outcome)
+	}
+	canceler.allReport = broker.CancelReport{}
+	result, err = service.Execute(context.Background(), commands.Request{Principal: principal, Raw: "/stop all"})
+	if err != nil || result.Outcome.IsChanged || result.Outcome.ReasonCode != "no_op" {
+		t.Fatalf("no-op outcome=%+v err=%v", result.Outcome, err)
 	}
 }
 
@@ -58,5 +69,8 @@ func TestStopAllRequiresAdmin(t *testing.T) {
 	result, err := service.Execute(context.Background(), commands.Request{Principal: principal, Raw: "/stop all"})
 	if err != nil || result.Text != "You are not allowed to use admin commands." || canceler.allCalled {
 		t.Fatalf("result=%+v err=%v canceler=%+v", result, err, canceler)
+	}
+	if result.Outcome.Status != "rejected" || result.Outcome.ReasonCode != "admin_required" {
+		t.Fatalf("denied outcome=%+v", result.Outcome)
 	}
 }

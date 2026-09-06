@@ -3,21 +3,31 @@ package websearch
 import (
 	"context"
 	"errors"
+
+	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 )
 
 // FallbackSearcher uses fallback only when primary fails or returns no usable results.
 type FallbackSearcher struct {
 	primary  Searcher
 	fallback Searcher
+	log      *config.Logger
 }
 
 // NewFallbackSearcher creates a Brave-first searcher with SearXNG fallback.
-func NewFallbackSearcher(primary, fallback Searcher) *FallbackSearcher {
-	return &FallbackSearcher{primary: primary, fallback: fallback}
+func NewFallbackSearcher(primary, fallback Searcher, log *config.Logger) *FallbackSearcher {
+	return &FallbackSearcher{primary: primary, fallback: fallback, log: log}
 }
 
 // Search returns primary results when usable and otherwise tries the fallback.
-func (s *FallbackSearcher) Search(ctx context.Context, query string) (SearchResponse, error) {
+func (s *FallbackSearcher) Search(ctx context.Context, query string) (response SearchResponse, err error) {
+	ctx, complete := beginSearch(ctx, s.log, "fallback")
+	usedFallback := false
+	defer func() {
+		if usedFallback {
+			complete(response, err)
+		}
+	}()
 	primary, primaryErr := s.primary.Search(ctx, query)
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return SearchResponse{}, ctxErr
@@ -26,6 +36,7 @@ func (s *FallbackSearcher) Search(ctx context.Context, query string) (SearchResp
 		return primary, nil
 	}
 
+	usedFallback = true
 	fallback, fallbackErr := s.fallback.Search(ctx, query)
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return SearchResponse{}, ctxErr

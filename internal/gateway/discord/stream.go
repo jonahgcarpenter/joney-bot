@@ -700,14 +700,17 @@ func (s *discordStreamState) finish(response *agent.Response) error {
 	for i, chunk := range chunks[finalizedCount:] {
 		messageID, err := s.send(chunk)
 		if err != nil {
-			log.Error("gateway.send.failed", "failed to send discord response chunk", config.F("request_id", s.stream.responder.requestID), config.F("chunk_index", finalizedCount+i+1), config.ErrorField(err))
+			log.Debug("gateway.send.failed", "failed to send discord response chunk", config.F("request_id", s.stream.responder.requestID), config.F("chunk_index", finalizedCount+i+1), config.ErrorField(err))
 			return errors.Join(attachmentErr, err)
 		}
 		s.remember(messageID, chunk)
 		sentCount++
 	}
+	if err := errors.Join(attachmentErr, lifecycleErr); err != nil {
+		return err
+	}
 	log.Debug("gateway.response.sent", "sent discord response", config.F("request_id", s.stream.responder.requestID), config.F("chunk_count", sentCount), config.F("status", "ok"))
-	return errors.Join(attachmentErr, lifecycleErr)
+	return nil
 }
 
 func (s *discordStreamState) deliverRemainingAttachments(attachments []media.OutputAttachment) error {
@@ -809,7 +812,7 @@ func (s *discordStreamState) send(content string) (string, error) {
 	if !s.replyUsed {
 		replyToID = s.stream.responder.replyToID
 	}
-	messageID, err := s.stream.responder.gateway.sendMessage(s.stream.responder.channelID, content, replyToID)
+	messageID, err := s.stream.responder.gateway.sendMessage(s.stream.responder.channelID, content, replyToID, s.stream.responder.gateway.log().With(config.F("request_id", s.stream.responder.requestID)))
 	if err == nil {
 		if !s.replyUsed {
 			s.replyMessageID = messageID

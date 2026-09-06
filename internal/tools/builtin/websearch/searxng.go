@@ -79,7 +79,9 @@ func NewSearxngClient(baseURL string, log *config.Logger) (*SearxngClient, error
 }
 
 // Search queries SearXNG and returns only validated public web results.
-func (c *SearxngClient) Search(ctx context.Context, query string) (SearchResponse, error) {
+func (c *SearxngClient) Search(ctx context.Context, query string) (response SearchResponse, err error) {
+	ctx, complete := beginSearch(ctx, c.log, "searxng")
+	defer func() { complete(response, err) }()
 	startedAt := time.Now()
 	if err := validateQuery(query); err != nil {
 		return SearchResponse{}, err
@@ -103,7 +105,7 @@ func (c *SearxngClient) Search(ctx context.Context, query string) (SearchRespons
 		}
 		req.Header.Set("Accept", "application/json")
 		req.Header.Set("User-Agent", "oswald-ai/web.search")
-		resp, err = c.httpClient.Do(req)
+		resp, err = searchAttempt(c.log, c.httpClient, req, "searxng", attempt)
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return SearchResponse{}, fmt.Errorf("SearXNG request canceled: %w", ctxErr)
@@ -128,7 +130,7 @@ func (c *SearxngClient) Search(ctx context.Context, query string) (SearchRespons
 		_ = resp.Body.Close()
 		if attempt == 2 || !retryableStatus(status) {
 			c.logRequestFailure(ctx, status, attempt, time.Since(startedAt))
-			return SearchResponse{}, fmt.Errorf("SearXNG returned status %d", status)
+			return SearchResponse{}, &searchHTTPError{status: status, message: fmt.Sprintf("SearXNG returned status %d", status)}
 		}
 		c.logRetry(ctx, status, attempt)
 		if err := waitForRetry(ctx, delay); err != nil {
@@ -157,7 +159,7 @@ func (c *SearxngClient) Search(ctx context.Context, query string) (SearchRespons
 			Category: result.Category, PublishedDate: result.PublishedDate,
 		})
 	}
-	response := normalizeCandidates(candidates, unresponsiveEngineNames(backend.UnresponsiveEngines))
+	response = normalizeCandidates(candidates, unresponsiveEngineNames(backend.UnresponsiveEngines))
 	c.logCompletion(ctx, query, len(body), response, time.Since(startedAt))
 	return response, nil
 }
@@ -220,7 +222,7 @@ func (c *SearxngClient) logRetry(ctx context.Context, status, attempt int) {
 	if status != 0 {
 		fields = append(fields, config.F("http_status", status))
 	}
-	c.log.Warn("tool.web.search.retry", "retrying web search request", fields...)
+	c.log.Debug("tool.web.search.retry", "retrying web search request", fields...)
 }
 
 func (c *SearxngClient) logRequestFailure(ctx context.Context, status, attempt int, duration time.Duration) {
@@ -236,7 +238,7 @@ func (c *SearxngClient) logRequestFailure(ctx context.Context, status, attempt i
 	if status != 0 {
 		fields = append(fields, config.F("http_status", status))
 	}
-	c.log.Warn("tool.web.search.request_failed", "web search request failed", fields...)
+	c.log.Debug("tool.web.search.request_failed", "web search request failed", fields...)
 }
 
 func (c *SearxngClient) logCompletion(ctx context.Context, query string, responseBytes int, response SearchResponse, duration time.Duration) {
@@ -262,13 +264,12 @@ func (c *SearxngClient) logCompletion(ctx context.Context, query string, respons
 		config.F("status", status),
 	)
 	if response.Degraded {
-		c.log.Warn("tool.web.search.results_degraded", "web search returned partial results", fields...)
+		c.log.Debug("tool.web.search.results_degraded", "web search returned partial results", fields...)
 		return
 	}
 	c.log.Debug("tool.web.search.results_returned", "web search returned results", fields...)
 }
 
 func requestLogFields(ctx context.Context, fields ...config.Field) []config.Field {
-	meta := requestctx.MetadataFromContext(ctx)
-	return append([]config.Field{config.F("request_id", meta.RequestID)}, fields...)
+	return append(requestctx.LogFields(ctx), fields...)
 }

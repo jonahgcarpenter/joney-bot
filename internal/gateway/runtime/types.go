@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
@@ -43,6 +44,8 @@ type AccessChecker interface {
 
 // Request is the gateway-neutral representation executed by the shared runtime.
 type Request struct {
+	// ReceivedAt is transport receipt time; zero falls back to runtime entry time.
+	ReceivedAt  time.Time
 	RequestID   string
 	ChatID      string
 	Principal   identity.Principal

@@ -53,7 +53,7 @@ type foregroundMemorySaveItemResult struct {
 func requestLog(log *config.Logger, ctx context.Context) *config.Logger {
 	meta := requestctx.MetadataFromContext(ctx)
 	principal, _ := requestctx.PrincipalFromContext(ctx)
-	return log.Agent("agent.tool.memory", meta.RequestID, meta.SessionID, principal.CanonicalUserID, principal.Gateway, meta.Model)
+	return log.Agent("agent.tool.memory", meta.RequestID, principal.CanonicalUserID, principal.Gateway, meta.Model).With(requestctx.LogFields(ctx)...)
 }
 
 func authenticatedPrincipal(ctx context.Context, toolName string) (identity.Principal, error) {

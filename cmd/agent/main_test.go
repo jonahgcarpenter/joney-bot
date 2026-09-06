@@ -32,10 +32,24 @@ func TestNonInteractiveStartupOmitsBanner(t *testing.T) {
 				t.Fatalf("expected no banner on piped stdout: %q", stdout.String())
 			}
 			var event map[string]any
-			if err := json.Unmarshal(stderr.Bytes(), &event); err != nil {
-				t.Fatalf("stderr is not a single JSON event: %q: %v", stderr.String(), err)
+			failureCount := 0
+			cleanupComplete := false
+			for _, line := range bytes.Split(bytes.TrimSpace(stderr.Bytes()), []byte("\n")) {
+				event = nil
+				if err := json.Unmarshal(line, &event); err != nil {
+					t.Fatalf("stderr contains a non-JSON event: %q: %v", line, err)
+				}
+				if event["event"] == "app.shutdown.complete" {
+					cleanupComplete = true
+				}
+				if event["level"] == "error" {
+					failureCount++
+					if tc.name == "startup validation" && !cleanupComplete {
+						t.Fatal("startup failure logged before cleanup completed")
+					}
+				}
 			}
-			if event["event"] != "app.config.invalid" || event["msg"] != tc.message || strings.Contains(stderr.String(), "\x1b") {
+			if failureCount != 1 || event["event"] != "app.config.invalid" || event["msg"] != tc.message || strings.Contains(stderr.String(), "\x1b") {
 				t.Fatalf("unexpected startup log: %q", stderr.String())
 			}
 		})

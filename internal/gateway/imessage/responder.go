@@ -72,7 +72,7 @@ func (r *runtimeResponder) SendAgentResponse(response *agent.Response) error {
 }
 
 func (r *runtimeResponder) sendAndRemember(text string) error {
-	messageGUID, err := r.gateway.sendTextReply(r.chatGUID, text, r.selectedMessageGUID, 0)
+	messageGUID, err := r.gateway.sendTextReply(r.chatGUID, text, r.selectedMessageGUID, 0, r.gateway.log().With(config.F("request_id", r.requestID)))
 	if err != nil {
 		return err
 	}

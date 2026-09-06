@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/jonahgcarpenter/oswald-ai/internal/accounts"
 )
 
 var (
@@ -84,7 +86,7 @@ func (s *Service) Execute(ctx context.Context, req Request) (Result, error) {
 	}
 	parsed, ok := Parse(req.Raw)
 	if !ok || parsed.Name == "" {
-		return Result{Text: "Unknown command: /"}, nil
+		return Result{Text: "Unknown command: /", Outcome: Outcome{Status: "rejected", ReasonCode: "unknown_command"}}, nil
 	}
 
 	name := parsed.Name
@@ -94,14 +96,41 @@ func (s *Service) Execute(ctx context.Context, req Request) (Result, error) {
 	}
 	handler, ok := s.handlers[canonicalName]
 	if !ok {
-		return Result{Text: "Unknown command: /" + name}, nil
+		return Result{Text: "Unknown command: /" + name, Outcome: Outcome{Status: "rejected", ReasonCode: "unknown_command"}}, nil
 	}
 
 	req.Raw = parsed.Raw
 	req.Name = canonicalName
 	req.Args = parsed.Args
 	req.ArgsText = parsed.ArgsText
-	return handler.Execute(ctx, req)
+	result, err := handler.Execute(ctx, req)
+	if err != nil {
+		if reason, expected := accounts.PolicyReason(err); expected {
+			result.Outcome.Status = "rejected"
+			result.Outcome.ReasonCode = reason
+			if result.Text == "" {
+				result.Text = err.Error()
+				if reason == "principal_mismatch" {
+					result.Text = "Your account identity changed. Send the command again."
+				}
+			}
+			return result, nil
+		}
+		result.Outcome.Status = "error"
+		result.Outcome.ReasonCode = "operation_failed"
+	} else if result.Outcome.Status == "" {
+		result.Outcome.Status = "ok"
+	}
+	return result, err
+}
+
+// CanonicalName returns a registered name or a fixed unknown-command label.
+// Never use parsed, unregistered command text as a telemetry dimension.
+func (s *Service) CanonicalName(name string) string {
+	if definition, ok := s.Definition(name); ok {
+		return definition.Name
+	}
+	return "unknown"
 }
 
 // ResolveFenceTargets parses a command request and asks its handler for any

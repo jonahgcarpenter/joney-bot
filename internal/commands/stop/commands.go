@@ -51,24 +51,24 @@ func (h handler) Execute(_ context.Context, req commands.Request) (commands.Resu
 		}
 		report := h.canceler.CancelActiveAgentWork(userID, req.SessionKey)
 		if report.ActiveSignaled == 0 {
-			return commands.Result{Text: "Nothing is currently running in this conversation."}, nil
+			return commands.Result{Text: "Nothing is currently running in this conversation.", Outcome: commands.Outcome{Status: "ok", ReasonCode: "no_op", Operation: "stop.session"}}, nil
 		}
-		return commands.Result{Text: "Stopped the current response."}, nil
+		return commands.Result{Text: "Stopped the current response.", Outcome: commands.Outcome{Status: "ok", Operation: "stop.session", IsChanged: true, AffectedCount: report.ActiveSignaled, ActiveCanceledCount: report.ActiveSignaled}}, nil
 	}
 	if len(req.Args) != 1 || req.Args[0] != "all" {
-		return commands.Result{Text: commands.UsageText(h.Definition())}, nil
+		return commands.Result{Text: commands.UsageText(h.Definition()), Outcome: commands.Outcome{Status: "rejected", ReasonCode: "invalid_arguments"}}, nil
 	}
 	isAdmin, err := commands.IsPrincipalAdmin(h.auth, req.Principal)
 	if err != nil {
 		return commands.Result{}, err
 	}
 	if !isAdmin {
-		return commands.Result{Text: "You are not allowed to use admin commands."}, nil
+		return commands.Result{Text: "You are not allowed to use admin commands.", Outcome: commands.Outcome{Status: "rejected", ReasonCode: "admin_required"}}, nil
 	}
 	report := h.canceler.CancelAllAgentWork()
 	total := report.ActiveSignaled + report.QueuedCanceled
 	if total == 0 {
-		return commands.Result{Text: "No foreground requests are currently running or queued."}, nil
+		return commands.Result{Text: "No foreground requests are currently running or queued.", Outcome: commands.Outcome{Status: "ok", ReasonCode: "no_op", Operation: "stop.all"}}, nil
 	}
-	return commands.Result{Text: fmt.Sprintf("Stopped %d active and %d queued foreground requests.", report.ActiveSignaled, report.QueuedCanceled)}, nil
+	return commands.Result{Text: fmt.Sprintf("Stopped %d active and %d queued foreground requests.", report.ActiveSignaled, report.QueuedCanceled), Outcome: commands.Outcome{Status: "ok", Operation: "stop.all", IsChanged: true, AffectedCount: total, ActiveCanceledCount: report.ActiveSignaled, QueuedCanceledCount: report.QueuedCanceled}}, nil
 }

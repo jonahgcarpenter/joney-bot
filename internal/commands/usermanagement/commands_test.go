@@ -15,7 +15,7 @@ import (
 
 func TestCommandHandlerRequiresAdmin(t *testing.T) {
 	links := newTestService(t)
-	userID, err := links.EnsureAccount("discord", "100", "User")
+	userID, err := links.EnsureAccount(context.Background(), "discord", "100", "User")
 	if err != nil {
 		t.Fatalf("ensure user: %v", err)
 	}
@@ -34,15 +34,15 @@ func TestCommandHandlerRequiresAdmin(t *testing.T) {
 
 func TestDeleteFenceReResolvesPrincipal(t *testing.T) {
 	links := newTestService(t)
-	adminID, err := links.EnsureAccount("discord", "901", "Admin")
+	adminID, err := links.EnsureAccount(context.Background(), "discord", "901", "Admin")
 	if err != nil {
 		t.Fatal(err)
 	}
 	admin := commandPrincipal(t, links, adminID)
-	if _, claimed, err := links.ClaimBootstrapAdmin(admin); err != nil || !claimed {
+	if _, claimed, err := links.ClaimBootstrapAdmin(context.Background(), admin); err != nil || !claimed {
 		t.Fatalf("claim admin: claimed=%t err=%v", claimed, err)
 	}
-	userID, err := links.EnsureAccount("discord", "902", "User")
+	userID, err := links.EnsureAccount(context.Background(), "discord", "902", "User")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,15 +60,15 @@ func TestDeleteFenceReResolvesPrincipal(t *testing.T) {
 
 func TestCommandHandlerUsersAdminBanAndUnban(t *testing.T) {
 	links := newTestService(t)
-	adminID, err := links.EnsureAccount("discord", "200", "Admin")
+	adminID, err := links.EnsureAccount(context.Background(), "discord", "200", "Admin")
 	if err != nil {
 		t.Fatalf("ensure admin: %v", err)
 	}
-	targetID, err := links.EnsureAccount("discord", "300", "Target")
+	targetID, err := links.EnsureAccount(context.Background(), "discord", "300", "Target")
 	if err != nil {
 		t.Fatalf("ensure target: %v", err)
 	}
-	if _, claimed, err := links.ClaimBootstrapAdmin(commandPrincipal(t, links, adminID)); err != nil || !claimed {
+	if _, claimed, err := links.ClaimBootstrapAdmin(context.Background(), commandPrincipal(t, links, adminID)); err != nil || !claimed {
 		t.Fatalf("claim bootstrap admin: claimed=%t err=%v", claimed, err)
 	}
 	service := newAdminCommandService(t, links)

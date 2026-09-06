@@ -1,6 +1,7 @@
 package imessage
 
 import (
+	"context"
 	"regexp"
 	"strings"
 	"time"
@@ -11,12 +12,17 @@ import (
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
+	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
 )
 
 // processIncomingMessage normalizes an inbound iMessage and routes it to the broker.
 func (g *Gateway) processIncomingMessage(msg webhookMessage) {
-	log := g.log()
-	requestID := config.NewRequestID()
+	g.processReceivedMessage(msg, config.NewRequestID(), time.Now())
+}
+
+func (g *Gateway) processReceivedMessage(msg webhookMessage, requestID string, receivedAt time.Time) {
+	ctx := requestctx.WithMetadata(context.Background(), requestctx.Metadata{RequestID: requestID})
+	log := g.log().With(config.F("request_id", requestID))
 	chat := msg.primaryChat()
 	if chat.GUID == "" {
 		g.logIgnoredMessage("missing_chat_guid", "new-message", msg, config.F("request_id", requestID))
@@ -63,9 +69,14 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 		return
 	}
 
-	images, unsupported := g.loadImages(msg.Attachments)
+	normalizationStarted := time.Now()
+	images, unsupported := g.loadImages(msg.Attachments, log)
 	if len(msg.Attachments) > 0 {
-		log.Info("gateway.attachment.processed", "processed imessage attachments", config.F("request_id", requestID), config.F("chat_id", chat.GUID), config.F("accepted_count", len(images)), config.F("downgraded_count", len(unsupported)), config.F("declared_format_count", len(msg.Attachments)))
+		status := "ok"
+		if len(unsupported) > 0 {
+			status = "degraded"
+		}
+		log.Info("gateway.attachment.processed", "normalized imessage input attachments", config.F("accepted_count", len(images)), config.F("downgraded_count", len(unsupported)), config.F("declared_format_count", len(msg.Attachments)), config.F("duration_ms", time.Since(normalizationStarted).Milliseconds()), config.F("status", status))
 	}
 	if strings.TrimSpace(msg.Text) == "" && len(images) == 0 {
 		if len(unsupported) == 0 {
@@ -85,19 +96,20 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 		return
 	}
 	displayName := normalizedSenderID
-	if resolvedName, err := g.lookupContactDisplayName(normalizedSenderID); err != nil {
-		log.Debug("gateway.contact_lookup.failed", "imessage contact lookup failed", config.F("request_id", requestID), config.F("user_id", normalizedSenderID), config.F("status", "degraded"), config.ErrorField(err))
+	if resolvedName, err := g.lookupContactDisplayName(normalizedSenderID, log); err != nil {
+		log.Debug("gateway.contact_lookup.failed", "imessage contact lookup failed", config.F("request_id", requestID), config.F("status", "degraded"), config.ErrorField(err))
 	} else if resolvedName != "" {
 		displayName = resolvedName
 	}
 
-	canonicalUserID, err := g.Links.EnsureAccount("imessage", normalizedSenderID, displayName)
+	canonicalUserID, err := g.Links.EnsureAccount(ctx, "imessage", normalizedSenderID, displayName)
 	if err != nil {
-		log.Error("gateway.account.resolve_failed", "failed to resolve imessage account", config.F("request_id", requestID), config.F("user_id", normalizedSenderID), config.ErrorField(err))
+		log.Error("gateway.account.resolve_failed", "failed to resolve imessage account", config.F("request_id", requestID), config.ErrorField(err))
 		return
 	}
 
 	sessionKey := g.sessionKey(chat, normalizedSenderID)
+	log = log.With(config.F("user_id", canonicalUserID))
 	var reply *routing.ReplyContext
 	if replyGUID != "" {
 		if replyCtx, ok := g.lookupReplyContext(replyGUID, chat.GUID, sessionKey, requestID); ok {
@@ -114,7 +126,7 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 			if len(replyCtx.Attachments) > 0 {
 				remainingImageSlots := media.MaxImagesPerRequest - len(images)
 				if remainingImageSlots > 0 {
-					reply.Images, reply.Unsupported = g.loadImagesLimit(replyCtx.Attachments, remainingImageSlots)
+					reply.Images, reply.Unsupported = g.loadImagesLimit(replyCtx.Attachments, remainingImageSlots, log)
 				} else {
 					reply.Unsupported = attachmentLabels(replyCtx.Attachments)
 				}
@@ -129,8 +141,9 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 	g.startProcessingIndicators(chat.GUID, requestID)
 
 	gatewayruntime.Execute(gatewayruntime.Request{
-		RequestID: requestID,
-		ChatID:    chat.GUID,
+		ReceivedAt: receivedAt,
+		RequestID:  requestID,
+		ChatID:     chat.GUID,
 		Principal: identity.Principal{
 			CanonicalUserID: canonicalUserID,
 			Gateway:         "imessage",
@@ -158,11 +171,12 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 }
 
 func (g *Gateway) startProcessingIndicators(chatGUID, requestID string) {
+	log := g.log().With(config.F("request_id", requestID))
 	go func() {
-		g.markRead(chatGUID)
+		g.markRead(chatGUID, log)
 		time.Sleep(typingAfterReadDelay)
-		if err := g.startTyping(chatGUID); err != nil {
-			g.log().Debug("gateway.typing.failed", "failed to start BlueBubbles typing indicator", config.F("request_id", requestID), config.F("chat_id", chatGUID), config.F("status", "degraded"), config.ErrorField(err))
+		if err := g.startTyping(chatGUID, log); err != nil {
+			log.Debug("gateway.typing.failed", "failed to start BlueBubbles typing indicator", config.F("status", "degraded"), config.ErrorField(err))
 		}
 	}()
 }

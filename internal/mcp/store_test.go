@@ -4,12 +4,73 @@ import (
 	"context"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 
 	_ "github.com/mattn/go-sqlite3"
 )
+
+func TestMutationsReportExactChangesWithoutDecrypting(t *testing.T) {
+	store := testStore(t)
+	addTestUsers(t, store, "owner", "other")
+	ctx := context.Background()
+	if _, err := store.Save(ctx, ServerConfig{Scope: ScopeUser, OwnerUserID: "owner", Name: "home", Description: "Synthetic tools.", Transport: TransportStreamableHTTP, URL: "https://example.com/mcp", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.SQL().Exec(`UPDATE mcp_servers SET url_ciphertext = 'corrupt', headers_ciphertext = 'corrupt'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.Get(ctx, ScopeUser, "owner", "home"); err == nil {
+		t.Fatal("expected corrupt ciphertext")
+	}
+	if changed, err := store.SetEnabled(ctx, ScopeUser, "other", "home", false); err != nil || changed {
+		t.Fatalf("wrong owner changed=%t err=%v", changed, err)
+	}
+	if changed, err := store.Delete(ctx, ScopeGlobal, "", "home"); err != nil || changed {
+		t.Fatalf("wrong scope changed=%t err=%v", changed, err)
+	}
+	for _, mutation := range []func() (bool, error){
+		func() (bool, error) { return store.SetEnabled(ctx, ScopeUser, " owner ", " HOME ", false) },
+		func() (bool, error) { return store.Delete(ctx, ScopeUser, " owner ", " HOME ") },
+	} {
+		var changed atomic.Int32
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		for range 8 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				got, err := mutation()
+				if err != nil {
+					t.Error(err)
+				}
+				if got {
+					changed.Add(1)
+				}
+			}()
+		}
+		close(start)
+		wg.Wait()
+		if changed.Load() != 1 {
+			t.Fatalf("changed=%d want exactly one", changed.Load())
+		}
+	}
+	if changed, err := store.SetEnabled(ctx, ScopeUser, "owner", "home", true); err != nil || changed {
+		t.Fatalf("absent row changed=%t err=%v", changed, err)
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if changed, err := store.Delete(canceled, ScopeUser, "owner", "home"); err == nil || changed {
+		t.Fatalf("canceled delete changed=%t err=%v", changed, err)
+	}
+	if changed, err := store.SetEnabled(canceled, ScopeUser, "owner", "home", true); err == nil || changed {
+		t.Fatalf("canceled update changed=%t err=%v", changed, err)
+	}
+}
 
 type staticResolver map[string][]string
 

@@ -176,9 +176,14 @@ func TestProcessDoesNotSilentlySucceedWhenStagedTurnIsNotPersisted(t *testing.T)
 	reg := registry.New(config.NewLogger(config.LevelError))
 	agent, store := newTestAgent(t, chat, nil, reg)
 	registerStagingTool(t, reg, store.Store, true)
-	response, err := processAgent(agent, "staged-failure", "homeassistant", "session", "user-1", "User", "I prefer dark mode.", nil, nil)
+	usage := requestctx.NewUsageCollector()
+	response, err := agent.Process(requestctx.WithUsageCollector(context.Background(), usage), Request{RequestID: "staged-failure", SessionKey: "session", Prompt: "I prefer dark mode.", Principal: identity.Principal{CanonicalUserID: "user-1", ExternalID: "user-1", Gateway: "homeassistant", Assurance: identity.AssuranceHomeAssistantToken}})
 	if err == nil || response != nil || !strings.Contains(err.Error(), "session turn was not stored") {
 		t.Fatalf("response=%+v err=%v", response, err)
+	}
+	e := usage.ExecutionSnapshot()
+	if !e.IsComplete || e.PersistenceStatus != "failed" || e.ToolExecutionCount != 1 || e.ResponseKind != "error" {
+		t.Fatalf("lost failure execution state: %+v", e)
 	}
 }
 
@@ -481,7 +486,7 @@ func TestProcessDisablesToolsAfterIterationBudget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("process: %v", err)
 	}
-	if resp.Response != "finished without tools" {
+	if resp.Response != "finished without tools" || resp.Kind != "tool_limit" {
 		t.Fatalf("unexpected response %q", resp.Response)
 	}
 	primary := primaryRequests(chat.requests)
@@ -615,8 +620,12 @@ func TestProcessGlobalCapMidBatchEmitsResultForEveryCall(t *testing.T) {
 	agent, _ := newTestAgent(t, chat, nil, reg)
 	agent.toolPolicy.MaxExecutions = 1
 
-	if _, err := processAgent(agent, "cap", "homeassistant", "session", "user-1", "User", "lookup", nil, nil); err != nil {
+	response, err := processAgent(agent, "cap", "homeassistant", "session", "user-1", "User", "lookup", nil, nil)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if response.Kind != "tool_limit" || response.Response != "finished" {
+		t.Fatalf("ceiling response = %+v", response)
 	}
 	requests := primaryRequests(chat.requests)
 	if invocations != 1 {

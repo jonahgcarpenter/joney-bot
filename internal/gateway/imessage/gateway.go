@@ -1,6 +1,7 @@
 package imessage
 
 import (
+	"net"
 	"net/http"
 	"sync"
 
@@ -31,8 +32,12 @@ func (g *Gateway) Start(b *broker.Broker) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc(webhookPath, g.handleWebhook)
 
+	listener, err := net.Listen("tcp", ":"+g.Port)
+	if err != nil {
+		return err
+	}
 	log.Info("gateway.listen", "imessage gateway listening", config.F("port", g.Port), config.F("path", webhookPath))
-	return http.ListenAndServe(":"+g.Port, mux)
+	return http.Serve(listener, mux)
 }
 
 func (g *Gateway) runtimeDependencies() gatewayruntime.Dependencies {
@@ -67,7 +72,10 @@ type Gateway struct {
 	contactNames        map[string]contactNameCacheEntry
 }
 
-func (g *Gateway) log() *config.Logger {
+func (g *Gateway) log(scoped ...*config.Logger) *config.Logger {
+	if len(scoped) > 0 && scoped[0] != nil {
+		return scoped[0]
+	}
 	return g.Log.Server("gateway.imessage", config.F("gateway", "imessage"))
 }
 

@@ -56,6 +56,7 @@ func (p *Provider) DiscoveryTools(ctx context.Context, principal identity.Princi
 	}
 	configs, err := p.manager.store.ListForUser(ctx, principal.CanonicalUserID)
 	if err != nil {
+		p.manager.requestLog(ctx).Warn("mcp.server_configs.list_failed", "failed to list MCP servers", config.F("status", "degraded"), config.ErrorField(err))
 		return nil
 	}
 	tools := make([]llm.Tool, 0, len(configs))
@@ -189,7 +190,7 @@ func (p *Provider) discover(ctx context.Context, principal identity.Principal, s
 	}
 	meta := requestctx.MetadataFromContext(ctx)
 	if p.manager.log != nil {
-		reqLog := p.manager.log.Agent("agent.tool.mcp.discovery", meta.RequestID, meta.SessionID, principal.CanonicalUserID, principal.Gateway, meta.Model)
+		reqLog := p.manager.log.Agent("agent.tool.mcp.discovery", meta.RequestID, principal.CanonicalUserID, principal.Gateway, meta.Model).With(requestctx.LogFields(ctx)...)
 		reqLog.Debug("agent.tool.mcp.discovery", "listed MCP tools", config.F("server", info.Name), config.F("query_chars", len(query)), config.F("tool_count", len(tools)))
 	}
 	return governance.Result{Content: formatDiscoveryResult(info.Name, query, tools), Outcome: governance.OutcomeProductive}, nil

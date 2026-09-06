@@ -34,7 +34,7 @@ func (h helpHandler) Execute(_ context.Context, req commands.Request) (commands.
 				}
 			}
 		}
-		return commands.Result{Text: "Unknown command: /" + want}, nil
+		return commands.Result{Text: "Unknown command: /" + want, Outcome: commands.Outcome{Status: "rejected", ReasonCode: "unknown_command"}}, nil
 	}
 
 	lines := make([]string, 0, len(definitions)+1)

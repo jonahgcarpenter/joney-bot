@@ -49,7 +49,7 @@ func (h handler) Execute(ctx context.Context, req commands.Request) (commands.Re
 		return listResult(memories)
 	}
 	if len(req.Args) != 2 || req.Args[0] != "forget" {
-		return commands.Result{Text: commands.UsageText(h.Definition())}, nil
+		return commands.Result{Text: commands.UsageText(h.Definition()), Outcome: commands.Outcome{Status: "rejected", ReasonCode: "invalid_arguments"}}, nil
 	}
 	if strings.EqualFold(req.Args[1], "all") {
 		var sessionIDs []string
@@ -64,11 +64,11 @@ func (h handler) Execute(ctx context.Context, req commands.Request) (commands.Re
 			return commands.Result{}, err
 		}
 		h.accounts.UserDataResetCommitted(req.Principal.CanonicalUserID)
-		return commands.Result{Text: "All stored information was permanently deleted. Your account was preserved and your sessions were reset.", Invalidation: &invalidation.Event{SessionIDs: sessionIDs}}, nil
+		return commands.Result{Text: "All stored information was permanently deleted. Your account was preserved and your sessions were reset.", Invalidation: &invalidation.Event{SessionIDs: sessionIDs}, Outcome: commands.Outcome{Status: "ok", Operation: "memory.forget_all", IsChanged: true, AffectedCount: 1}}, nil
 	}
 	id, err := memory.ParseMemoryID(req.Args[1])
 	if err != nil {
-		return commands.Result{Text: "ID must be an exact positive decimal stable ID, or all."}, nil
+		return commands.Result{Text: "ID must be an exact positive decimal stable ID, or all.", Outcome: commands.Outcome{Status: "rejected", ReasonCode: "invalid_arguments"}}, nil
 	}
 	err = h.accounts.RunAuthenticatedCanonicalMutation(req.Principal, func(userID string) error {
 		if userID != req.Principal.CanonicalUserID {
@@ -77,11 +77,11 @@ func (h handler) Execute(ctx context.Context, req commands.Request) (commands.Re
 		return h.memory.HardDeleteMemory(ctx, userID, id, time.Now().UTC())
 	})
 	if errors.Is(err, sql.ErrNoRows) {
-		return commands.Result{Text: "Memory " + req.Args[1] + " was not found."}, nil
+		return commands.Result{Text: "Memory " + req.Args[1] + " was not found.", Outcome: commands.Outcome{Status: "rejected", ReasonCode: "not_found"}}, nil
 	} else if err != nil {
 		return commands.Result{}, err
 	}
-	return commands.Result{Text: "Memory " + req.Args[1] + " was permanently deleted."}, nil
+	return commands.Result{Text: "Memory " + req.Args[1] + " was permanently deleted.", Outcome: commands.Outcome{Status: "ok", Operation: "memory.forget", IsChanged: true, AffectedCount: 1}}, nil
 }
 
 func (h handler) resolveUser(req commands.Request) (string, error) {

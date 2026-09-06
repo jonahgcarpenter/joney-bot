@@ -83,6 +83,9 @@ type Gateway struct {
 	hbAcked     bool
 }
 
-func (dg *Gateway) log() *config.Logger {
+func (dg *Gateway) log(scoped ...*config.Logger) *config.Logger {
+	if len(scoped) > 0 && scoped[0] != nil {
+		return scoped[0]
+	}
 	return dg.Log.Server("gateway.discord", config.F("gateway", "discord"))
 }

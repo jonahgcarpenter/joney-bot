@@ -13,6 +13,9 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 )
 
 //go:embed migrations/*.sql
@@ -103,6 +106,9 @@ func migrationChecksum(m schemaMigration) string {
 }
 
 func (d *DB) runSchemaMigrations(ctx context.Context, registry []schemaMigration) (err error) {
+	started := time.Now()
+	appliedCount := 0
+	committed := false
 	if err := validateMigrationRegistry(registry); err != nil {
 		return err
 	}
@@ -117,17 +123,25 @@ func (d *DB) runSchemaMigrations(ctx context.Context, registry []schemaMigration
 	}
 	defer func() {
 		_, enableErr := conn.ExecContext(context.Background(), `PRAGMA foreign_keys = ON`)
-		if err == nil && enableErr != nil {
-			err = fmt.Errorf("restore foreign keys after schema migrations: %w", enableErr)
+		if enableErr != nil {
+			err = errors.Join(err, fmt.Errorf("restore foreign keys after schema migrations: %w", enableErr))
+		}
+		if err == nil && committed && appliedCount < len(registry) && d.log != nil {
+			prior := "empty"
+			if appliedCount > 0 {
+				prior = registry[appliedCount-1].name
+			}
+			d.log.Server("database").Info("database.migrations.applied", "schema migrations committed and foreign keys restored", config.F("applied_count", len(registry)-appliedCount), config.F("prior_release", prior), config.F("target_release", registry[len(registry)-1].name), config.F("duration_ms", time.Since(started).Milliseconds()), config.F("status", "ok"))
 		}
 	}()
 	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
 		return fmt.Errorf("begin immediate schema migration transaction: %w", err)
 	}
-	committed := false
 	defer func() {
 		if !committed {
-			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+			if _, rollbackErr := conn.ExecContext(context.Background(), `ROLLBACK`); rollbackErr != nil {
+				err = errors.Join(err, fmt.Errorf("rollback schema migrations: %w", rollbackErr))
+			}
 		}
 	}()
 
@@ -153,7 +167,7 @@ CREATE TABLE IF NOT EXISTS schema_migration_versions (
 		return fmt.Errorf("initialize ordered schema migration ledger: %w", err)
 	}
 
-	appliedCount, err := validateAppliedMigrationPrefix(ctx, conn, registry)
+	appliedCount, err = validateAppliedMigrationPrefix(ctx, conn, registry)
 	if err != nil {
 		return err
 	}

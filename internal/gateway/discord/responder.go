@@ -6,6 +6,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
+	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 )
 
 type runtimeResponder struct {
@@ -31,6 +32,7 @@ func newRuntimeResponder(gateway *Gateway, requestID, channelID, replyToID, sess
 }
 
 func (r *runtimeResponder) StartProcessing() (func(), error) {
+	log := r.gateway.log().With(config.F("request_id", r.requestID))
 	stopTyping := make(chan struct{})
 	r.typingMu.Lock()
 	r.stopTyping = stopTyping
@@ -42,7 +44,7 @@ func (r *runtimeResponder) StartProcessing() (func(), error) {
 			r.typingMu.Unlock()
 			return
 		default:
-			_ = r.gateway.sendTyping(r.channelID)
+			_ = r.gateway.sendTyping(r.channelID, log)
 			r.typingMu.Unlock()
 		}
 
@@ -58,7 +60,7 @@ func (r *runtimeResponder) StartProcessing() (func(), error) {
 					r.typingMu.Unlock()
 					return
 				default:
-					_ = r.gateway.sendTyping(r.channelID)
+					_ = r.gateway.sendTyping(r.channelID, log)
 					r.typingMu.Unlock()
 				}
 			case <-stopTyping:
@@ -84,7 +86,7 @@ func (r *runtimeResponder) Stream(chunk agent.StreamChunk) {
 }
 
 func (r *runtimeResponder) SendFallback(text string) error {
-	_, err := r.gateway.sendMessage(r.channelID, text, r.replyToID)
+	_, err := r.gateway.sendMessage(r.channelID, text, r.replyToID, r.gateway.log().With(config.F("request_id", r.requestID)))
 	return err
 }
 
@@ -94,7 +96,7 @@ func (r *runtimeResponder) SendCommandResponse(result commands.Result) error {
 	}
 	attachments := result.Attachments
 	if len(attachments) == 0 {
-		_, err := r.gateway.sendMessage(r.channelID, result.Text, r.replyToID)
+		_, err := r.gateway.sendMessage(r.channelID, result.Text, r.replyToID, r.gateway.log().With(config.F("request_id", r.requestID)))
 		return err
 	}
 	for i := range attachments {
@@ -108,7 +110,7 @@ func (r *runtimeResponder) SendCommandResponse(result commands.Result) error {
 		}
 	}
 	if result.Text != "" {
-		_, err := r.gateway.sendMessage(r.channelID, result.Text, "")
+		_, err := r.gateway.sendMessage(r.channelID, result.Text, "", r.gateway.log().With(config.F("request_id", r.requestID)))
 		return err
 	}
 	return nil

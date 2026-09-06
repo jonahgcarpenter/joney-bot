@@ -96,6 +96,10 @@ type Metadata struct {
 	SessionGeneration int
 	Model             string
 	CurrentUserText   string
+	Workload          string
+	OperationID       string
+	ParentOperationID string
+	JobID             int64
 }
 
 // InputImage is a request-scoped copy of one normalized current-turn image.

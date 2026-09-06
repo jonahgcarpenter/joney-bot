@@ -12,7 +12,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 )
 
-func (g *Gateway) lookupContactDisplayName(normalizedSenderID string) (string, error) {
+func (g *Gateway) lookupContactDisplayName(normalizedSenderID string, scoped ...*config.Logger) (string, error) {
 	if normalizedSenderID == "" {
 		return "", nil
 	}
@@ -45,7 +45,7 @@ func (g *Gateway) lookupContactDisplayName(normalizedSenderID string) (string, e
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		g.log().Warn("gateway.contact_lookup.failed", "BlueBubbles contact query failed", config.F("user_id", normalizedSenderID), config.F("http_status", resp.StatusCode), config.F("response_bytes", len(body)), config.F("status", "degraded"))
+		g.log(scoped...).Debug("gateway.contact_lookup.failed", "BlueBubbles contact query failed", config.F("http_status", resp.StatusCode), config.F("response_bytes", len(body)), config.F("status", "degraded"))
 		return "", fmt.Errorf("BlueBubbles contact query failed with status %d", resp.StatusCode)
 	}
 

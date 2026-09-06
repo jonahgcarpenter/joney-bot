@@ -16,6 +16,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/database"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
+	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
 )
 
 const (
@@ -146,7 +147,7 @@ WHERE initiator_user_id = ? AND consumed_at IS NULL AND invalidated_at IS NULL
 	if err != nil {
 		return LinkChallenge{}, err
 	}
-	s.log.Info("account_link.challenge.created", "created account-link challenge", config.F("request_id", requestID), config.F("challenge_id", challengeID), config.F("actor_user_id", principal.CanonicalUserID), config.F("gateway", principal.Gateway), config.F("status", "ok"))
+	s.log.With(requestctx.LogFields(ctx)...).Info("account_link.challenge.created", "created account-link challenge", config.F("request_id", requestID), config.F("challenge_id", challengeID), config.F("actor_user_id", principal.CanonicalUserID), config.F("gateway", principal.Gateway), config.F("status", "ok"))
 	return LinkChallenge{ID: challengeID, Code: code, ExpiresAt: expiresAt}, nil
 }
 
@@ -186,7 +187,7 @@ WHERE initiator_user_id = ? AND consumed_at IS NULL AND invalidated_at IS NULL A
 		return false, err
 	}
 	if cancelled {
-		s.log.Info("account_link.challenge.cancelled", "cancelled account-link challenge", config.F("request_id", requestID), config.F("actor_user_id", principal.CanonicalUserID), config.F("gateway", principal.Gateway), config.F("status", "ok"))
+		s.log.With(requestctx.LogFields(ctx)...).Info("account_link.challenge.cancelled", "cancelled account-link challenge", config.F("request_id", requestID), config.F("actor_user_id", principal.CanonicalUserID), config.F("gateway", principal.Gateway), config.F("status", "ok"))
 	}
 	return cancelled, nil
 }
@@ -236,6 +237,9 @@ func (s *Service) ConfirmChallenge(ctx context.Context, principal identity.Princ
 		}
 
 		initiatorOwner, initiatorBanned, err := accountOwnerTx(ctx, tx, challenge.InitiatorGateway, challenge.InitiatorIdentifier)
+		if err != nil && !errors.Is(err, ErrPrincipalMismatch) {
+			return err
+		}
 		if err != nil || initiatorOwner != challenge.InitiatorUserID {
 			return ErrChallengeInvalid
 		}
@@ -322,7 +326,9 @@ func (s *Service) ConfirmChallenge(ctx context.Context, principal identity.Princ
 		return nil
 	})
 	if err != nil {
-		s.log.Warn("account_link.challenge.rejected", "rejected account-link challenge", config.F("request_id", requestID), config.F("challenge_id", challengeID), config.F("actor_user_id", principal.CanonicalUserID), config.F("gateway", principal.Gateway), config.F("status", "rejected"), config.ErrorField(err))
+		if reason, expected := PolicyReason(err); expected {
+			s.log.With(requestctx.LogFields(ctx)...).Info("account_link.challenge.rejected", "rejected account-link challenge", config.F("request_id", requestID), config.F("actor_user_id", principal.CanonicalUserID), config.F("reason_code", reason), config.F("status", "rejected"))
+		}
 		return ConfirmResult{}, err
 	}
 	if mergedLoser != "" && s.mcp != nil {
@@ -332,7 +338,7 @@ func (s *Service) ConfirmChallenge(ctx context.Context, principal identity.Princ
 	if result.Replayed {
 		event = "account_link.challenge.replayed"
 	}
-	s.log.Info(event, "confirmed account-link challenge", config.F("request_id", requestID), config.F("challenge_id", challengeID), config.F("actor_user_id", principal.CanonicalUserID), config.F("gateway", principal.Gateway), config.F("status", "ok"))
+	s.log.With(requestctx.LogFields(ctx)...).Info(event, "confirmed account-link challenge", config.F("request_id", requestID), config.F("challenge_id", challengeID), config.F("actor_user_id", principal.CanonicalUserID), config.F("target_user_id", result.CanonicalUserID), config.F("gateway", principal.Gateway), config.F("status", "ok"))
 	return result, nil
 }
 
@@ -393,8 +399,11 @@ RETURNING id, initiator_user_id, initiator_gateway, initiator_identifier, consum
 SELECT id, initiator_user_id, initiator_gateway, initiator_identifier, consumed_at, consumed_gateway, consumed_identifier, result_user_id
 FROM account_link_challenges WHERE code_hash = ?
 `, codeHash))
-	if err != nil {
+	if errors.Is(err, sql.ErrNoRows) {
 		return storedChallenge{}, false, ErrChallengeInvalid
+	}
+	if err != nil {
+		return storedChallenge{}, false, fmt.Errorf("read account-link challenge: %w", err)
 	}
 	return challenge, false, nil
 }

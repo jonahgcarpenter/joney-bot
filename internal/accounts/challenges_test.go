@@ -17,8 +17,8 @@ import (
 
 func TestChallengeLifecycleRejectsExpiryCancellationAndSameAccount(t *testing.T) {
 	links := newTestService(t)
-	discordID, _ := links.EnsureAccount("discord", "101", "Discord User")
-	websocketID, _ := links.EnsureAccount("homeassistant", "ws-user", "Web User")
+	discordID, _ := links.EnsureAccount(context.Background(), "discord", "101", "Discord User")
+	websocketID, _ := links.EnsureAccount(context.Background(), "homeassistant", "ws-user", "Web User")
 	discord := identity.Principal{CanonicalUserID: discordID, Gateway: "discord", ExternalID: "101", Assurance: identity.AssuranceDiscordGateway}
 	websocket := identity.Principal{CanonicalUserID: websocketID, Gateway: "homeassistant", ExternalID: "ws-user", Assurance: identity.AssuranceHomeAssistantToken}
 	now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
@@ -52,7 +52,7 @@ func TestChallengeLifecycleRejectsExpiryCancellationAndSameAccount(t *testing.T)
 
 func TestChallengeCreationPrunesExpiredHistoryAfterRetention(t *testing.T) {
 	links := newTestService(t)
-	userID, _ := links.EnsureAccount("discord", "601", "Retention User")
+	userID, _ := links.EnsureAccount(context.Background(), "discord", "601", "Retention User")
 	principal := identity.Principal{CanonicalUserID: userID, Gateway: "discord", ExternalID: "601", Assurance: identity.AssuranceDiscordGateway}
 	now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
 	links.now = func() time.Time { return now }
@@ -76,8 +76,8 @@ func TestChallengeCreationPrunesExpiredHistoryAfterRetention(t *testing.T) {
 
 func TestChallengeConfirmationIsReplaySafeAndVerifiesParticipants(t *testing.T) {
 	links := newTestService(t)
-	discordID, _ := links.EnsureAccount("discord", "201", "Discord User")
-	websocketID, _ := links.EnsureAccount("homeassistant", "ws-201", "Web User")
+	discordID, _ := links.EnsureAccount(context.Background(), "discord", "201", "Discord User")
+	websocketID, _ := links.EnsureAccount(context.Background(), "homeassistant", "ws-201", "Web User")
 	discord := identity.Principal{CanonicalUserID: discordID, Gateway: "discord", ExternalID: "201", Assurance: identity.AssuranceDiscordGateway}
 	websocket := identity.Principal{CanonicalUserID: websocketID, Gateway: "homeassistant", ExternalID: "ws-201", Assurance: identity.AssuranceHomeAssistantToken}
 
@@ -113,9 +113,9 @@ func TestChallengeConfirmationIsReplaySafeAndVerifiesParticipants(t *testing.T) 
 
 func TestChallengeReplayFollowsLaterCanonicalMerge(t *testing.T) {
 	links := newTestService(t)
-	firstID, _ := links.EnsureAccount("discord", "211", "First")
-	secondID, _ := links.EnsureAccount("homeassistant", "ws-211", "Second")
-	thirdID, _ := links.EnsureAccount("imessage", "+15550000211", "Third")
+	firstID, _ := links.EnsureAccount(context.Background(), "discord", "211", "First")
+	secondID, _ := links.EnsureAccount(context.Background(), "homeassistant", "ws-211", "Second")
+	thirdID, _ := links.EnsureAccount(context.Background(), "imessage", "+15550000211", "Third")
 	first := identity.Principal{CanonicalUserID: firstID, Gateway: "discord", ExternalID: "211", Assurance: identity.AssuranceDiscordGateway}
 	second := identity.Principal{CanonicalUserID: secondID, Gateway: "homeassistant", ExternalID: "ws-211", Assurance: identity.AssuranceHomeAssistantToken}
 	third := identity.Principal{CanonicalUserID: thirdID, Gateway: "imessage", ExternalID: "+15550000211", Assurance: identity.AssuranceBlueBubblesWebhook}
@@ -139,14 +139,14 @@ func TestChallengeReplayFollowsLaterCanonicalMerge(t *testing.T) {
 
 func TestAdminMutationReResolvesMergedActor(t *testing.T) {
 	links := newTestService(t)
-	winnerID, _ := links.EnsureAccount("discord", "221", "Winner")
-	loserID, _ := links.EnsureAccount("homeassistant", "ws-221", "Admin")
+	winnerID, _ := links.EnsureAccount(context.Background(), "discord", "221", "Winner")
+	loserID, _ := links.EnsureAccount(context.Background(), "homeassistant", "ws-221", "Admin")
 	winner := identity.Principal{CanonicalUserID: winnerID, Gateway: "discord", ExternalID: "221", Assurance: identity.AssuranceDiscordGateway}
 	staleAdmin := identity.Principal{CanonicalUserID: loserID, Gateway: "homeassistant", ExternalID: "ws-221", Assurance: identity.AssuranceHomeAssistantToken}
 	claimTestAdmin(t, links, staleAdmin)
 	connectTestAccounts(t, links, winner, staleAdmin)
 
-	if err := links.DeleteUserAs(staleAdmin, winnerID); err == nil || !strings.Contains(err.Error(), "cannot delete yourself") {
+	if _, err := links.DeleteUserAs(context.Background(), staleAdmin, winnerID); err == nil || !strings.Contains(err.Error(), "cannot delete yourself") {
 		t.Fatalf("stale merged actor delete error=%v", err)
 	}
 	if _, ok, err := links.User(winnerID); err != nil || !ok {
@@ -156,8 +156,8 @@ func TestAdminMutationReResolvesMergedActor(t *testing.T) {
 
 func TestChallengeRejectsGatewayConflictAndBanWithoutConsumption(t *testing.T) {
 	links := newTestService(t)
-	firstID, _ := links.EnsureAccount("discord", "301", "First")
-	secondID, _ := links.EnsureAccount("discord", "302", "Second")
+	firstID, _ := links.EnsureAccount(context.Background(), "discord", "301", "First")
+	secondID, _ := links.EnsureAccount(context.Background(), "discord", "302", "Second")
 	first := identity.Principal{CanonicalUserID: firstID, Gateway: "discord", ExternalID: "301", Assurance: identity.AssuranceDiscordGateway}
 	second := identity.Principal{CanonicalUserID: secondID, Gateway: "discord", ExternalID: "302", Assurance: identity.AssuranceDiscordGateway}
 	challenge, _ := links.CreateChallenge(context.Background(), first, "req")
@@ -165,17 +165,17 @@ func TestChallengeRejectsGatewayConflictAndBanWithoutConsumption(t *testing.T) {
 		t.Fatalf("gateway conflict error = %v", err)
 	}
 
-	websocketID, _ := links.EnsureAccount("homeassistant", "ws-301", "Web")
+	websocketID, _ := links.EnsureAccount(context.Background(), "homeassistant", "ws-301", "Web")
 	websocket := identity.Principal{CanonicalUserID: websocketID, Gateway: "homeassistant", ExternalID: "ws-301", Assurance: identity.AssuranceHomeAssistantToken}
 	challenge, _ = links.CreateChallenge(context.Background(), first, "req")
 	claimTestAdmin(t, links, first)
-	if err := links.BanUserAs(first, websocketID, "blocked"); err != nil {
+	if err := links.BanUserAs(context.Background(), first, websocketID, "blocked"); err != nil {
 		t.Fatalf("ban confirmer: %v", err)
 	}
 	if _, err := links.ConfirmChallenge(context.Background(), websocket, challenge.Code, "req"); !errors.Is(err, ErrLinkBanned) {
 		t.Fatalf("banned confirmation error = %v", err)
 	}
-	if err := links.UnbanUserAs(first, websocketID); err != nil {
+	if _, err := links.UnbanUserAs(context.Background(), first, websocketID); err != nil {
 		t.Fatalf("unban confirmer: %v", err)
 	}
 	if _, err := links.ConfirmChallenge(context.Background(), websocket, challenge.Code, "req"); err != nil {
@@ -197,8 +197,8 @@ func TestChallengeMergeTransfersMemoryAndEncryptedMCP(t *testing.T) {
 	mcpStore.SetResolverForTest(testPublicResolver{})
 	manager := mcp.NewManagerFromStore(mcpStore, log)
 	links := NewService(dbPath, memories, manager, log)
-	winnerID, _ := links.EnsureAccount("discord", "401", "Winner")
-	loserID, _ := links.EnsureAccount("homeassistant", "ws-401", "Loser")
+	winnerID, _ := links.EnsureAccount(context.Background(), "discord", "401", "Winner")
+	loserID, _ := links.EnsureAccount(context.Background(), "homeassistant", "ws-401", "Loser")
 	if _, err := memorytest.PublishMemory(ctx, memories, loserID, memorytest.MemoryFixture{Scope: "long_term", Category: "notes", Statement: "Loser fact", Evidence: "test"}); err != nil {
 		t.Fatalf("save loser memory: %v", err)
 	}
@@ -247,8 +247,8 @@ func TestChallengeConfirmationRollsBackConsumptionOnMergeFailure(t *testing.T) {
 	memories := memorytest.NewStore(t, dbPath, log)
 	mcpMerger := &failingMCPMerger{fail: true}
 	links := NewService(dbPath, memories, mcpMerger, log)
-	winnerID, _ := links.EnsureAccount("discord", "501", "Winner")
-	loserID, _ := links.EnsureAccount("homeassistant", "ws-501", "Loser")
+	winnerID, _ := links.EnsureAccount(context.Background(), "discord", "501", "Winner")
+	loserID, _ := links.EnsureAccount(context.Background(), "homeassistant", "ws-501", "Loser")
 	winner := identity.Principal{CanonicalUserID: winnerID, Gateway: "discord", ExternalID: "501", Assurance: identity.AssuranceDiscordGateway}
 	loser := identity.Principal{CanonicalUserID: loserID, Gateway: "homeassistant", ExternalID: "ws-501", Assurance: identity.AssuranceHomeAssistantToken}
 	challenge, _ := links.CreateChallenge(context.Background(), winner, "req")
@@ -272,8 +272,8 @@ func TestChallengeMergeRollsBackPreservedStateWhenFinalDeleteFails(t *testing.T)
 	t.Cleanup(func() { memories.Close() })
 	links := NewService(dbPath, memories, nil, log)
 	t.Cleanup(func() { links.Close() })
-	winnerID, _ := links.EnsureAccount("discord", "591", "Winner")
-	loserID, _ := links.EnsureAccount("homeassistant", "merge-fail-loser", "Loser")
+	winnerID, _ := links.EnsureAccount(context.Background(), "discord", "591", "Winner")
+	loserID, _ := links.EnsureAccount(context.Background(), "homeassistant", "merge-fail-loser", "Loser")
 	if _, err := memorytest.PublishMemory(ctx, memories, loserID, memorytest.MemoryFixture{Scope: "long_term", Category: "notes", Statement: "rollback fact", Evidence: "test"}); err != nil {
 		t.Fatal(err)
 	}
@@ -326,19 +326,19 @@ func TestDeleteUserRollsBackWhenMCPDeletionFails(t *testing.T) {
 	mcpMerger := &failingMCPMerger{deleteFail: true}
 	links := NewService(dbPath, memories, mcpMerger, log)
 	t.Cleanup(func() { links.Close() })
-	actorID, _ := links.EnsureAccount("discord", "511", "Actor")
-	targetID, _ := links.EnsureAccount("homeassistant", "ws-511", "Target")
+	actorID, _ := links.EnsureAccount(context.Background(), "discord", "511", "Actor")
+	targetID, _ := links.EnsureAccount(context.Background(), "homeassistant", "ws-511", "Target")
 	actor := identity.Principal{CanonicalUserID: actorID, Gateway: "discord", ExternalID: "511", Assurance: identity.AssuranceDiscordGateway}
 	claimTestAdmin(t, links, actor)
 
-	if err := links.DeleteUserAs(actor, targetID); err == nil {
+	if _, err := links.DeleteUserAs(context.Background(), actor, targetID); err == nil {
 		t.Fatal("expected injected MCP deletion failure")
 	}
 	if _, ok, err := links.User(targetID); err != nil || !ok {
 		t.Fatalf("failed deletion removed user: ok=%v err=%v", ok, err)
 	}
 	mcpMerger.deleteFail = false
-	if err := links.DeleteUserAs(actor, targetID); err != nil {
+	if _, err := links.DeleteUserAs(context.Background(), actor, targetID); err != nil {
 		t.Fatalf("delete after recovery: %v", err)
 	}
 	if mcpMerger.deletedUser != targetID {

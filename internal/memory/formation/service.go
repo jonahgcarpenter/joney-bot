@@ -2,6 +2,7 @@ package formation
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -42,6 +43,9 @@ type Service struct {
 	notify    chan struct{}
 	cancel    context.CancelFunc
 	wg        sync.WaitGroup
+	// Set only on the attempt-local worker after processing succeeds, and emitted
+	// only after CompleteFormationJob. Published outcomes may reference old rows.
+	resultFields []config.Field
 }
 
 // NewService creates a serialized formation worker.
@@ -95,6 +99,10 @@ func (s *Service) Enqueue(ctx context.Context, userID string, source memory.Form
 
 func (s *Service) run(ctx context.Context) {
 	defer s.wg.Done()
+	if s.log != nil {
+		s.log.Server("user_memory.formation").Info("user_memory.formation.worker.started", "formation worker started", config.F("workload", "formation"))
+		defer s.log.Server("user_memory.formation").Info("user_memory.formation.worker.stopped", "formation worker stopped", config.F("workload", "formation"))
+	}
 	ticker := time.NewTicker(formationPollInterval)
 	defer ticker.Stop()
 	s.reconcile(ctx)
@@ -144,23 +152,46 @@ func (s *Service) drain(ctx context.Context) {
 			s.warn("user_memory.formation.job.claim_failed", "failed to claim user-memory formation job", err)
 			return
 		}
-		err = s.process(ctx, &job)
+		started := time.Now()
+		meta := requestctx.MetadataFromContext(ctx)
+		meta.ParentOperationID, meta.OperationID = meta.OperationID, rand.Text()
+		meta.Workload, meta.JobID, meta.RequestID, meta.Model = "formation", job.ID, job.RequestID, job.Model
+		jobCtx := requestctx.WithMetadata(ctx, meta)
+		jobCtx = requestctx.WithPrincipal(jobCtx, identity.Principal{CanonicalUserID: job.UserID})
+		jobCtx = requestctx.WithUsageCollector(jobCtx, requestctx.NewUsageCollector())
+		worker := &Service{store: s.store, extractor: s.extractor, model: s.model, jobLease: s.jobLease, gate: s.gate, log: s.log}
+		if worker.log != nil {
+			worker.log = worker.log.With(requestctx.LogFields(jobCtx)...).With(config.F("job_kind", "memory_formation"), config.F("formation_purpose", job.Purpose), config.F("attempt_count", job.AttemptCount), config.F("model_submission_limit", memory.DurableModelSubmissionLimit), config.F("source_turn_id", job.TurnID))
+			if job.Purpose == memory.FormationPurposeAgentSave {
+				worker.log = worker.log.With(config.F("attempt_limit", formationMaxAttempts), config.F("model_submission_limit", 0))
+			}
+			worker.log.Server("user_memory.formation").Info("user_memory.formation.job.started", "formation job attempt started", config.F("model_submission_count", job.ModelSubmissionCount), config.F("status", "ok"))
+		}
+		s := worker
+		err = s.process(jobCtx, &job)
+		if s.log != nil {
+			s.log = s.log.With(config.F("duration_ms", time.Since(started).Milliseconds()), config.F("model_submission_count", job.ModelSubmissionCount), config.F("invalid_output_retry_count", job.InvalidOutputRetryCount))
+		}
 		if err != nil {
-			if errors.Is(err, errBackgroundPreempted) {
+			if errors.Is(err, errBackgroundPreempted) || errors.Is(err, context.Canceled) {
 				if deferErr := s.store.DeferFormationJob(context.Background(), job, time.Second); deferErr != nil {
 					s.warn("user_memory.formation.job.defer_failed", "failed to defer preempted user-memory formation job", deferErr, config.F("job_id", job.ID), config.F("user_id", job.UserID))
+				} else if s.log != nil {
+					s.log.Server("user_memory.formation").Info("user_memory.formation.job.deferred", "formation work deferred", config.F("outcome", "deferred"), config.F("attempt_count", max(job.AttemptCount-1, 0)), config.F("model_submission_count", job.ModelSubmissionCount), config.F("duration_ms", time.Since(started).Milliseconds()), config.F("status", "ok"))
 				}
 				return
 			}
 			if errors.Is(err, memory.ErrModelSubmissionBudgetExhausted) {
-				if retryErr := s.store.RetryFormationJob(context.Background(), job, "model_submission_budget_exhausted", formationMaxAttempts); retryErr != nil {
+				if state, retryErr := s.store.RetryFormationJob(context.Background(), job, "model_submission_budget_exhausted", formationMaxAttempts); retryErr != nil {
 					s.warn("user_memory.formation.job.complete_failed", "failed to terminally close exhausted user-memory formation job", retryErr, config.F("job_id", job.ID), config.F("user_id", job.UserID))
+				} else if s.log != nil {
+					s.log.Server("user_memory.formation").Info("user_memory.formation.job.budget_exhausted", "formation submission budget exhausted", config.F("job_state", state), config.F("model_submission_count", job.ModelSubmissionCount), config.F("model_submission_limit", memory.DurableModelSubmissionLimit), config.F("status", "degraded"))
 				}
 				continue
 			}
 			if errors.Is(err, errInvalidOutput) {
 				code := errorCode(err)
-				fields := []config.Field{config.F("job_id", job.ID), config.F("user_id", job.UserID), config.F("request_id", job.RequestID), config.F("session_id", job.SessionID), config.F("model", job.Model), config.F("extractor_version", job.ExtractorVersion), config.F("attempt_count", job.AttemptCount), config.F("invalid_output_retry_count", job.InvalidOutputRetryCount), config.F("model_submission_count", job.ModelSubmissionCount), config.F("error_code", code)}
+				fields := []config.Field{config.F("attempt_count", job.AttemptCount), config.F("invalid_output_retry_count", job.InvalidOutputRetryCount), config.F("model_submission_count", job.ModelSubmissionCount), config.F("model_submission_limit", memory.DurableModelSubmissionLimit), config.F("reason_code", code)}
 				if job.InvalidOutputRetryCount < invalidOutputMaxRetries && job.ModelSubmissionCount < memory.DurableModelSubmissionLimit {
 					if retryErr := s.store.RetryInvalidFormationJob(context.Background(), job, code); retryErr != nil {
 						s.warn("user_memory.formation.job.retry_failed", "failed to retry invalid user-memory formation output", retryErr, fields...)
@@ -184,11 +215,11 @@ func (s *Service) drain(ctx context.Context) {
 				}
 				continue
 			}
-			if retryErr := s.store.RetryFormationJob(context.Background(), job, errorCode(err), formationMaxAttempts); retryErr != nil {
+			state, retryErr := s.store.RetryFormationJob(context.Background(), job, errorCode(err), formationMaxAttempts)
+			if retryErr != nil {
 				s.warn("user_memory.formation.job.retry_failed", "failed to release user-memory formation job lease", retryErr, config.F("job_id", job.ID), config.F("user_id", job.UserID))
 				continue
 			}
-			state, _ := s.store.FormationJobState(context.Background(), job.UserID, job.ID)
 			event, message, status := "user_memory.formation.job.retry", "user-memory formation job will retry", "retry"
 			if state == "dead" {
 				event, message, status = "user_memory.formation.job.dead", "user-memory formation job exhausted immediate retries", "degraded"
@@ -199,11 +230,14 @@ func (s *Service) drain(ctx context.Context) {
 		}
 		if err := s.store.CompleteFormationJob(context.Background(), job, false); err != nil {
 			s.warn("user_memory.formation.job.complete_failed", "failed to complete user-memory formation job", err, config.F("job_id", job.ID))
+		} else if s.log != nil {
+			s.log.Server("user_memory.formation").Info("user_memory.formation.job.complete", "formation job committed", append(s.resultFields, config.F("record_kind", "summary"), config.F("job_state", "succeeded"), config.F("duration_ms", time.Since(started).Milliseconds()), config.F("status", "ok"))...)
 		}
 	}
 }
 
 func (s *Service) process(ctx context.Context, job *memory.FormationJob) error {
+	s.resultFields = nil
 	started := time.Now()
 	if err := s.store.ValidateFormationJobLease(ctx, *job); err != nil {
 		return err
@@ -265,8 +299,11 @@ func (s *Service) process(ctx context.Context, job *memory.FormationJob) error {
 				return renewErr
 			},
 			func(workCtx context.Context) error {
-				extractCtx := requestctx.WithMetadata(workCtx, requestctx.Metadata{RequestID: fmt.Sprintf("%s:formation:%d", job.RequestID, job.ID), SessionID: job.SessionID, Model: job.Model, CurrentUserText: turn.UserText})
-				extractCtx = requestctx.WithPrincipal(extractCtx, identity.Principal{CanonicalUserID: job.UserID, Gateway: "formation", ExternalID: job.UserID, Assurance: identity.AssuranceSelfAsserted})
+				meta := requestctx.MetadataFromContext(workCtx)
+				meta.RequestID, meta.SessionID, meta.Model, meta.CurrentUserText = job.RequestID, job.SessionID, job.Model, turn.UserText
+				meta.Workload, meta.JobID = "formation", job.ID
+				extractCtx := requestctx.WithMetadata(workCtx, meta)
+				extractCtx = requestctx.WithPrincipal(extractCtx, identity.Principal{CanonicalUserID: job.UserID})
 				var extractErr error
 				count, reserveErr := s.store.ReserveFormationModelSubmission(workCtx, renewedJob)
 				if reserveErr != nil {
@@ -283,11 +320,17 @@ func (s *Service) process(ctx context.Context, job *memory.FormationJob) error {
 		release()
 		release = func() {}
 		if wasPreempted {
+			if err != nil && !errors.Is(err, context.Canceled) {
+				s.warn("user_memory.formation.job.preemption_error", "independent formation error during preemption", err)
+			}
 			if submissionReserved {
 				if refundErr := s.store.RefundFormationModelSubmission(context.Background(), renewedJob); refundErr != nil {
 					return refundErr
 				}
 				job.ModelSubmissionCount--
+				if s.log != nil {
+					s.log.Server("user_memory.formation").Info("user_memory.formation.submission.refunded", "preempted formation submission refunded", config.F("refunded_submission_count", 1), config.F("model_submission_count", job.ModelSubmissionCount), config.F("status", "ok"))
+				}
 			}
 			return errBackgroundPreempted
 		}
@@ -326,9 +369,10 @@ func (s *Service) process(ctx context.Context, job *memory.FormationJob) error {
 			publishedCount++
 		}
 	}
+	s.resultFields = []config.Field{config.F("is_replay", artifact != ""), config.F("input_turn_count", 1), config.F("submitted_count", extracted.SubmittedCount), config.F("candidate_count", len(extracted.Memories)), config.F("malformed_count", extracted.MalformedCount), config.F("validation_failed_count", validationFailedCount), config.F("proposed_count", proposedCount), config.F("approved_count", approvedCount), config.F("rejected_count", rejectedCount), config.F("published_outcome_count", publishedCount)}
 	if s.log != nil {
-		s.log.Server("user_memory.formation").Info("user_memory.formation.extraction.complete", "completed user-memory formation extraction",
-			config.F("job_id", job.ID), config.F("user_id", job.UserID), config.F("request_id", job.RequestID), config.F("session_id", job.SessionID),
+		s.log.Server("user_memory.formation").Debug("user_memory.formation.extraction.complete", "completed user-memory formation extraction",
+			config.F("job_id", job.ID), config.F("user_id", job.UserID),
 			config.F("model", job.Model), config.F("extractor_version", job.ExtractorVersion), config.F("attempt_count", job.AttemptCount), config.F("invalid_output_retry_count", job.InvalidOutputRetryCount),
 			config.F("submitted_count", extracted.SubmittedCount), config.F("candidate_count", len(extracted.Memories)), config.F("malformed_count", extracted.MalformedCount),
 			config.F("validation_failed_count", validationFailedCount), config.F("proposed_count", proposedCount), config.F("approved_count", approvedCount),
@@ -377,8 +421,11 @@ func (s *Service) processPattern(ctx context.Context, job *memory.FormationJob) 
 			}
 			return renewErr
 		}, func(workCtx context.Context) error {
-			extractCtx := requestctx.WithMetadata(workCtx, requestctx.Metadata{RequestID: fmt.Sprintf("%s:pattern:%d", job.RequestID, job.ID), SessionID: job.SessionID, Model: job.Model})
-			extractCtx = requestctx.WithPrincipal(extractCtx, identity.Principal{CanonicalUserID: job.UserID, Gateway: "formation", ExternalID: job.UserID, Assurance: identity.AssuranceSelfAsserted})
+			meta := requestctx.MetadataFromContext(workCtx)
+			meta.RequestID, meta.SessionID, meta.Model = job.RequestID, job.SessionID, job.Model
+			meta.Workload, meta.JobID = "formation", job.ID
+			extractCtx := requestctx.WithMetadata(workCtx, meta)
+			extractCtx = requestctx.WithPrincipal(extractCtx, identity.Principal{CanonicalUserID: job.UserID})
 			var extractErr error
 			count, reserveErr := s.store.ReserveFormationModelSubmission(workCtx, renewedJob)
 			if reserveErr != nil {
@@ -394,11 +441,17 @@ func (s *Service) processPattern(ctx context.Context, job *memory.FormationJob) 
 		release()
 		release = func() {}
 		if wasPreempted {
+			if err != nil && !errors.Is(err, context.Canceled) {
+				s.warn("user_memory.formation.job.preemption_error", "independent formation error during preemption", err)
+			}
 			if submissionReserved {
 				if refundErr := s.store.RefundFormationModelSubmission(context.Background(), renewedJob); refundErr != nil {
 					return refundErr
 				}
 				job.ModelSubmissionCount--
+				if s.log != nil {
+					s.log.Server("user_memory.formation").Info("user_memory.formation.submission.refunded", "preempted formation submission refunded", config.F("refunded_submission_count", 1), config.F("model_submission_count", job.ModelSubmissionCount), config.F("status", "ok"))
+				}
 			}
 			return errBackgroundPreempted
 		}
@@ -420,7 +473,10 @@ func (s *Service) processPattern(ctx context.Context, job *memory.FormationJob) 
 	acceptedPatternCount := 0
 	rejectedPatternCount := 0
 	candidateCount := 0
+	publicationCount := 0
+	observationCount := 0
 	for patternIndex, pattern := range extracted.Patterns {
+		observationCount += len(pattern.Observations)
 		type evaluatedObservation struct {
 			turn   memory.StoredSessionTurn
 			output policy.CandidateOutput
@@ -471,14 +527,19 @@ func (s *Service) processPattern(ctx context.Context, job *memory.FormationJob) 
 			}
 			candidateCount++
 		}
-		if _, err := s.store.AggregatePatternCandidates(ctx, *job, evaluated[0].output.ClaimSlot, evaluated[0].output.ClaimValue); err != nil {
+		publishedID, err := s.store.AggregatePatternCandidates(ctx, *job, evaluated[0].output.ClaimSlot, evaluated[0].output.ClaimValue)
+		if err != nil {
 			return err
+		}
+		if publishedID != 0 {
+			publicationCount++
 		}
 		acceptedPatternCount++
 	}
+	s.resultFields = []config.Field{config.F("is_replay", artifact != ""), config.F("input_turn_count", len(window.Turns)), config.F("pattern_count", len(extracted.Patterns)), config.F("observation_count", observationCount), config.F("accepted_pattern_count", acceptedPatternCount), config.F("rejected_pattern_count", rejectedPatternCount), config.F("candidate_count", candidateCount), config.F("publication_count", publicationCount)}
 	if s.log != nil {
-		s.log.Server("user_memory.formation").Info("user_memory.formation.pattern.complete", "completed user-memory pattern formation",
-			config.F("job_id", job.ID), config.F("user_id", job.UserID), config.F("request_id", job.RequestID), config.F("session_id", job.SessionID),
+		s.log.Server("user_memory.formation").Debug("user_memory.formation.pattern.complete", "completed user-memory pattern formation",
+			config.F("job_id", job.ID), config.F("user_id", job.UserID),
 			config.F("model", job.Model), config.F("extractor_version", job.ExtractorVersion), config.F("pattern_count", len(extracted.Patterns)),
 			config.F("accepted_pattern_count", acceptedPatternCount), config.F("rejected_pattern_count", rejectedPatternCount), config.F("candidate_count", candidateCount), config.F("status", "ok"))
 	}
@@ -490,7 +551,7 @@ func (s *Service) logPatternRejection(job memory.FormationJob, patternIndex int,
 		return
 	}
 	s.log.Server("user_memory.formation").Debug("user_memory.formation.pattern.rejected", "rejected user-memory pattern before candidate insertion",
-		config.F("job_id", job.ID), config.F("user_id", job.UserID), config.F("request_id", job.RequestID), config.F("session_id", job.SessionID),
+		config.F("job_id", job.ID), config.F("user_id", job.UserID),
 		config.F("pattern_index", patternIndex), config.F("reason_code", reasonCode), config.F("status", "rejected"))
 }
 
@@ -510,12 +571,18 @@ func (s *Service) processAgentSave(ctx context.Context, job *memory.FormationJob
 	if err != nil {
 		return errors.Join(errPermanentExtraction, err)
 	}
+	proposed, approved, rejected, invalid, published, existing := 0, 0, 0, 0, 0, 0
 	for index, candidate := range artifact.Candidates {
 		output, evaluateErr := candidate.Evaluate(turn.UserText)
-		if evaluateErr != nil || output.Approval == policy.ApprovalRejected {
+		if evaluateErr != nil {
+			invalid++
 			continue
 		}
-		_, _, err = s.store.ProposeCandidate(ctx, job.UserID, memory.CandidateProposal{
+		if output.Approval == policy.ApprovalRejected {
+			rejected++
+			continue
+		}
+		result, created, err := s.store.ProposeCandidate(ctx, job.UserID, memory.CandidateProposal{
 			Output:         output,
 			TargetMemoryID: candidate.TargetMemoryID,
 			Source: memory.FormationSource{
@@ -529,12 +596,32 @@ func (s *Service) processAgentSave(ctx context.Context, job *memory.FormationJob
 		if err != nil {
 			return err
 		}
+		if !created {
+			existing++
+		}
+		switch result.State {
+		case "proposed":
+			proposed++
+		case "approved":
+			approved++
+		case "rejected":
+			rejected++
+		}
+		if result.PublishedMemoryID != 0 {
+			published++
+		}
 	}
+	// Local saves have no model artifact; reused candidates identify idempotent replay.
+	s.resultFields = []config.Field{config.F("is_replay", existing > 0), config.F("input_turn_count", 1), config.F("candidate_count", len(artifact.Candidates)), config.F("validation_failed_count", invalid), config.F("proposed_count", proposed), config.F("approved_count", approved), config.F("rejected_count", rejected), config.F("published_outcome_count", published), config.F("existing_candidate_count", existing)}
 	return nil
 }
 
 func (s *Service) warn(event, message string, err error, fields ...config.Field) {
 	if s.log == nil {
+		return
+	}
+	if errors.Is(err, context.Canceled) {
+		s.log.Server("user_memory.formation").Info("user_memory.formation.work.canceled", "formation work canceled", append(fields, config.F("workload", "formation"), config.F("outcome", "canceled"), config.F("status", "ok"))...)
 		return
 	}
 	hasStatus := false
@@ -547,7 +634,7 @@ func (s *Service) warn(event, message string, err error, fields ...config.Field)
 	if !hasStatus {
 		fields = append(fields, config.F("status", "degraded"))
 	}
-	fields = append(fields, config.ErrorField(err))
+	fields = append(fields, config.F("workload", "formation"), config.ErrorField(err))
 	s.log.Server("user_memory.formation").Warn(event, message, fields...)
 }
 

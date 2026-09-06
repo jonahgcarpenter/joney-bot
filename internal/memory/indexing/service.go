@@ -2,17 +2,21 @@ package indexing
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"errors"
 	"fmt"
+	"runtime"
 	"sync"
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory/global"
 	"github.com/jonahgcarpenter/oswald-ai/internal/shared/lease"
+	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
 )
 
 const (
@@ -78,6 +82,10 @@ func (s *Service) RunOnce(ctx context.Context) error {
 
 func (s *Service) run(ctx context.Context) {
 	defer s.wg.Done()
+	if s.log != nil {
+		s.log.Server("indexruntime").Info("index.worker.started", "index worker started", config.F("workload", "indexing"))
+		defer s.log.Server("indexruntime").Info("index.worker.stopped", "index worker stopped", config.F("workload", "indexing"))
+	}
 	if err := s.store.ReconcileDerivedIndexChanges(ctx); err != nil {
 		s.warn("index.outbox.reconcile_failed", "reconcile", err)
 	}
@@ -91,7 +99,10 @@ func (s *Service) run(ctx context.Context) {
 		case <-s.wake:
 			s.cycle(ctx)
 		case <-ticker.C:
-			_ = s.store.ReconcileDerivedIndexChanges(ctx)
+			if err := s.store.ReconcileDerivedIndexChanges(ctx); err != nil {
+				s.warn("index.outbox.reconcile_failed", "reconcile", err)
+			}
+			s.snapshot(ctx)
 			s.cycle(ctx)
 		}
 	}
@@ -101,6 +112,18 @@ func (s *Service) cycle(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
 	}
+	meta := requestctx.MetadataFromContext(ctx)
+	meta.ParentOperationID, meta.OperationID = meta.OperationID, rand.Text()
+	meta.Workload = "indexing"
+	ctx = requestctx.WithMetadata(ctx, meta)
+	parent := s
+	worker := &Service{store: s.store, globalStore: s.globalStore, embedder: s.embedder, model: s.model, dimension: s.dimension, log: s.log}
+	if worker.log != nil {
+		worker.log = worker.log.With(requestctx.LogFields(ctx)...)
+	}
+	// Retain the successful dimension probe without sharing cycle log scope.
+	defer func() { parent.dimension = worker.dimension }()
+	s = worker
 	s.ensureFTS(ctx, memory.IndexKindMemoryFTS)
 	s.ensureFTS(ctx, memory.IndexKindTranscriptFTS)
 	s.ensureFTS(ctx, memory.IndexKindGlobalMemoryFTS)
@@ -144,11 +167,22 @@ func (s *Service) ensureFTS(ctx context.Context, kind string) {
 		err = s.publishAfterDrain(ctx, revision)
 	}
 	if err != nil {
-		_ = s.store.FailIndexRevision(ctx, revision.ID, err.Error())
+		if !errors.Is(err, context.Canceled) {
+			markCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			markErr := s.store.FailIndexRevision(markCtx, revision.ID, "rebuild_failed")
+			cancel()
+			if markErr != nil {
+				s.warn("index.rebuild.mark_failed", kind, markErr, config.F("revision", revision.Revision), config.F("phase", "failure_mark"))
+			}
+		}
 		s.health("index.rebuild.failed", revision, 0, 0, "degraded", time.Since(started), err)
 		return
 	}
-	live, _ := s.store.LiveIndexRevision(ctx, kind)
+	live, readErr := s.store.LiveIndexRevision(ctx, kind)
+	if readErr != nil {
+		s.warn("index.rebuild.live_read_failed", kind, readErr, config.F("phase", "post_publish"))
+		return
+	}
 	s.health("index.rebuild.complete", live, live.ExpectedCount, live.IndexedCount, "ok", time.Since(started), nil)
 }
 
@@ -172,7 +206,10 @@ func (s *Service) ensureVector(ctx context.Context, kind string) {
 	}
 	revision, err := s.store.BuildingIndexRevision(ctx, kind)
 	if err == nil && (revision.Model != s.model || revision.Dimension != dimension) {
-		_ = s.store.FailIndexRevision(ctx, revision.ID, "configuration_changed")
+		if markErr := s.store.FailIndexRevision(ctx, revision.ID, "configuration_changed"); markErr != nil {
+			s.warn("index.rebuild.mark_failed", kind, markErr, config.F("phase", "configuration_changed"))
+			return
+		}
 		err = sql.ErrNoRows
 	}
 	if errors.Is(err, sql.ErrNoRows) {
@@ -192,11 +229,22 @@ func (s *Service) ensureVector(ctx context.Context, kind string) {
 		err = s.publishAfterDrain(ctx, revision)
 	}
 	if err != nil {
-		_ = s.store.FailIndexRevision(ctx, revision.ID, err.Error())
+		if !errors.Is(err, context.Canceled) {
+			markCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			markErr := s.store.FailIndexRevision(markCtx, revision.ID, "rebuild_failed")
+			cancel()
+			if markErr != nil {
+				s.warn("index.rebuild.mark_failed", kind, markErr, config.F("revision", revision.Revision), config.F("phase", "failure_mark"))
+			}
+		}
 		s.health("index.rebuild.failed", revision, 0, 0, "degraded", time.Since(started), err)
 		return
 	}
-	live, _ = s.store.LiveIndexRevision(ctx, kind)
+	live, liveErr = s.store.LiveIndexRevision(ctx, kind)
+	if liveErr != nil {
+		s.warn("index.rebuild.live_read_failed", kind, liveErr, config.F("phase", "post_publish"))
+		return
+	}
 	s.health("index.rebuild.complete", live, live.ExpectedCount, live.IndexedCount, "ok", time.Since(started), nil)
 }
 
@@ -302,23 +350,46 @@ func (s *Service) drain(ctx context.Context) {
 			s.warn("index.outbox.claim_failed", "outbox", err)
 			return
 		}
-		err = lease.Run(ctx, leaseTime,
+		started := time.Now()
+		meta := requestctx.MetadataFromContext(ctx)
+		meta.ParentOperationID, meta.OperationID = meta.OperationID, rand.Text()
+		meta.Workload, meta.JobID = "indexing", change.Sequence
+		jobCtx := requestctx.WithMetadata(ctx, meta)
+		jobCtx = requestctx.WithPrincipal(jobCtx, identity.Principal{CanonicalUserID: change.UserID})
+		jobCtx = requestctx.WithUsageCollector(jobCtx, requestctx.NewUsageCollector())
+		fields := append(requestctx.LogFields(jobCtx), config.F("job_kind", "derived_index"), config.F("entity_kind", change.EntityKind), config.F("entity_id", change.EntityID), config.F("operation", change.Operation), config.F("attempt_count", change.AttemptCount))
+		err = lease.Run(jobCtx, leaseTime,
 			func(renewCtx context.Context) error {
 				return s.store.RenewDerivedIndexChangeLease(renewCtx, change, leaseTime)
 			},
 			func(workCtx context.Context) error { return s.applyChange(workCtx, change) },
 		)
+		fields = append(fields, config.F("record_kind", "summary"), config.F("duration_ms", time.Since(started).Milliseconds()))
 		if err != nil {
-			if retryErr := s.store.RetryDerivedIndexChange(ctx, change, err.Error()); retryErr != nil {
-				s.warn("index.outbox.retry_failed", change.EntityKind, retryErr)
+			// Bookkeeping must survive worker cancellation, retaining exact lease ownership.
+			bookCtx, cancel := context.WithTimeout(context.WithoutCancel(jobCtx), 10*time.Second)
+			retryErr := s.store.RetryDerivedIndexChange(bookCtx, change, "index_apply_failed")
+			cancel()
+			if retryErr != nil {
+				s.warn("index.outbox.retry_failed", change.EntityKind, retryErr, fields...)
 				return
 			}
-			s.warn("index.outbox.retry", change.EntityKind, err)
+			if s.log != nil {
+				outcome := "retry"
+				fields = append(fields, config.F("phase", "apply"), config.ErrorField(err))
+				if errors.Is(err, context.Canceled) {
+					outcome = "canceled"
+				}
+				s.log.Server("indexruntime").Info("index.outbox.attempt.complete", "index outbox attempt persisted", append(fields, config.F("job_state", "retry"), config.F("outcome", outcome), config.F("status", "retry"))...)
+			}
 			continue
 		}
 		if err := s.store.CompleteDerivedIndexChange(ctx, change); err != nil {
-			s.warn("index.outbox.complete_failed", change.EntityKind, err)
+			s.warn("index.outbox.complete_failed", change.EntityKind, err, fields...)
 			return
+		}
+		if s.log != nil {
+			s.log.Server("indexruntime").Info("index.outbox.attempt.complete", "index outbox attempt committed", append(fields, config.F("job_state", "succeeded"), config.F("outcome", "completed"), config.F("status", "ok"))...)
 		}
 	}
 }
@@ -488,9 +559,14 @@ func embeddingText(record memory.MemoryIndexRecord) string {
 	return record.Scope + "\n" + record.Category + "\n" + record.Statement + "\nEvidence: " + record.Evidence
 }
 
-func (s *Service) warn(event, kind string, err error) {
+func (s *Service) warn(event, kind string, err error, fields ...config.Field) {
 	if s.log != nil {
-		s.log.Server("indexruntime").Warn(event, "derived index lifecycle degraded", config.F("kind", kind), config.F("status", "degraded"), config.ErrorField(err))
+		if errors.Is(err, context.Canceled) {
+			s.log.Server("indexruntime").Info("index.work.canceled", "index work canceled", append(fields, config.F("kind", kind), config.F("workload", "indexing"), config.F("outcome", "canceled"), config.F("status", "ok"))...)
+			return
+		}
+		fields = append(fields, config.F("kind", kind), config.F("workload", "indexing"), config.F("status", "degraded"), config.ErrorField(err))
+		s.log.Server("indexruntime").Warn(event, "derived index lifecycle degraded", fields...)
 	}
 }
 
@@ -498,10 +574,16 @@ func (s *Service) health(event string, revision memory.DerivedIndexRevision, exp
 	if s.log == nil {
 		return
 	}
-	fields := []config.Field{config.F("kind", revision.Kind), config.F("revision", revision.Revision), config.F("model", revision.Model), config.F("dimension", revision.Dimension), config.F("expected_count", expected), config.F("indexed_count", indexed), config.F("coverage", coverage(expected, indexed)), config.F("status", status), config.F("duration_ms", duration.Milliseconds())}
+	fields := []config.Field{config.F("kind", revision.Kind), config.F("workload", "indexing"), config.F("revision", revision.Revision), config.F("model", revision.Model), config.F("dimension", revision.Dimension), config.F("status", status), config.F("duration_ms", duration.Milliseconds())}
 	if err != nil {
-		fields = append(fields, config.ErrorField(err))
+		if errors.Is(err, context.Canceled) {
+			s.log.Server("indexruntime").Info("index.rebuild.canceled", "index rebuild canceled", append(fields, config.F("outcome", "canceled"), config.F("status", "ok"))...)
+			return
+		}
+		s.log.Server("indexruntime").Warn(event, "derived index rebuild failed", append(fields, config.F("phase", "build_publish"), config.ErrorField(err))...)
+		return
 	}
+	fields = append(fields, config.F("record_kind", "summary"), config.F("expected_count", expected), config.F("indexed_count", indexed), config.F("coverage", coverage(expected, indexed)))
 	s.log.Server("indexruntime").Info(event, "derived index health", fields...)
 }
 
@@ -510,4 +592,45 @@ func coverage(expected, indexed int64) float64 {
 		return 1
 	}
 	return float64(indexed) / float64(expected)
+}
+
+func (s *Service) snapshot(ctx context.Context) {
+	if s.log == nil || ctx.Err() != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	log := s.log.Server("indexruntime").With(config.F("workload", "indexing"), config.F("record_kind", "snapshot"))
+	jobs, err := s.store.JobHealth(ctx)
+	if err != nil {
+		s.warn("memory.health.failed", "jobs", err, config.F("record_kind", "snapshot"))
+	} else {
+		for _, job := range jobs {
+			log.Info("memory.jobs.health", "durable job backlog snapshot", config.F("job_kind", job.Kind), config.F("queued_count", job.Queued), config.F("active_count", job.Running), config.F("retry_count", job.Retry), config.F("dead_count", job.Dead), config.F("succeeded_count", job.Succeeded), config.F("skipped_count", job.Skipped), config.F("expired_lease_count", job.ExpiredLeaseCount), config.F("oldest_ready_age_ms", job.OldestReadyAgeMS), config.F("status", "ok"))
+		}
+	}
+	for _, kind := range []string{memory.IndexKindMemoryFTS, memory.IndexKindTranscriptFTS, memory.IndexKindGlobalMemoryFTS, memory.IndexKindMemoryVector, memory.IndexKindGlobalMemoryVector} {
+		if (kind == memory.IndexKindMemoryVector || kind == memory.IndexKindGlobalMemoryVector) && s.model == "" {
+			continue
+		}
+		needs, err := s.store.IndexRevisionNeedsRebuild(ctx, kind)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			s.warn("index.health.failed", kind, err, config.F("record_kind", "snapshot"))
+			continue
+		}
+		fields := []config.Field{config.F("index_kind", kind), config.F("is_available", err == nil && !needs)}
+		if err != nil || needs {
+			log.Warn("index.availability", "derived index unavailable or degraded", append(fields, config.F("status", "degraded"))...)
+		} else {
+			log.Info("index.availability", "derived index available", append(fields, config.F("status", "ok"))...)
+		}
+	}
+	var stats runtime.MemStats
+	runtime.ReadMemStats(&stats)
+	last := s.store.LastMaintenance()
+	fields := []config.Field{config.F("goroutine_count", runtime.NumGoroutine()), config.F("heap_alloc_bytes", stats.HeapAlloc), config.F("heap_inuse_bytes", stats.HeapInuse), config.F("gc_count", stats.NumGC), config.F("is_last_maintenance_known", !last.IsZero()), config.F("status", "ok")}
+	if !last.IsZero() {
+		fields = append(fields, config.F("last_maintenance_age_ms", max(time.Since(last).Milliseconds(), 0)))
+	}
+	log.Info("app.health", "process and maintenance snapshot", fields...)
 }

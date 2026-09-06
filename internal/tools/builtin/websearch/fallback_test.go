@@ -20,7 +20,7 @@ func (s *countingSearcher) Search(context.Context, string) (SearchResponse, erro
 func TestFallbackSearcherUsesPrimaryWhenUsable(t *testing.T) {
 	primary := &countingSearcher{response: SearchResponse{Results: []SearchResult{{Title: "Brave"}}}}
 	fallback := &countingSearcher{}
-	response, err := NewFallbackSearcher(primary, fallback).Search(context.Background(), "test")
+	response, err := NewFallbackSearcher(primary, fallback, nil).Search(context.Background(), "test")
 	if err != nil || len(response.Results) != 1 || fallback.calls != 0 {
 		t.Fatalf("response=%+v err=%v fallback_calls=%d", response, err, fallback.calls)
 	}
@@ -39,7 +39,7 @@ func TestFallbackSearcherHandlesEmptyAndFailedPrimary(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			fallback := &countingSearcher{response: SearchResponse{Results: []SearchResult{{Title: "SearXNG"}}, Stats: CandidateStats{CandidateCount: 2}}}
-			response, err := NewFallbackSearcher(test.primary, fallback).Search(context.Background(), "test")
+			response, err := NewFallbackSearcher(test.primary, fallback, nil).Search(context.Background(), "test")
 			if err != nil || fallback.calls != 1 || response.Degraded != test.wantDegraded || response.Stats.CandidateCount != test.primary.response.Stats.CandidateCount+2 {
 				t.Fatalf("response=%+v err=%v", response, err)
 			}
@@ -53,7 +53,7 @@ func TestFallbackSearcherHandlesEmptyAndFailedPrimary(t *testing.T) {
 func TestFallbackSearcherReturnsValidEmptyPrimaryWhenFallbackFails(t *testing.T) {
 	primary := &countingSearcher{response: SearchResponse{Stats: CandidateStats{CandidateCount: 1}}}
 	fallback := &countingSearcher{err: errors.New("failed")}
-	response, err := NewFallbackSearcher(primary, fallback).Search(context.Background(), "test")
+	response, err := NewFallbackSearcher(primary, fallback, nil).Search(context.Background(), "test")
 	if err != nil || !response.Degraded || len(response.UnresponsiveEngines) != 1 || response.UnresponsiveEngines[0] != "searxng" {
 		t.Fatalf("response=%+v err=%v", response, err)
 	}
@@ -62,7 +62,7 @@ func TestFallbackSearcherReturnsValidEmptyPrimaryWhenFallbackFails(t *testing.T)
 func TestFallbackSearcherFailsWhenBothProvidersFail(t *testing.T) {
 	primary := &countingSearcher{err: errors.New("primary")}
 	fallback := &countingSearcher{err: errors.New("fallback")}
-	if _, err := NewFallbackSearcher(primary, fallback).Search(context.Background(), "test"); err == nil {
+	if _, err := NewFallbackSearcher(primary, fallback, nil).Search(context.Background(), "test"); err == nil {
 		t.Fatal("dual provider failure returned nil error")
 	}
 }
@@ -78,7 +78,7 @@ func TestFallbackSearcherDoesNotFallbackAfterCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	fallback := &countingSearcher{}
-	_, err := NewFallbackSearcher(cancelingSearcher{}, fallback).Search(ctx, "test")
+	_, err := NewFallbackSearcher(cancelingSearcher{}, fallback, nil).Search(ctx, "test")
 	if !errors.Is(err, context.Canceled) || fallback.calls != 0 {
 		t.Fatalf("err=%v fallback_calls=%d", err, fallback.calls)
 	}

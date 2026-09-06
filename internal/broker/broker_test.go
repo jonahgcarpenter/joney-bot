@@ -110,6 +110,8 @@ func TestLowPriorityPermitYieldsToAcceptedForegroundWork(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("foreground request did not complete")
 	}
+	// Response delivery precedes lane retirement; wait for the accepted work too.
+	b.workWG.Wait()
 	if ctx, nextRelease, ok := b.TryAcquireLowPriority(context.Background()); !ok || ctx.Err() != nil {
 		t.Fatal("low-priority permit did not recover after foreground completion")
 	} else {

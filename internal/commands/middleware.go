@@ -11,14 +11,14 @@ func RequireAdmin(auth PrincipalAuthorizer) Middleware {
 			DefinitionValue: next.Definition(),
 			ExecuteFunc: func(ctx context.Context, req Request) (Result, error) {
 				if !req.Principal.Authenticated() || auth == nil {
-					return Result{Text: adminDeniedMessage}, nil
+					return Result{Text: adminDeniedMessage, Outcome: Outcome{Status: "rejected", ReasonCode: "admin_required"}}, nil
 				}
 				isAdmin, err := IsPrincipalAdmin(auth, req.Principal)
 				if err != nil {
 					return Result{}, err
 				}
 				if !isAdmin {
-					return Result{Text: adminDeniedMessage}, nil
+					return Result{Text: adminDeniedMessage, Outcome: Outcome{Status: "rejected", ReasonCode: "admin_required"}}, nil
 				}
 				return next.Execute(ctx, req)
 			},

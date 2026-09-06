@@ -54,7 +54,7 @@ func (dg *Gateway) fetchMessage(channelID, messageID, requestID string) (message
 }
 
 // sendTyping posts a typing indicator to Discord.
-func (dg *Gateway) sendTyping(channelID string) error {
+func (dg *Gateway) sendTyping(channelID string, scoped ...*config.Logger) error {
 	url := fmt.Sprintf("%s/channels/%s/typing", dg.apiBaseURL(), channelID)
 
 	req, err := http.NewRequest("POST", url, nil)
@@ -72,7 +72,7 @@ func (dg *Gateway) sendTyping(channelID string) error {
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		dg.log().Debug("gateway.typing.failed", "discord typing request failed", config.F("chat_id", channelID), config.F("http_status", resp.StatusCode), config.F("response_bytes", len(body)), config.F("status", "degraded"))
+		dg.log(scoped...).Debug("gateway.typing.failed", "discord typing request failed", config.F("http_status", resp.StatusCode), config.F("response_bytes", len(body)), config.F("status", "degraded"))
 		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 	return nil
@@ -80,7 +80,7 @@ func (dg *Gateway) sendTyping(channelID string) error {
 
 // sendMessage posts a message to a Discord channel and returns the created
 // Discord message ID when available.
-func (dg *Gateway) sendMessage(channelID, content, replyToID string) (string, error) {
+func (dg *Gateway) sendMessage(channelID, content, replyToID string, scoped ...*config.Logger) (string, error) {
 	url := fmt.Sprintf("%s/channels/%s/messages", dg.apiBaseURL(), channelID)
 
 	payload := map[string]interface{}{
@@ -95,7 +95,7 @@ func (dg *Gateway) sendMessage(channelID, content, replyToID string) (string, er
 
 	created, err := dg.doMessageJSON(http.MethodPost, url, payload)
 	if err != nil {
-		dg.log().Warn("gateway.send.failed", "discord send request failed", config.F("chat_id", channelID), config.F("status", "error"), config.ErrorField(err))
+		dg.log(scoped...).Debug("gateway.send.failed", "discord send request failed", config.F("status", "error"), config.ErrorField(err))
 		return "", err
 	}
 	return created.ID, nil
