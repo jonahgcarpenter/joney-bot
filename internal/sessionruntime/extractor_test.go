@@ -19,6 +19,26 @@ type summaryFakeChatter struct {
 	err       error
 }
 
+type summarySequenceChatter struct {
+	outcomes []summarySequenceOutcome
+	requests []llm.ChatRequest
+}
+
+type summarySequenceOutcome struct {
+	response *llm.ChatResponse
+	err      error
+}
+
+func (f *summarySequenceChatter) Chat(_ context.Context, request llm.ChatRequest, _ func(llm.ChatMessage)) (*llm.ChatResponse, error) {
+	f.requests = append(f.requests, request)
+	if len(f.outcomes) == 0 {
+		return nil, errors.New("no summary outcome")
+	}
+	outcome := f.outcomes[0]
+	f.outcomes = f.outcomes[1:]
+	return outcome.response, outcome.err
+}
+
 func (f *summaryFakeChatter) Chat(_ context.Context, request llm.ChatRequest, _ func(llm.ChatMessage)) (*llm.ChatResponse, error) {
 	f.request = request
 	if f.err != nil {
@@ -167,6 +187,65 @@ func TestLLMExtractorAddsReasonAwareStructuredRetryInstructions(t *testing.T) {
 	}
 }
 
+func TestLLMExtractorForegroundUsesThreeCorrectiveRetries(t *testing.T) {
+	valid := summaryRawToolResponse(sessionSummarySaveToolName, `{"narrative":"complete","open_tasks":[],"commitments":[],"entities":[],"decisions":[],"topic_tags":[],"candidates":[]}`)
+	client := &summarySequenceChatter{outcomes: []summarySequenceOutcome{
+		{response: summaryToolResponse()},
+		{response: summaryToolResponse()},
+		{response: summaryToolResponse()},
+		{response: valid},
+	}}
+	artifact, err := newSummaryTestExtractor(t, client, 2048).CompactForeground(context.Background(), nil, []usermemory.SessionTurn{{ID: 1, UserText: "work", AssistantText: "ongoing"}}, 10000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if artifact.Narrative != "complete" || len(client.requests) != foregroundAttemptLimit {
+		t.Fatalf("artifact=%+v request_count=%d", artifact, len(client.requests))
+	}
+	for i := 1; i < len(client.requests); i++ {
+		if !strings.Contains(client.requests[i].Messages[0].Content, "STRUCTURED OUTPUT RETRY") {
+			t.Fatalf("request %d omitted corrective instructions: %+v", i+1, client.requests[i].Messages)
+		}
+	}
+}
+
+func TestLLMExtractorForegroundShrinksProviderRejectedChunk(t *testing.T) {
+	first := summaryRawToolResponse(sessionSummarySaveToolName, `{"narrative":"first compacted","open_tasks":[],"commitments":[],"entities":[],"decisions":[],"topic_tags":[],"candidates":[]}`)
+	second := summaryRawToolResponse(sessionSummarySaveToolName, `{"narrative":"both compacted","open_tasks":[],"commitments":[],"entities":[],"decisions":[],"topic_tags":[],"candidates":[]}`)
+	client := &summarySequenceChatter{outcomes: []summarySequenceOutcome{
+		{err: &llm.ChatHTTPError{StatusCode: http.StatusBadRequest, Body: "context length exceeded"}},
+		{response: first},
+		{response: second},
+	}}
+	turns := []usermemory.SessionTurn{
+		{ID: 1, UserText: "first marker", AssistantText: "first answer"},
+		{ID: 2, UserText: "second marker", AssistantText: "second answer"},
+	}
+	artifact, err := newSummaryTestExtractor(t, client, 2048).CompactForeground(context.Background(), nil, turns, 10000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if artifact.Narrative != "both compacted" || len(client.requests) != 3 {
+		t.Fatalf("artifact=%+v request_count=%d", artifact, len(client.requests))
+	}
+	if !messagesContainText(client.requests[0].Messages, "second marker") || messagesContainText(client.requests[1].Messages, "second marker") || !messagesContainText(client.requests[2].Messages, "second marker") || !messagesContainText(client.requests[2].Messages, "first compacted") {
+		t.Fatalf("chunk reduction requests=%+v", client.requests)
+	}
+}
+
+func TestLLMExtractorForegroundSubmissionBudgetSpansAllChunks(t *testing.T) {
+	valid := summaryRawToolResponse(sessionSummarySaveToolName, `{"narrative":"chunk compacted","open_tasks":[],"commitments":[],"entities":[],"decisions":[],"topic_tags":[],"candidates":[]}`)
+	client := &summarySequenceChatter{outcomes: []summarySequenceOutcome{{response: valid}, {response: valid}, {response: valid}, {response: valid}}}
+	turns := make([]usermemory.SessionTurn, foregroundChunkLimit*foregroundAttemptLimit+1)
+	for i := range turns {
+		turns[i] = usermemory.SessionTurn{ID: int64(i + 1), UserText: "short", AssistantText: "short"}
+	}
+	_, err := newSummaryTestExtractor(t, client, 2048).CompactForeground(context.Background(), nil, turns, 100000)
+	if err == nil || !strings.Contains(err.Error(), "4-submission budget") || len(client.requests) != foregroundAttemptLimit {
+		t.Fatalf("error=%v request_count=%d", err, len(client.requests))
+	}
+}
+
 func TestNewLLMExtractorValidatesDependencies(t *testing.T) {
 	if _, err := NewLLMExtractor(nil, "model", 8192); err == nil {
 		t.Fatal("expected missing client error")
@@ -195,4 +274,13 @@ func summaryArguments(t *testing.T, content string) map[string]interface{} {
 		t.Fatal(err)
 	}
 	return arguments
+}
+
+func messagesContainText(messages []llm.ChatMessage, text string) bool {
+	for _, message := range messages {
+		if strings.Contains(message.Content, text) {
+			return true
+		}
+	}
+	return false
 }

@@ -20,8 +20,8 @@ import (
 
 const (
 	maximumCompactionRange    = 64
-	maximumCompactionAttempts = 3
-	maximumRecentTail         = 2
+	maximumCompactionAttempts = usermemory.SessionCompactionModelSubmissionLimit
+	compactionTriggerPercent  = 70
 	promptPressurePrefix      = "session-prompt-pressure-v1"
 )
 
@@ -166,17 +166,13 @@ func (s *Service) plan(ctx context.Context, userID, sessionID string, generation
 		if pressureErr != nil {
 			return 0, pressureErr
 		}
-		if pressure.Tokens < pressure.Limit {
+		if pressure.Tokens*100 < pressure.Limit*compactionTriggerPercent {
 			return 0, nil
 		}
 		if available.TotalCount > len(available.Turns) {
 			target = available.Turns[len(available.Turns)-1].ID
 		} else {
-			tailCount := preservedRecentTailCount(available.Turns, pressure.Limit)
-			if len(available.Turns) <= tailCount {
-				return 0, nil
-			}
-			target = available.Turns[len(available.Turns)-tailCount-1].ID
+			target = available.Turns[len(available.Turns)-1].ID
 		}
 	}
 	coverCount := 0
@@ -222,30 +218,6 @@ func (s *Service) plan(ctx context.Context, userID, sessionID string, generation
 	return s.store.EnqueueSessionCompactionCampaignJob(ctx, userID, sessionID, generation, from, through, target, s.model, SummaryGeneratorVersion)
 }
 
-func preservedRecentTailCount(chronological []usermemory.SessionTurn, inputLimit int) int {
-	budget := inputLimit / 4
-	if budget < 2000 {
-		budget = 2000
-	}
-	if budget > 8000 {
-		budget = 8000
-	}
-	if budget > inputLimit {
-		budget = inputLimit
-	}
-	total := 0
-	count := 0
-	for i := len(chronological) - 1; i >= 0 && count < maximumRecentTail; i-- {
-		size := promptbudget.EstimateRequest(usermemory.SessionTurnMessages(chronological[i]), nil)
-		if total+size > budget {
-			break
-		}
-		total += size
-		count++
-	}
-	return count
-}
-
 func promptPressureVersion(model string, inputLimit int) string {
 	return fmt.Sprintf("%s:%s:%d", promptPressurePrefix, strings.TrimSpace(model), inputLimit)
 }
@@ -278,18 +250,18 @@ func (s *Service) drain(ctx context.Context) {
 			code := compactionErrorCode(err)
 			fields := []config.Field{config.F("job_id", job.ID), config.F("user_id", job.UserID), config.F("session_id", job.SessionID), config.F("session_generation", job.SessionGeneration), config.F("model", job.Model), config.F("generator_version", job.GeneratorVersion), config.F("attempt_count", job.AttemptCount), config.F("invalid_output_retry_count", job.InvalidOutputRetryCount), config.F("model_submission_count", job.ModelSubmissionCount), config.F("redrive_count", job.RedriveCount), config.F("error_code", code)}
 			if errors.Is(err, errInvalidCompactionOutput) {
-				if job.InvalidOutputRetryCount == 0 && job.ModelSubmissionCount < usermemory.DurableModelSubmissionLimit {
+				if job.InvalidOutputRetryCount < usermemory.SessionCompactionInvalidOutputRetryLimit && job.ModelSubmissionCount < usermemory.SessionCompactionModelSubmissionLimit {
 					if retryErr := s.store.RetryInvalidSessionCompactionJob(context.Background(), job, code); retryErr != nil {
 						s.warn("session.compaction.job.retry_failed", "failed to schedule session compaction structured-output retry", retryErr, fields...)
 					} else {
-						s.warn("session.compaction.job.structural_retry", "session compaction invalid output will retry once", err, append(fields, config.F("status", "retry"))...)
+						s.warn("session.compaction.job.structural_retry", "session compaction invalid output will retry", err, append(fields, config.F("status", "retry"))...)
 					}
 					continue
 				}
 				if skipErr := s.store.SkipSessionCompactionJob(context.Background(), job, code); skipErr != nil {
 					s.warn("session.compaction.job.skip_failed", "failed to skip invalid session compaction output", skipErr, fields...)
 				} else {
-					s.warn("session.compaction.job.structural_skipped", "session compaction invalid output exhausted its retry", err, fields...)
+					s.warn("session.compaction.job.structural_skipped", "session compaction invalid output exhausted its retries", err, fields...)
 				}
 				continue
 			}

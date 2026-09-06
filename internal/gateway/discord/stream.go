@@ -69,9 +69,6 @@ func (s *discordResponseStream) start() {
 }
 
 func (s *discordResponseStream) Push(chunk agent.StreamChunk) {
-	if chunk.Type == agent.ChunkStatus {
-		return
-	}
 	s.terminalMu.Lock()
 	terminal := s.terminal
 	s.terminalMu.Unlock()
@@ -176,6 +173,18 @@ type discordStreamState struct {
 
 func (s *discordStreamState) consume(chunk agent.StreamChunk) {
 	switch chunk.Type {
+	case agent.ChunkStatus:
+		if s.answerStarted || strings.TrimSpace(chunk.Text) == "" {
+			return
+		}
+		s.tool = nil
+		s.thinking = ""
+		s.frozenThinking = ""
+		s.thinkingStarted = false
+		s.thinkingDirty = false
+		s.thinkingTrimmed = false
+		s.frozenTrimmed = false
+		s.show(truncateDiscordText(sanitizeDiscordDisplayText(chunk.Text, false), discordToolStatusRenderLimit))
 	case agent.ChunkThinking:
 		if s.answerStarted {
 			return

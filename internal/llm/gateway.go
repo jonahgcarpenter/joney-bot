@@ -66,6 +66,20 @@ func IsOllamaModelRunnerStoppedError(err error) bool {
 	return strings.Contains(strings.ToLower(httpErr.Body), "model runner has unexpectedly stopped")
 }
 
+// IsContextLengthExceededError identifies provider rejections caused by a
+// request exceeding the active model context window.
+func IsContextLengthExceededError(err error) bool {
+	var httpErr *ChatHTTPError
+	if !errors.As(err, &httpErr) {
+		return false
+	}
+	body := strings.ToLower(httpErr.Body)
+	return strings.Contains(body, "context size") ||
+		strings.Contains(body, "context length") ||
+		strings.Contains(body, "context window") ||
+		strings.Contains(body, "too many tokens")
+}
+
 // GatewayClient interacts with the LLM gateway's OpenAI-compatible REST API.
 type GatewayClient struct {
 	BaseURL      string

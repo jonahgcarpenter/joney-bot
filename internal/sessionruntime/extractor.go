@@ -9,14 +9,18 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 )
 
 const (
-	SummaryGeneratorVersion    = "session-summary-v2"
+	SummaryGeneratorVersion    = "session-summary-v3"
 	sessionSummarySaveToolName = "session_summary_save"
+	foregroundAttemptLimit     = 4
+	foregroundChunkLimit       = 64
 )
 
 // Extractor generates one structured summary artifact for a fixed range.
@@ -49,6 +53,10 @@ func NewLLMExtractor(client llm.Chatter, model string, maxTokens int) (*LLMExtra
 
 // Compact summarizes prior reference data plus newly covered role-correct turns.
 func (e *LLMExtractor) Compact(ctx context.Context, previous *usermemory.SessionSummary, turns []usermemory.SessionTurn, previousErrorCode string) (usermemory.SummaryArtifact, error) {
+	return e.compact(ctx, previous, turns, previousErrorCode, false)
+}
+
+func (e *LLMExtractor) compact(ctx context.Context, previous *usermemory.SessionSummary, turns []usermemory.SessionTurn, previousErrorCode string, allowContextReduction bool) (usermemory.SummaryArtifact, error) {
 	if e == nil || e.client == nil || e.model == "" || len(turns) == 0 {
 		return usermemory.SummaryArtifact{}, fmt.Errorf("session compaction extractor is unavailable")
 	}
@@ -63,6 +71,9 @@ func (e *LLMExtractor) Compact(ctx context.Context, previous *usermemory.Session
 		ParallelToolCalls: &parallelToolCalls, Temperature: &temperature, MaxTokens: e.maxTokens, Stream: true,
 	}, nil)
 	if err != nil {
+		if allowContextReduction && llm.IsContextLengthExceededError(err) {
+			return usermemory.SummaryArtifact{}, fmt.Errorf("session compaction model call exceeded context: %w", err)
+		}
 		if llm.IsPermanentChatProviderError(err) {
 			var httpErr *llm.ChatHTTPError
 			if errors.As(err, &httpErr) {
@@ -117,6 +128,77 @@ func (e *LLMExtractor) Compact(ctx context.Context, previous *usermemory.Session
 		return usermemory.SummaryArtifact{}, invalidCompactionOutput("artifact_limit_exceeded")
 	}
 	return artifact, nil
+}
+
+// CompactForeground folds complete request-local units into the same summary
+// schema used by durable compaction without publishing an artifact.
+func (e *LLMExtractor) CompactForeground(ctx context.Context, previous *usermemory.SessionSummary, turns []usermemory.SessionTurn, inputLimit int) (usermemory.SummaryArtifact, error) {
+	if e == nil || inputLimit <= 0 || len(turns) == 0 {
+		return usermemory.SummaryArtifact{}, fmt.Errorf("foreground session compaction input is unavailable")
+	}
+	remaining := append([]usermemory.SessionTurn(nil), turns...)
+	current := previous
+	var final usermemory.SummaryArtifact
+	submissions := 0
+	for len(remaining) > 0 {
+		if submissions >= foregroundAttemptLimit {
+			return usermemory.SummaryArtifact{}, fmt.Errorf("foreground session compaction exhausted its %d-submission budget", foregroundAttemptLimit)
+		}
+		count := len(remaining)
+		if count > foregroundChunkLimit {
+			count = foregroundChunkLimit
+		}
+		for count > 0 {
+			messages, err := compactionMessages(current, remaining[:count], "")
+			if err != nil {
+				return usermemory.SummaryArtifact{}, err
+			}
+			if promptbudget.EstimateRequest(messages, []llm.Tool{e.tool}) <= inputLimit {
+				break
+			}
+			count--
+		}
+		if count == 0 {
+			return usermemory.SummaryArtifact{}, fmt.Errorf("one complete foreground compaction unit exceeds the input limit")
+		}
+
+		var err error
+		correctiveCode := ""
+		for submissions < foregroundAttemptLimit {
+			submissions++
+			final, err = e.compact(ctx, current, remaining[:count], correctiveCode, true)
+			if err == nil {
+				break
+			}
+			if ctx.Err() != nil || errors.Is(err, errPermanentProvider) {
+				return usermemory.SummaryArtifact{}, err
+			}
+			if llm.IsContextLengthExceededError(err) && count > 1 {
+				count = (count + 1) / 2
+				correctiveCode = ""
+			} else if code := compactionErrorCode(err); code != "transient_provider" && code != "transient_runtime" && code != "transient_timeout" && code != "transient_rate_limit" {
+				correctiveCode = code
+			}
+			if submissions == foregroundAttemptLimit {
+				return usermemory.SummaryArtifact{}, fmt.Errorf("foreground session compaction exhausted retries: %w", err)
+			}
+			delay := time.Duration(1<<(submissions-1)) * 100 * time.Millisecond
+			timer := time.NewTimer(delay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return usermemory.SummaryArtifact{}, ctx.Err()
+			case <-timer.C:
+			}
+		}
+		current = &usermemory.SessionSummary{
+			Narrative: final.Narrative, OpenTasks: final.OpenTasks,
+			Commitments: final.Commitments, Entities: final.Entities,
+			Decisions: final.Decisions, TopicTags: final.TopicTags,
+		}
+		remaining = remaining[count:]
+	}
+	return final, nil
 }
 
 type sessionSummaryToolOutput struct {

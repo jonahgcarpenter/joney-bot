@@ -394,6 +394,27 @@ func TestOllamaModelRunnerStoppedErrorClassification(t *testing.T) {
 	}
 }
 
+func TestContextLengthExceededErrorClassification(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "maximum context length", err: &ChatHTTPError{StatusCode: 400, Body: "maximum context length exceeded"}, want: true},
+		{name: "context window", err: fmt.Errorf("wrapped: %w", &ChatHTTPError{StatusCode: 413, Body: "request exceeds the context window"}), want: true},
+		{name: "too many tokens", err: &ChatHTTPError{StatusCode: 400, Body: "too many tokens in prompt"}, want: true},
+		{name: "unrelated rejection", err: &ChatHTTPError{StatusCode: 400, Body: "invalid tool schema"}, want: false},
+		{name: "ordinary error", err: errors.New("context length exceeded"), want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsContextLengthExceededError(tt.err); got != tt.want {
+				t.Fatalf("IsContextLengthExceededError() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestGatewayClientEmbedParsesResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {

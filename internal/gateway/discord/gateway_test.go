@@ -175,6 +175,32 @@ func TestDiscordStreamShowsCompactToolProgress(t *testing.T) {
 	}
 }
 
+func TestDiscordStreamShowsAndReplacesCompactionStatus(t *testing.T) {
+	rest := newFakeDiscordREST(t)
+	defer rest.server.Close()
+	dg := &Gateway{Token: "token", APIBaseURL: rest.server.URL, Log: config.NewLogger(config.LevelError), replyIndex: make(map[string]replyContext)}
+	r := newRuntimeResponder(dg, "req-1", "channel-1", "message-1", "discord:dm:123", "123")
+
+	r.Stream(agent.StreamChunk{Type: agent.ChunkStatus, Text: "Compacting context..."})
+	r.Stream(agent.StreamChunk{Type: agent.ChunkThinking, Text: "continuing with the compacted context"})
+	r.Stream(agent.StreamChunk{Type: agent.ChunkContent, Text: "The answer is arriving."})
+	if err := r.SendAgentResponse(&agent.AgentResponse{Model: "test-model", Response: "The final answer."}); err != nil {
+		t.Fatal(err)
+	}
+
+	sent := rest.sentMessages()
+	edited := rest.editedMessages()
+	if len(sent) != 1 || sent[0]["content"] != "Compacting context..." {
+		t.Fatalf("compaction status was not sent: %+v", sent)
+	}
+	if len(edited) != 3 ||
+		edited[0]["content"] != "-# continuing with the compacted context"+discordStreamCursor ||
+		edited[1]["content"] != strings.TrimSpace(discordStreamCursor) ||
+		edited[2]["content"] != "The final answer." {
+		t.Fatalf("compaction status was not replaced by lifecycle output: %+v", edited)
+	}
+}
+
 func TestDiscordCancellationRemovesPartialLifecycleOutput(t *testing.T) {
 	rest := newFakeDiscordREST(t)
 	defer rest.server.Close()

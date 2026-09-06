@@ -121,9 +121,6 @@ func TestSessionCompactionInvalidOutputRetryIsDedicatedAndDurable(t *testing.T) 
 	if err != nil || reclaimed.InvalidOutputRetryCount != 1 || reclaimed.AttemptCount != 2 || reclaimed.ModelSubmissionCount != 1 || reclaimed.CorrectiveErrorCode != "missing_tool_call" {
 		t.Fatalf("reclaimed=%+v err=%v", reclaimed, err)
 	}
-	if err := store.RetryInvalidSessionCompactionJob(context.Background(), reclaimed, "missing_tool_call"); !errors.Is(err, sql.ErrNoRows) {
-		t.Fatalf("second invalid retry error=%v", err)
-	}
 	if err := store.DeferSessionCompactionJob(context.Background(), reclaimed, time.Second); err != nil {
 		t.Fatal(err)
 	}
@@ -299,7 +296,7 @@ func TestSessionCompactionArtifactRetriesSaturateLegacyAttemptCount(t *testing.T
 			t.Fatalf("claim %d: %v", attempt, err)
 		}
 	}
-	if job.AttemptCount != 3 {
+	if job.AttemptCount != SessionCompactionModelSubmissionLimit {
 		t.Fatalf("saturated attempt count=%d", job.AttemptCount)
 	}
 }
@@ -703,7 +700,7 @@ func TestSessionCompactionLeaseRetryStopsAtSubmissionLimit(t *testing.T) {
 		t.Fatalf("claim dead job error = %v", err)
 	}
 	var submissions int
-	if err := store.sql.QueryRow(`SELECT model_submission_count FROM durable_jobs WHERE job_kind = 'session_compaction'`).Scan(&submissions); err != nil || submissions != DurableModelSubmissionLimit {
+	if err := store.sql.QueryRow(`SELECT model_submission_count FROM durable_jobs WHERE job_kind = 'session_compaction'`).Scan(&submissions); err != nil || submissions != SessionCompactionModelSubmissionLimit {
 		t.Fatalf("submissions=%d err=%v", submissions, err)
 	}
 }

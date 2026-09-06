@@ -148,6 +148,7 @@ func main() {
 		rootLog,
 		mcpProvider,
 	)
+	agentEngine.SetForegroundCompactor(compactionExtractor)
 
 	// Create the broker and start its worker pool.
 	// All gateways submit requests through the broker; it enforces the concurrency
