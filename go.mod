@@ -11,6 +11,7 @@ require (
 	github.com/modelcontextprotocol/go-sdk v1.6.0
 	golang.org/x/image v0.39.0
 	golang.org/x/net v0.51.0
+	golang.org/x/term v0.40.0
 )
 
 require (

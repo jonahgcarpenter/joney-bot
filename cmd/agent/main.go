@@ -25,6 +25,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/runtimeinvalidation"
 	"github.com/jonahgcarpenter/oswald-ai/internal/sessionruntime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/soul"
+	"github.com/jonahgcarpenter/oswald-ai/internal/startup"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/globalmemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
@@ -34,6 +35,7 @@ import (
 func main() {
 	// Load config
 	cfg, err := config.Load()
+	startup.PrintBanner(os.Stdout)
 	if err != nil {
 		config.NewLogger(config.LevelInfo).Server("app").Fatal("app.config.invalid", "invalid runtime configuration", config.ErrorField(err))
 	}

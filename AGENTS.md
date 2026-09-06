@@ -58,7 +58,7 @@ Current layers:
 
 `cmd/agent/main.go` performs startup in this order:
 
-1. Load environment config
+1. Load environment config and print the startup block-letter banner if stdout is a terminal, before logging success or configuration failure
 2. Create the shared logger and validate required LLM gateway settings
 3. Prepare the configured LLM gateway endpoint and authentication
 4. Create the LLM gateway client
@@ -623,6 +623,8 @@ Tests run in GitHub Actions without project secrets or local `.env` variables, s
 - Keep test data deterministic and avoid relying on existing files under `data/database/`, `data/accounts/`, or user memory directories
 
 ## Logging
+
+Human-readable startup output is separate from structured logging. `internal/startup.PrintBanner` writes a fixed UTF-8 block-letter banner and project URL once after `.env` loading only when stdout is a terminal, including on configuration failure. `golang.org/x/term.IsTerminal` suppresses the banner for normal Docker deployments, pipes, and files; an explicitly allocated container TTY enables it. Bright-magenta ANSI color (`95m`) is always enabled; a reset terminates the colored banner. Banner write failures are ignored. Logger events remain uncolored JSON on stderr. Bootstrap instructions still use stdout, so JSON-only collectors must select stderr without container TTY stream merging. The banner does not indicate application readiness.
 
 Production logging uses Loki-ready structured single-line JSON. The repository does not yet ship dashboards or additional periodic memory-quality aggregate emitters; those release-observability assets are deferred.
 
