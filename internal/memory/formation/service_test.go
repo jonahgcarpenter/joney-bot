@@ -263,6 +263,67 @@ func TestServicePatternAggregatesNormalizedClaimIdentity(t *testing.T) {
 	}
 }
 
+func TestServicePatternSuccessCannotResurrectResetSession(t *testing.T) {
+	for _, reset := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reset=%t", reset), func(t *testing.T) {
+			ctx := context.Background()
+			store, db := formationTestStoreWithDB(t)
+			first := formationTestTurn(t, store, "I keep reviews concise.", "first")
+			second := formationTestTurn(t, store, "I still keep reviews concise.", "second")
+			extractor := &fakePatternExtractor{patterns: memory.MemoryPatternBatch{Patterns: []memory.MemoryPattern{{
+				Statement: "The user likely favors concise reviews.", Category: "communication_preferences",
+				ClaimSlot: "communication.review_style", ClaimValue: "concise", Sensitivity: "low", Confidence: 0.8,
+				Observations: []memory.PatternObservation{{SourceTurnID: first, Evidence: "I keep reviews concise."}, {SourceTurnID: second, Evidence: "I still keep reviews concise."}},
+			}}}}
+			service := NewService(store, extractor, "model", config.NewLogger(config.LevelError))
+			jobID, created, err := store.EnqueuePatternFormationJob(ctx, memory.FormationSource{RequestID: "second", SessionID: "session", SessionGeneration: 1, TurnID: second, Model: "model"}, "user-1")
+			if err != nil || !created {
+				t.Fatalf("enqueue created=%t err=%v", created, err)
+			}
+			var callbackErr error
+			var state string
+			var submissions int
+			var profile memory.SessionProfile
+			extractor.preempt = func() {
+				callbackErr = db.SQL().QueryRow(`SELECT state, model_submission_count FROM durable_jobs WHERE id = ?`, jobID).Scan(&state, &submissions)
+				if callbackErr == nil && reset {
+					profile, callbackErr = store.ResetSession(ctx, "user-1", "session", time.Hour)
+				}
+			}
+			// Reset inside the accepted call, then return the same valid successful result.
+			service.drain(ctx)
+			service.drain(ctx)
+			if callbackErr != nil || state != "running" || submissions != 1 || extractor.patternCalls != 1 || extractor.calls != 0 {
+				t.Fatalf("accepted pattern call: state=%q submissions=%d pattern_calls=%d legacy_calls=%d err=%v", state, submissions, extractor.patternCalls, extractor.calls, callbackErr)
+			}
+			if reset && profile.Generation != 2 {
+				t.Fatalf("reset generation=%d", profile.Generation)
+			}
+			want := 1
+			if reset {
+				want = 0
+			}
+			for _, query := range []string{
+				`SELECT COUNT(*) FROM durable_jobs WHERE job_kind = 'memory_formation'`,
+				`SELECT COUNT(*) FROM memory_entries`,
+			} {
+				var count int
+				if err := db.SQL().QueryRow(query).Scan(&count); err != nil || count != want {
+					t.Fatalf("%s: count=%d want=%d err=%v", query, count, want, err)
+				}
+			}
+			if reset {
+				var count int
+				if err := db.SQL().QueryRow(`SELECT (SELECT COUNT(*) FROM memory_candidates) + (SELECT COUNT(*) FROM session_turns) + (SELECT COUNT(*) FROM session_summaries)`).Scan(&count); err != nil || count != 0 {
+					t.Fatalf("reset artifacts=%d err=%v", count, err)
+				}
+			} else if state, err := store.FormationJobState(ctx, "user-1", jobID); err != nil || state != "succeeded" {
+				t.Fatalf("control state=%q err=%v", state, err)
+			}
+		})
+	}
+}
+
 func TestServicePatternRequiresNewAnchorEvidence(t *testing.T) {
 	store, db := formationTestStoreWithDB(t)
 	first := formationTestTurn(t, store, "Pancakes sound good.", "pattern-1")

@@ -250,6 +250,65 @@ func TestServiceDiscardsSuccessfulCompactionAfterForegroundPreemption(t *testing
 	}
 }
 
+func TestServiceCompactionSuccessCannotResurrectResetSession(t *testing.T) {
+	for _, reset := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reset=%t", reset), func(t *testing.T) {
+			ctx := context.Background()
+			store, db := newCompactionTestStoreWithDB(t)
+			profile, err := seedCompactionRuntimeTurns(t, store, "session-1", 3)
+			if err != nil {
+				t.Fatal(err)
+			}
+			compactor := &fakeSummaryCompactor{}
+			service := NewService(store, compactor, "model", budget.ContextBudget{PromptLimit: 100000}, config.NewLogger(config.LevelError))
+			jobID, err := service.plan(ctx, "user-1", "session-1", profile.Generation)
+			if err != nil || jobID == 0 {
+				t.Fatalf("plan job=%d err=%v", jobID, err)
+			}
+			var callbackErr error
+			var state string
+			var submissions int
+			var resetProfile memory.SessionProfile
+			compactor.preempt = func() {
+				callbackErr = db.SQL().QueryRow(`SELECT state, model_submission_count FROM durable_jobs WHERE id = ?`, jobID).Scan(&state, &submissions)
+				if callbackErr == nil && reset {
+					resetProfile, callbackErr = store.ResetSession(ctx, "user-1", "session-1", time.Hour)
+				}
+			}
+			service.drain(ctx)
+			service.drain(ctx)
+			if callbackErr != nil || state != "running" || submissions != 1 || compactor.calls != 1 || len(compactor.turns) != 3 {
+				t.Fatalf("accepted compaction call: state=%q submissions=%d calls=%d turns=%d err=%v", state, submissions, compactor.calls, len(compactor.turns), callbackErr)
+			}
+			if reset && resetProfile.Generation != profile.Generation+1 {
+				t.Fatalf("reset generation=%d", resetProfile.Generation)
+			}
+			want := 1
+			if reset {
+				want = 0
+			}
+			for _, query := range []string{
+				`SELECT COUNT(*) FROM durable_jobs WHERE job_kind = 'session_compaction'`,
+				`SELECT COUNT(*) FROM session_summaries`,
+			} {
+				var count int
+				if err := db.SQL().QueryRow(query).Scan(&count); err != nil || count != want {
+					t.Fatalf("%s: count=%d want=%d err=%v", query, count, want, err)
+				}
+			}
+			var memories int
+			if err := db.SQL().QueryRow(`SELECT (SELECT COUNT(*) FROM memory_entries) + (SELECT COUNT(*) FROM memory_candidates)`).Scan(&memories); err != nil || memories != 0 {
+				t.Fatalf("compaction memory artifacts=%d err=%v", memories, err)
+			}
+			if !reset {
+				if err := db.SQL().QueryRow(`SELECT state FROM durable_jobs WHERE id = ?`, jobID).Scan(&state); err != nil || state != "succeeded" {
+					t.Fatalf("control state=%q err=%v", state, err)
+				}
+			}
+		})
+	}
+}
+
 func TestServiceRefundsCompactionSubmissionBeforeProviderAcceptance(t *testing.T) {
 	store, db := newCompactionTestStoreWithDB(t)
 	profile, err := seedCompactionRuntimeTurns(t, store, "session-1", 25)

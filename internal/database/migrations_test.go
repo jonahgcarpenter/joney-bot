@@ -716,6 +716,53 @@ func TestSchemaMigrationApplyFailureRollsBackEverything(t *testing.T) {
 	}
 }
 
+func TestMigrationForeignKeyCheckFailureRollsBackMissingMigrations(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "foreign-key-rollback.db")
+	raw, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	// Keep the runner and enforcement assertions on the same physical connection.
+	raw.SetMaxOpenConns(1)
+	db := &DB{path: path, db: raw}
+	base := []schemaMigration{{version: 1, name: "v4.0.0", major: 4, sql: `
+CREATE TABLE parent (id INTEGER PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE child (parent_id INTEGER REFERENCES parent(id));
+INSERT INTO parent VALUES (1, 'preserved');`}}
+	if err := db.runSchemaMigrations(context.Background(), base); err != nil {
+		t.Fatal(err)
+	}
+	before := schemaSnapshot(t, raw)
+	registry := append(base,
+		schemaMigration{version: 2, name: "v4.0.1", major: 4, patch: 1, sql: `CREATE TABLE rollback_probe (id INTEGER); UPDATE parent SET value = 'changed';`},
+		schemaMigration{version: 3, name: "v4.0.2", major: 4, patch: 2, sql: `INSERT INTO child VALUES (999);`},
+	)
+	if err := db.runSchemaMigrations(context.Background(), registry); err == nil || !strings.Contains(err.Error(), "schema migration foreign key violation") {
+		t.Fatalf("expected post-migration foreign-key check failure, got %v", err)
+	}
+	if after := schemaSnapshot(t, raw); after != before {
+		t.Fatal("foreign-key check failure changed schema")
+	}
+	var ledgerRows, children, enabled int
+	var value, checksum string
+	if err := raw.QueryRow(`SELECT (SELECT COUNT(*) FROM schema_migration_versions), (SELECT COUNT(*) FROM child), value FROM parent WHERE id = 1`).Scan(&ledgerRows, &children, &value); err != nil || ledgerRows != 1 || children != 0 || value != "preserved" {
+		t.Fatalf("rollback ledger=%d children=%d value=%q err=%v", ledgerRows, children, value, err)
+	}
+	if err := raw.QueryRow(`SELECT checksum FROM schema_migration_versions WHERE version = 1`).Scan(&checksum); err != nil || checksum != migrationChecksum(base[0]) {
+		t.Fatalf("prefix checksum=%q err=%v", checksum, err)
+	}
+	if err := raw.QueryRow(`PRAGMA foreign_keys`).Scan(&enabled); err != nil || enabled != 1 {
+		t.Fatalf("foreign-key enforcement=%d err=%v", enabled, err)
+	}
+	if _, err := raw.Exec(`INSERT INTO child VALUES (999)`); err == nil {
+		t.Fatal("foreign-key enforcement was not restored")
+	}
+	if _, err := raw.Exec(`INSERT INTO child VALUES (1)`); err != nil {
+		t.Fatalf("valid write after rollback: %v", err)
+	}
+}
+
 func TestPermanentMigrationRegistryValidation(t *testing.T) {
 	files := fstest.MapFS{
 		"migrations/v4.1.0.sql": &fstest.MapFile{Data: []byte("CREATE TABLE second (id INTEGER);")},

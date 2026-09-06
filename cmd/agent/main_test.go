@@ -23,6 +23,10 @@ func TestNonInteractiveStartupOmitsBanner(t *testing.T) {
 			cmd.Dir = t.TempDir()
 			// Both isolated cases fail before any storage or network work.
 			cmd.Env = []string{"OSWALD_STARTUP_TEST_HELPER=1", tc.env}
+			if testing.CoverMode() != "" {
+				// Let the instrumented child record coverage without inheriting the parent environment.
+				cmd.Env = append(cmd.Env, "GOCOVERDIR="+t.TempDir())
+			}
 			var stdout, stderr bytes.Buffer
 			cmd.Stdout, cmd.Stderr = &stdout, &stderr
 			if err := cmd.Run(); err == nil {
