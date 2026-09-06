@@ -313,7 +313,7 @@ func TestBrokerUserExclusiveFencesAllUserSessions(t *testing.T) {
 	exclusiveStarted := make(chan struct{})
 	releaseExclusive := make(chan struct{})
 	go func() {
-		_ = b.RunUserExclusive(context.Background(), principal, func() error {
+		_ = b.RunUsersExclusive(context.Background(), []string{principal.CanonicalUserID}, func() error {
 			close(exclusiveStarted)
 			<-releaseExclusive
 			return nil
@@ -381,7 +381,7 @@ func TestBrokerUserExclusiveDoesNotOvertakeAcceptedReader(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	go func() {
-		_ = b.RunUserExclusive(context.Background(), user, func() error { order <- "exclusive"; return nil })
+		_ = b.RunUsersExclusive(context.Background(), []string{user.CanonicalUserID}, func() error { order <- "exclusive"; return nil })
 	}()
 	deadline = time.Now().Add(time.Second)
 	for {
@@ -441,7 +441,7 @@ func TestBrokerUserExclusiveDoesNotOvertakeSameLaneFollower(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	go func() {
-		_ = b.RunUserExclusive(context.Background(), user, func() error { order <- "exclusive"; return nil })
+		_ = b.RunUsersExclusive(context.Background(), []string{user.CanonicalUserID}, func() error { order <- "exclusive"; return nil })
 	}()
 	deadline = time.Now().Add(time.Second)
 	for {
@@ -478,7 +478,7 @@ func TestBrokerTransfersRefreshedPrincipalFence(t *testing.T) {
 	exclusiveStarted := make(chan struct{})
 	releaseExclusive := make(chan struct{})
 	go func() {
-		_ = b.RunUserExclusive(context.Background(), winner, func() error {
+		_ = b.RunUsersExclusive(context.Background(), []string{winner.CanonicalUserID}, func() error {
 			close(exclusiveStarted)
 			<-releaseExclusive
 			return nil
@@ -523,7 +523,7 @@ func TestBrokerRechecksPrincipalAfterWaitingForRefreshedFence(t *testing.T) {
 	exclusiveStarted := make(chan struct{})
 	releaseExclusive := make(chan struct{})
 	go func() {
-		_ = b.RunUserExclusive(context.Background(), winner, func() error {
+		_ = b.RunUsersExclusive(context.Background(), []string{winner.CanonicalUserID}, func() error {
 			close(exclusiveStarted)
 			<-releaseExclusive
 			return nil
@@ -572,7 +572,7 @@ func TestBrokerUserExclusiveDoesNotFenceOtherUsersAndReleasesAfterPanic(t *testi
 	exclusiveStarted := make(chan struct{})
 	release := make(chan struct{})
 	go func() {
-		_ = b.RunUserExclusive(context.Background(), user, func() error { close(exclusiveStarted); <-release; return nil })
+		_ = b.RunUsersExclusive(context.Background(), []string{user.CanonicalUserID}, func() error { close(exclusiveStarted); <-release; return nil })
 	}()
 	<-exclusiveStarted
 	otherStarted := make(chan struct{})
@@ -585,7 +585,7 @@ func TestBrokerUserExclusiveDoesNotFenceOtherUsersAndReleasesAfterPanic(t *testi
 		t.Fatal("exclusive work blocked a different user")
 	}
 	close(release)
-	if err := b.RunUserExclusive(context.Background(), user, func() error { panic("boom") }); err == nil {
+	if err := b.RunUsersExclusive(context.Background(), []string{user.CanonicalUserID}, func() error { panic("boom") }); err == nil {
 		t.Fatal("exclusive panic was not returned as an error")
 	}
 	if err := b.RunInLane(context.Background(), user, "after", func() error { return nil }); err != nil {

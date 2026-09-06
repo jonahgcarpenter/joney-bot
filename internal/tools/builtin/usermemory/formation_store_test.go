@@ -341,7 +341,7 @@ func TestProposeCandidateBlocksWeakConflictAndSupersedesWithStrongerEvidence(t *
 		t.Fatalf("replacement=%+v active=%+v err=%v", replacement, active, err)
 	}
 	old, _ := store.EntryByID(active.PublishedMemoryID)
-	if old.Status != StatusSuperseded {
+	if old.Status != "superseded" {
 		t.Fatalf("old memory=%+v", old)
 	}
 }
@@ -386,7 +386,7 @@ func TestFallbackFactSupersessionMatchesNormalizedStatement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if replacement.PublishedMemoryID == 0 || replacement.SupersedesMemoryID != old.ID || old.Status != StatusSuperseded {
+	if replacement.PublishedMemoryID == 0 || replacement.SupersedesMemoryID != old.ID || old.Status != "superseded" {
 		t.Fatalf("replacement=%+v old=%+v", replacement, old)
 	}
 }

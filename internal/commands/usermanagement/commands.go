@@ -7,6 +7,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
+	"github.com/jonahgcarpenter/oswald-ai/internal/database"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/runtimeinvalidation"
 )
@@ -50,7 +51,7 @@ func (h *handler) ResolveFenceTargets(_ context.Context, req commands.Request) (
 	if req.Name != "deleteuser" || len(req.Args) != 1 {
 		return nil, nil
 	}
-	isAdmin, err := h.users.IsAdmin(req.Principal.CanonicalUserID)
+	isAdmin, err := commands.IsPrincipalAdmin(h.users, req.Principal)
 	if err != nil {
 		return nil, err
 	}
@@ -171,7 +172,7 @@ func (h *handler) handleDeleteUser(principal identity.Principal, args []string) 
 	return commands.Result{Text: fmt.Sprintf("Deleted %s.", targetID), Invalidation: &event}, nil
 }
 
-func renderAccounts(accounts []accountlinking.LinkedAccount) string {
+func renderAccounts(accounts []database.LinkedAccount) string {
 	if len(accounts) == 0 {
 		return "none"
 	}

@@ -12,6 +12,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/database"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/testutil"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/globalmemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 )
@@ -29,7 +30,7 @@ type lifecycleEmbedder struct {
 func TestMissingLiveTableTriggersShadowRebuild(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "oswald.db")
 	store := newLifecycleStoreAt(t, path, "user")
-	if _, err := store.SaveMemory(context.Background(), "user", usermemory.SaveRequest{Scope: usermemory.ScopeLongTerm, Statement: "Rebuild missing physical table."}); err != nil {
+	if _, err := testutil.PublishMemory(context.Background(), store, "user", testutil.MemoryFixture{Scope: usermemory.ScopeLongTerm, Statement: "Rebuild missing physical table."}); err != nil {
 		t.Fatal(err)
 	}
 	service := NewService(store, nil, nil, "", config.NewLogger(config.LevelError))
@@ -67,7 +68,7 @@ func TestMissingLiveTableTriggersShadowRebuild(t *testing.T) {
 
 func TestMaintenanceDuringBuildDoesNotBlockPublication(t *testing.T) {
 	store := newLifecycleStore(t, "user")
-	if _, err := store.SaveMemory(context.Background(), "user", usermemory.SaveRequest{Scope: usermemory.ScopeLongTerm, Statement: "Concurrent maintenance build."}); err != nil {
+	if _, err := testutil.PublishMemory(context.Background(), store, "user", testutil.MemoryFixture{Scope: usermemory.ScopeLongTerm, Statement: "Concurrent maintenance build."}); err != nil {
 		t.Fatal(err)
 	}
 	embedder := &lifecycleEmbedder{dimensions: map[string]int{"model": 2}}
@@ -125,7 +126,7 @@ func (f *lifecycleEmbedder) probes() int {
 
 func TestVectorDimensionProbeCachedAcrossCycles(t *testing.T) {
 	store := newLifecycleStore(t, "user")
-	if _, err := store.SaveMemory(context.Background(), "user", usermemory.SaveRequest{Scope: usermemory.ScopeLongTerm, Statement: "First indexed memory."}); err != nil {
+	if _, err := testutil.PublishMemory(context.Background(), store, "user", testutil.MemoryFixture{Scope: usermemory.ScopeLongTerm, Statement: "First indexed memory."}); err != nil {
 		t.Fatal(err)
 	}
 	embedder := &lifecycleEmbedder{dimensions: map[string]int{"model": 2}}
@@ -136,7 +137,7 @@ func TestVectorDimensionProbeCachedAcrossCycles(t *testing.T) {
 	if err := service.RunOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.SaveMemory(context.Background(), "user", usermemory.SaveRequest{Scope: usermemory.ScopeLongTerm, Statement: "Second indexed memory."}); err != nil {
+	if _, err := testutil.PublishMemory(context.Background(), store, "user", testutil.MemoryFixture{Scope: usermemory.ScopeLongTerm, Statement: "Second indexed memory."}); err != nil {
 		t.Fatal(err)
 	}
 	if err := service.RunOnce(context.Background()); err != nil {
@@ -174,7 +175,7 @@ func TestVectorDimensionProbeFailureRetriesUntilSuccess(t *testing.T) {
 
 func TestVectorRevisionModelAndDimensionLifecycle(t *testing.T) {
 	store := newLifecycleStore(t, "user")
-	if _, err := store.SaveMemory(context.Background(), "user", usermemory.SaveRequest{Scope: usermemory.ScopeLongTerm, Category: "projects", Statement: "Project Atlas is active."}); err != nil {
+	if _, err := testutil.PublishMemory(context.Background(), store, "user", testutil.MemoryFixture{Scope: usermemory.ScopeLongTerm, Category: "projects", Statement: "Project Atlas is active."}); err != nil {
 		t.Fatal(err)
 	}
 	embedder := &lifecycleEmbedder{dimensions: map[string]int{"model-a": 2, "model-b": 3}}
@@ -209,44 +210,14 @@ func TestVectorRevisionModelAndDimensionLifecycle(t *testing.T) {
 	}
 }
 
-func TestLegacyVectorRevisionIsRemovedAndRebuiltToCurrentSchema(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "oswald.db")
-	store := newLifecycleStoreAt(t, path, "user")
-	if _, err := store.SaveMemory(context.Background(), "user", usermemory.SaveRequest{Scope: usermemory.ScopeLongTerm, Statement: "Canonical vector record."}); err != nil {
-		t.Fatal(err)
-	}
-	db, err := database.Open(path, config.NewLogger(config.LevelError))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.SQL().Exec(`CREATE VIRTUAL TABLE memory_entry_vectors_v2 USING vec0(canonical_user_id text, embedding_model text, scope text, category text, embedding float[2]); INSERT INTO derived_index_revisions(index_kind, model, dimension, schema_version, revision, table_name, state, created_at, updated_at) VALUES ('memory_vector', 'model', 2, 1, 1, 'memory_entry_vectors_v2', 'live', datetime('now'), datetime('now'))`); err != nil {
-		db.Close() // nolint:errcheck
-		t.Fatal(err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-	embedder := &lifecycleEmbedder{dimensions: map[string]int{"model": 2}}
-	if err := NewService(store, nil, embedder, "model", config.NewLogger(config.LevelError)).RunOnce(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	live, err := store.LiveIndexRevision(context.Background(), usermemory.IndexKindMemoryVector)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if live.SchemaVersion != 2 || live.TableName == "memory_entry_vectors_v2" || live.IndexedCount != 1 {
-		t.Fatalf("legacy vector revision was not rebuilt: %+v", live)
-	}
-}
-
 func TestWriteArrivingDuringVectorBuildIsReconciled(t *testing.T) {
 	store := newLifecycleStore(t, "user")
-	if _, err := store.SaveMemory(context.Background(), "user", usermemory.SaveRequest{Scope: usermemory.ScopeLongTerm, Statement: "First canonical record."}); err != nil {
+	if _, err := testutil.PublishMemory(context.Background(), store, "user", testutil.MemoryFixture{Scope: usermemory.ScopeLongTerm, Statement: "First canonical record."}); err != nil {
 		t.Fatal(err)
 	}
 	embedder := &lifecycleEmbedder{dimensions: map[string]int{"model": 2}}
 	embedder.hook = func() {
-		if _, err := store.SaveMemory(context.Background(), "user", usermemory.SaveRequest{Scope: usermemory.ScopeLongTerm, Statement: "Record written during build."}); err != nil {
+		if _, err := testutil.PublishMemory(context.Background(), store, "user", testutil.MemoryFixture{Scope: usermemory.ScopeLongTerm, Statement: "Record written during build."}); err != nil {
 			t.Errorf("write during build: %v", err)
 		}
 	}
@@ -266,7 +237,7 @@ func TestWriteArrivingDuringVectorBuildIsReconciled(t *testing.T) {
 func TestWriteDuringModelChangeUpdatesOldLiveAndNewShadow(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "oswald.db")
 	store := newLifecycleStoreAt(t, path, "user")
-	if _, err := store.SaveMemory(context.Background(), "user", usermemory.SaveRequest{Scope: usermemory.ScopeLongTerm, Statement: "First canonical record."}); err != nil {
+	if _, err := testutil.PublishMemory(context.Background(), store, "user", testutil.MemoryFixture{Scope: usermemory.ScopeLongTerm, Statement: "First canonical record."}); err != nil {
 		t.Fatal(err)
 	}
 	embedder := &lifecycleEmbedder{dimensions: map[string]int{"old": 2, "new": 3}}
@@ -278,7 +249,7 @@ func TestWriteDuringModelChangeUpdatesOldLiveAndNewShadow(t *testing.T) {
 		t.Fatal(err)
 	}
 	embedder.hook = func() {
-		if _, err := store.SaveMemory(context.Background(), "user", usermemory.SaveRequest{Scope: usermemory.ScopeLongTerm, Statement: "Record written during model change."}); err != nil {
+		if _, err := testutil.PublishMemory(context.Background(), store, "user", testutil.MemoryFixture{Scope: usermemory.ScopeLongTerm, Statement: "Record written during model change."}); err != nil {
 			t.Errorf("write during model change: %v", err)
 		}
 	}
@@ -308,8 +279,9 @@ func TestWriteDuringModelChangeUpdatesOldLiveAndNewShadow(t *testing.T) {
 }
 
 func TestFailedShadowBuildPreservesOldLiveRevision(t *testing.T) {
-	store := newLifecycleStore(t, "user")
-	if _, err := store.SaveMemory(context.Background(), "user", usermemory.SaveRequest{Scope: usermemory.ScopeLongTerm, Statement: "Stable canonical record."}); err != nil {
+	path := filepath.Join(t.TempDir(), "oswald.db")
+	store := newLifecycleStoreAt(t, path, "user")
+	if _, err := testutil.PublishMemory(context.Background(), store, "user", testutil.MemoryFixture{Scope: usermemory.ScopeLongTerm, Statement: "Stable canonical record."}); err != nil {
 		t.Fatal(err)
 	}
 	good := &lifecycleEmbedder{dimensions: map[string]int{"old": 2}}
@@ -328,22 +300,23 @@ func TestFailedShadowBuildPreservesOldLiveRevision(t *testing.T) {
 	if live.ID != old.ID || live.Model != "old" {
 		t.Fatalf("failed build replaced live revision: old=%+v live=%+v", old, live)
 	}
-	health, err := store.DerivedIndexHealth(context.Background())
+	db, err := database.Open(path, config.NewLogger(config.LevelError))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var failed bool
-	for _, revision := range health {
-		failed = failed || (revision.Kind == usermemory.IndexKindMemoryVector && revision.State == "failed")
+	defer db.Close() // nolint:errcheck
+	var failed int
+	if err := db.SQL().QueryRow(`SELECT COUNT(*) FROM derived_index_revisions WHERE index_kind = 'memory_vector' AND model = 'new' AND state = 'failed'`).Scan(&failed); err != nil {
+		t.Fatal(err)
 	}
-	if !failed {
-		t.Fatalf("failed shadow revision missing from health: %+v", health)
+	if failed != 1 {
+		t.Fatalf("failed shadow revision count=%d, want 1", failed)
 	}
 }
 
 func TestRevisionValidationRejectsCrossTenantAndOrphanRows(t *testing.T) {
 	store := newLifecycleStore(t, "user-a", "user-b")
-	memory, err := store.SaveMemory(context.Background(), "user-a", usermemory.SaveRequest{Scope: usermemory.ScopeLongTerm, Statement: "Tenant A secret."})
+	memory, err := testutil.PublishMemory(context.Background(), store, "user-a", testutil.MemoryFixture{Scope: usermemory.ScopeLongTerm, Statement: "Tenant A secret."})
 	if err != nil {
 		t.Fatal(err)
 	}

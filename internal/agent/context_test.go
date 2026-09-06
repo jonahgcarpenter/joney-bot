@@ -10,6 +10,10 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 )
 
+func assembleTestPromptContext(policy, profile, prompt string, images []llm.InputImage, turns []usermemory.SessionTurn, tools []llm.Tool, limit int) PromptContext {
+	return AssemblePromptContextWithSummary(policy, profile, prompt, images, usermemory.SessionSummary{}, 0, nil, 0, turns, tools, limit)
+}
+
 func TestAssemblePromptContextPreservesRolesAndOrder(t *testing.T) {
 	turns := []usermemory.SessionTurn{
 		{ID: 3, UserText: "new user", AssistantText: "new assistant", ToolNames: []string{"web.search", "time.current"}},
@@ -17,7 +21,7 @@ func TestAssemblePromptContextPreservesRolesAndOrder(t *testing.T) {
 		{ID: 1, UserText: "old user", AssistantText: "old assistant"},
 	}
 
-	got := AssemblePromptContext("deployment policy", "tenant profile", "current", nil, turns, nil, 100000)
+	got := assembleTestPromptContext("deployment policy", "tenant profile", "current", nil, turns, nil, 100000)
 	wantRoles := []string{"system", "user", "user", "assistant", "user", "assistant", "user", "assistant", "user"}
 	wantContents := []string{
 		"deployment policy", "tenant profile",
@@ -52,7 +56,7 @@ func TestAssemblePromptContextReplaysNativeToolHistoryAndFallsBackWhenUnavailabl
 	turn := usermemory.SessionTurn{ID: 41, UserText: "weather?", AssistantText: "72 degrees", ToolNames: []string{"weather.current"}, ToolHistory: history}
 	tools := []llm.Tool{{Type: "function", Function: llm.ToolDefinition{Name: "weather.current"}}}
 
-	full := AssemblePromptContext("policy", "", "follow up", nil, []usermemory.SessionTurn{turn}, tools, 100000)
+	full := assembleTestPromptContext("policy", "", "follow up", nil, []usermemory.SessionTurn{turn}, tools, 100000)
 	if roles(full.Messages) != "system,user,assistant,tool,assistant,user" {
 		t.Fatalf("native history roles=%s messages=%+v", roles(full.Messages), full.Messages)
 	}
@@ -60,12 +64,12 @@ func TestAssemblePromptContextReplaysNativeToolHistoryAndFallsBackWhenUnavailabl
 		t.Fatalf("native history correlation=%+v", full.Messages)
 	}
 
-	compact := AssemblePromptContext("policy", "", "follow up", nil, []usermemory.SessionTurn{turn}, nil, 100000)
+	compact := assembleTestPromptContext("policy", "", "follow up", nil, []usermemory.SessionTurn{turn}, nil, 100000)
 	if roles(compact.Messages) != "system,user,assistant,user" || compact.Messages[2].Content != "72 degrees" {
 		t.Fatalf("unavailable tool did not use compact replay: %+v", compact.Messages)
 	}
-	compactWithTool := AssemblePromptContext("policy", "", "follow up", nil, []usermemory.SessionTurn{compactHistoricalTurn(turn)}, tools, 100000)
-	budgetFallback := AssemblePromptContext("policy", "", "follow up", nil, []usermemory.SessionTurn{turn}, tools, compactWithTool.EstimatedAfter)
+	compactWithTool := assembleTestPromptContext("policy", "", "follow up", nil, []usermemory.SessionTurn{compactHistoricalTurn(turn)}, tools, 100000)
+	budgetFallback := assembleTestPromptContext("policy", "", "follow up", nil, []usermemory.SessionTurn{turn}, tools, compactWithTool.EstimatedAfter)
 	if budgetFallback.SelectedTurnCount != 1 || roles(budgetFallback.Messages) != "system,user,assistant,user" {
 		t.Fatalf("oversized native history did not compact before omission: %+v", budgetFallback)
 	}
@@ -84,14 +88,14 @@ func TestCompletedPromptPressureIncludesStoredAssistantReplay(t *testing.T) {
 
 func TestAssemblePromptContextExactFitAndOneTokenOver(t *testing.T) {
 	turn := usermemory.SessionTurn{UserText: "historical question", AssistantText: "historical answer"}
-	all := AssemblePromptContext("policy", "", "now", nil, []usermemory.SessionTurn{turn}, nil, 100000)
+	all := assembleTestPromptContext("policy", "", "now", nil, []usermemory.SessionTurn{turn}, nil, 100000)
 
-	exact := AssemblePromptContext("policy", "", "now", nil, []usermemory.SessionTurn{turn}, nil, all.EstimatedAfter)
+	exact := assembleTestPromptContext("policy", "", "now", nil, []usermemory.SessionTurn{turn}, nil, all.EstimatedAfter)
 	if exact.SelectedTurnCount != 1 || exact.EstimatedAfter != all.EstimatedAfter {
 		t.Fatalf("exact fit rejected: %+v", exact)
 	}
 
-	over := AssemblePromptContext("policy", "", "now", nil, []usermemory.SessionTurn{turn}, nil, all.EstimatedAfter-1)
+	over := assembleTestPromptContext("policy", "", "now", nil, []usermemory.SessionTurn{turn}, nil, all.EstimatedAfter-1)
 	if over.SelectedTurnCount != 0 || len(over.Messages) != 2 {
 		t.Fatalf("one-token over included history: %+v", over)
 	}
@@ -102,14 +106,14 @@ func TestAssemblePromptContextStopsAtOversizedNewestTurn(t *testing.T) {
 		{ID: 3, UserText: strings.Repeat("界", 4000), AssistantText: "too large"},
 		{ID: 2, UserText: "small", AssistantText: "would fit"},
 	}
-	required := AssemblePromptContext("policy", "profile", "current", nil, nil, nil, 100000)
-	smallOnly := AssemblePromptContext("policy", "profile", "current", nil, turns[1:], nil, 100000)
+	required := assembleTestPromptContext("policy", "profile", "current", nil, nil, nil, 100000)
+	smallOnly := assembleTestPromptContext("policy", "profile", "current", nil, turns[1:], nil, 100000)
 	limit := smallOnly.EstimatedAfter
 	if limit <= required.EstimatedAfter {
 		t.Fatal("test setup did not make the older turn fit")
 	}
 
-	got := AssemblePromptContext("policy", "profile", "current", nil, turns, nil, limit)
+	got := assembleTestPromptContext("policy", "profile", "current", nil, turns, nil, limit)
 	if got.SelectedTurnCount != 0 || got.OmittedTurnCount != 2 {
 		t.Fatalf("assembler skipped past non-fitting newest turn: %+v", got)
 	}
@@ -123,7 +127,7 @@ func TestAssemblePromptContextRequiredOverBudgetPreservesRequiredMessages(t *tes
 	turns := []usermemory.SessionTurn{{UserText: "old user", AssistantText: "old assistant"}}
 	tools := []llm.Tool{{Type: "function", Function: llm.ToolDefinition{Name: "web.search", Description: strings.Repeat("schema", 100)}}}
 
-	got := AssemblePromptContext("policy", "profile", "current", images, turns, tools, 1)
+	got := assembleTestPromptContext("policy", "profile", "current", images, turns, tools, 1)
 	if !got.RequiredOverBudget || got.SelectedTurnCount != 0 || got.OmittedTurnCount != 1 {
 		t.Fatalf("unexpected over-budget result: %+v", got)
 	}
@@ -140,10 +144,10 @@ func TestAssemblePromptContextRequiredOverBudgetPreservesRequiredMessages(t *tes
 
 func TestAssemblePromptContextToolsAffectSelectionBudget(t *testing.T) {
 	turn := usermemory.SessionTurn{UserText: strings.Repeat("u", 100), AssistantText: strings.Repeat("a", 100)}
-	withoutTools := AssemblePromptContext("policy", "", "current", nil, []usermemory.SessionTurn{turn}, nil, 100000)
+	withoutTools := assembleTestPromptContext("policy", "", "current", nil, []usermemory.SessionTurn{turn}, nil, 100000)
 	tools := []llm.Tool{{Type: "function", Function: llm.ToolDefinition{Name: "large.tool", Description: strings.Repeat("description", 200)}}}
 
-	got := AssemblePromptContext("policy", "", "current", nil, []usermemory.SessionTurn{turn}, tools, withoutTools.EstimatedAfter)
+	got := assembleTestPromptContext("policy", "", "current", nil, []usermemory.SessionTurn{turn}, tools, withoutTools.EstimatedAfter)
 	if got.SelectedTurnCount != 0 {
 		t.Fatalf("tool schema was not included in the selection estimate: %+v", got)
 	}
@@ -158,7 +162,7 @@ func TestAssemblePromptContextAddsBoundedRecallToCurrentUser(t *testing.T) {
 		Score:      0.9,
 		Provenance: []usermemory.RecallProvenance{{Source: usermemory.RecallSourceLexical, Relevance: 1, Authority: usermemory.RecallAuthorityUserStated}},
 	}}
-	got := AssemblePromptContextWithRecall("policy", "profile", "What is the codename?", nil, recall, 2000, nil, nil, 100000)
+	got := AssemblePromptContextWithSummary("policy", "profile", "What is the codename?", nil, usermemory.SessionSummary{}, 0, recall, 2000, nil, nil, 100000)
 	if got.SelectedRecallCount != 1 || got.OmittedRecallCount != 0 || got.RecallChars == 0 {
 		t.Fatalf("unexpected recall selection: %+v", got)
 	}
@@ -173,8 +177,8 @@ func TestAssemblePromptContextAddsBoundedRecallToCurrentUser(t *testing.T) {
 
 func TestAssemblePromptContextOmitsRecallBeforeRequiredContent(t *testing.T) {
 	recall := []usermemory.RecallResult{{Entry: usermemory.MemoryEntry{ID: 1, Scope: "long_term", Category: "notes", Statement: strings.Repeat("memory ", 100), Confidence: 1, Importance: 5}, Score: 1}}
-	required := AssemblePromptContext("policy", "profile", "current", nil, nil, nil, 100000)
-	got := AssemblePromptContextWithRecall("policy", "profile", "current", nil, recall, 2000, nil, nil, required.EstimatedAfter)
+	required := assembleTestPromptContext("policy", "profile", "current", nil, nil, nil, 100000)
+	got := AssemblePromptContextWithSummary("policy", "profile", "current", nil, usermemory.SessionSummary{}, 0, recall, 2000, nil, nil, required.EstimatedAfter)
 	if got.SelectedRecallCount != 0 || got.OmittedRecallCount != 1 || got.Messages[len(got.Messages)-1].Content != "current" {
 		t.Fatalf("optional recall displaced required content: %+v", got)
 	}

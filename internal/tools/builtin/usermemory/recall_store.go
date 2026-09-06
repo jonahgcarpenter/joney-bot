@@ -136,7 +136,7 @@ func (s *Store) lexicalRecallCandidates(ctx context.Context, userID, scope, cate
 	if err != nil {
 		return nil, err
 	}
-	if err := validateRevisionTable(revision.TableName); err != nil {
+	if err := validateGeneratedTable(revision.TableName); err != nil {
 		return nil, err
 	}
 	terms := ftsRecallTerms(queryText)
@@ -199,7 +199,7 @@ func (s *Store) semanticRecallCandidates(ctx context.Context, revision DerivedIn
 	if revision.Dimension != len(queryVector) {
 		return nil, fmt.Errorf("%w: index=%d query=%d", errVectorIndexIncompatible, revision.Dimension, len(queryVector))
 	}
-	if err := validateRevisionTable(revision.TableName); err != nil {
+	if err := validateGeneratedTable(revision.TableName); err != nil {
 		return nil, err
 	}
 	serialized, err := serializeVector(queryVector)

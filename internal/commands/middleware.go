@@ -5,7 +5,7 @@ import "context"
 const adminDeniedMessage = "You are not allowed to use admin commands."
 
 // RequireAdmin requires the command actor to be an admin canonical user.
-func RequireAdmin(auth Authorizer) Middleware {
+func RequireAdmin(auth PrincipalAuthorizer) Middleware {
 	return func(next Handler) Handler {
 		return HandlerFunc{
 			DefinitionValue: next.Definition(),

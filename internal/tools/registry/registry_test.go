@@ -115,7 +115,8 @@ func TestRegistryUnknownToolWithEmptyPrefixMatchListsNone(t *testing.T) {
 
 func registerTestTool(t *testing.T, reg *Registry, name string) {
 	t.Helper()
-	if err := reg.RegisterTool(Spec{Name: name, Description: strings.TrimPrefix(name, "test.")}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
+	reg.specs[name] = Spec{Name: name, Description: strings.TrimPrefix(name, "test.")}
+	if err := reg.RegisterHandler(name, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
 		return governance.Result{Content: "ok", Outcome: governance.OutcomeProductive}, nil
 	}); err != nil {
 		t.Fatalf("register %s: %v", name, err)
@@ -126,54 +127,35 @@ func testToolPolicy() governance.ToolPolicy {
 	return governance.ToolPolicy{MaxExecutions: 1, MaxFailures: 1, MaxUnproductive: 1}
 }
 
-func TestRegistryMCPVisibilityAndCatalogOrdering(t *testing.T) {
+func TestRegistryVisibilityAndOrdering(t *testing.T) {
 	reg := New(config.NewLogger(config.LevelError))
-	if err := reg.RegisterSpec(Spec{Name: "builtin.tool", Description: "Builtin", Source: ToolSourceBuiltin}); err != nil {
-		t.Fatalf("register builtin: %v", err)
-	}
-	if err := reg.RegisterSpec(Spec{Name: "github.get_issue", Description: "Get issue", Source: ToolSourceMCP, Server: "github"}); err != nil {
-		t.Fatalf("register mcp: %v", err)
-	}
-	if err := reg.RegisterSpec(Spec{Name: "github.get_repo", Description: "Get repo", Source: ToolSourceMCP, Server: "github"}); err != nil {
-		t.Fatalf("register second mcp: %v", err)
+	for _, spec := range []Spec{
+		{Name: "test.second", Description: " Second "},
+		{Name: "test.first", Description: " First "},
+	} {
+		reg.specs[spec.Name] = spec
 	}
 
 	tools := reg.LLMTools()
-	if len(tools) != 1 || tools[0].Function.Name != "builtin.tool" {
-		t.Fatalf("expected only builtin by default, got %+v", tools)
+	if len(tools) != 2 || tools[0].Function.Name != "test.first" || tools[1].Function.Name != "test.second" {
+		t.Fatalf("unexpected visible catalog order: %+v", tools)
 	}
-
-	tools = reg.LLMToolsForVisibility(ToolVisibility{ExposedMCPTools: map[string]bool{"github.get_issue": true}})
-	if len(tools) != 2 || tools[0].Function.Name != "builtin.tool" || tools[1].Function.Name != "github.get_issue" {
-		t.Fatalf("unexpected visible tools: %+v", tools)
+	if tools[0].Function.Description != "First" || tools[1].Function.Description != "Second" {
+		t.Fatalf("descriptions were not trimmed: %+v", tools)
 	}
-	if tools[1].Function.Description != "Github MCP tool: Get issue" {
-		t.Fatalf("unexpected MCP description %q", tools[1].Function.Description)
-	}
-	tools = reg.LLMToolsForVisibility(ToolVisibility{HiddenBuiltins: map[string]bool{"builtin.tool": true}})
-	if len(tools) != 0 {
+	tools = reg.LLMToolsForVisibility(ToolVisibility{HiddenBuiltins: map[string]bool{"test.first": true}})
+	if len(tools) != 1 || tools[0].Function.Name != "test.second" {
 		t.Fatalf("request-hidden builtin remained visible: %+v", tools)
-	}
-
-	builtin := reg.BuiltinCatalog()
-	if len(builtin) != 1 || builtin[0].Name != "builtin.tool" {
-		t.Fatalf("unexpected builtin catalog: %+v", builtin)
-	}
-	mcp := reg.CatalogBySource(ToolSourceMCP)
-	if len(mcp) != 2 || mcp[0].Name != "github.get_issue" || mcp[1].Name != "github.get_repo" {
-		t.Fatalf("unexpected mcp catalog: %+v", mcp)
 	}
 }
 
 func TestDisableBuiltinHidesToolButKeepsNameReserved(t *testing.T) {
 	reg := New(config.NewLogger(config.LevelError))
-	if err := reg.RegisterSpec(Spec{Name: "web.search", Description: "Search", Source: ToolSourceBuiltin}); err != nil {
-		t.Fatal(err)
-	}
+	reg.specs["web.search"] = Spec{Name: "web.search", Description: "Search"}
 	if err := reg.DisableBuiltin("web.search"); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := reg.LLMTool("web.search"); ok || len(reg.BuiltinCatalog()) != 0 {
+	if len(reg.LLMTools()) != 0 {
 		t.Fatal("disabled builtin remained model-visible")
 	}
 	if names := reg.Names(); len(names) != 1 || names[0] != "web.search" {
@@ -184,16 +166,14 @@ func TestDisableBuiltinHidesToolButKeepsNameReserved(t *testing.T) {
 	}
 }
 
-func TestDisableBuiltinRejectsUnknownAndMCPTools(t *testing.T) {
+func TestDisableBuiltinRejectsUnknownAndRegisteredTools(t *testing.T) {
 	reg := New(config.NewLogger(config.LevelError))
 	if err := reg.DisableBuiltin("missing"); err == nil {
 		t.Fatal("unknown builtin was disabled")
 	}
-	if err := reg.RegisterSpec(Spec{Name: "server.tool", Source: ToolSourceMCP}); err != nil {
-		t.Fatal(err)
-	}
-	if err := reg.DisableBuiltin("server.tool"); err == nil {
-		t.Fatal("MCP tool was disabled as builtin")
+	registerTestTool(t, reg, "test.registered")
+	if err := reg.DisableBuiltin("test.registered"); err == nil {
+		t.Fatal("builtin was disabled after handler registration")
 	}
 }
 
@@ -203,5 +183,44 @@ func TestParseToolMarkdownRejectsMissingSections(t *testing.T) {
 	}
 	if _, err := parseToolMarkdown("# missing.params\n\n## Description\n\nDescription"); err == nil {
 		t.Fatal("expected missing parameters error")
+	}
+}
+
+func TestRegistryValidatesMarkdownSchemaBeforeAdvertising(t *testing.T) {
+	for _, test := range []struct {
+		name, schema string
+		valid        bool
+	}{
+		{name: "invalid JSON", schema: `{`},
+		{name: "non-object", schema: `{"type":"array","properties":{}}`},
+		{name: "missing properties", schema: `{"type":"object"}`},
+		{name: "nested schema", schema: `{"type":"object","properties":{"items":{"type":"array","items":{"type":"string","enum":["a","b"]}}},"required":["items"],"additionalProperties":false}`, valid: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			definition := "# test.schema\n\n## Description\n\nSchema test\n\n## Parameters\n\n| Name | Type | Required | Description |\n\n## Schema\n\n```json\n" + test.schema + "\n```\n"
+			if err := os.WriteFile(filepath.Join(dir, "schema.md"), []byte(definition), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			reg, err := NewFromDirectory(dir, config.NewLogger(config.LevelError))
+			if err != nil {
+				t.Fatal(err)
+			}
+			tools := reg.LLMTools()
+			if !test.valid {
+				if len(tools) != 0 || reg.Count() != 0 {
+					t.Fatalf("invalid schema loaded: %+v", tools)
+				}
+				return
+			}
+			if len(tools) != 1 {
+				t.Fatalf("valid schema missing: %+v", tools)
+			}
+			params := tools[0].Function.Parameters
+			items := params.Properties["items"]
+			if params.AdditionalProperties == nil || *params.AdditionalProperties || len(params.Required) != 1 || params.Required[0] != "items" || items.Items == nil || items.Items.Type != "string" || len(items.Items.Enum) != 2 {
+				t.Fatalf("schema constraints lost: %+v", params)
+			}
+		})
 	}
 }

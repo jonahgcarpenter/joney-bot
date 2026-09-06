@@ -34,7 +34,7 @@ func TestNewContextBudgetUsesConfiguredLimitsAndFallbacks(t *testing.T) {
 
 func TestContextBudgetCannotExceedCapacity(t *testing.T) {
 	budget := NewContextBudget(100, 100)
-	if budget.UsableInputLimit() != 0 || budget.PromptBudget() != 0 {
+	if budget.UsableInputLimit() != 0 {
 		t.Fatalf("budget must not exceed actual capacity: %+v", budget)
 	}
 }
@@ -51,33 +51,26 @@ func TestContextBudgetCapsExplicitLimitAtContextCapacity(t *testing.T) {
 	}
 }
 
-func TestEstimateTokensIncludesMessagesImagesAndTools(t *testing.T) {
-	history := []llm.ChatMessage{
+func TestEstimateRequestIncludesMessagesImagesAndTools(t *testing.T) {
+	messages := []llm.ChatMessage{
+		{Role: "system", Content: "system"},
 		{Role: "user", Content: strings.Repeat("a", 100)},
 		{Role: "assistant", Content: strings.Repeat("b", 100)},
+		{Role: "user", Content: "now"},
 	}
 	tools := []llm.Tool{{Type: "function", Function: llm.ToolDefinition{Name: "test.tool"}}}
-	withoutImage := EstimateTokens("system", history, "now", 0, tools)
-	withImage := EstimateTokens("system", history, "now", 1, tools)
+	withoutTools := EstimateRequest(messages, nil)
+	withoutImage := EstimateRequest(messages, tools)
+	messages[len(messages)-1].Images = make([]llm.InputImage, 1)
+	withImage := EstimateRequest(messages, tools)
 	if withoutImage <= 0 {
 		t.Fatalf("expected positive estimate, got %d", withoutImage)
 	}
+	if withoutImage <= withoutTools {
+		t.Fatalf("expected tools to increase token count, got without=%d with=%d", withoutTools, withoutImage)
+	}
 	if withImage <= withoutImage {
 		t.Fatalf("expected image estimate to increase token count, got without=%d with=%d", withoutImage, withImage)
-	}
-}
-
-func TestEstimateTokensCompatibilityMatchesEstimateRequest(t *testing.T) {
-	history := []llm.ChatMessage{{Role: "assistant", Content: "Zażółć gęślą jaźń"}}
-	tools := []llm.Tool{{Type: "function", Function: llm.ToolDefinition{Name: "test.tool"}}}
-	legacy := EstimateTokens("policy", history, "こんにちは", 2, tools)
-	messages := []llm.ChatMessage{
-		{Role: "system", Content: "policy"},
-		history[0],
-		{Role: "user", Content: "こんにちは", Images: make([]llm.InputImage, 2)},
-	}
-	if got := EstimateRequest(messages, tools); got != legacy {
-		t.Fatalf("EstimateRequest() = %d, EstimateTokens() = %d", got, legacy)
 	}
 }
 

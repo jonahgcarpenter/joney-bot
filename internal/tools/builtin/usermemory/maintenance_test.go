@@ -80,7 +80,7 @@ func TestMaintenanceRetainsFailedCompactionContractForActiveSession(t *testing.T
 	seedAccountUsers(t, store, "user")
 	generation := activateCompactionSession(t, store, "user", "session")
 	turnID := appendDeliveredCompactionTurn(t, store, "user", "session", generation, "one")
-	jobID, err := store.EnqueueSessionCompactionJob(context.Background(), "user", "session", generation, turnID, turnID, compactionTestModel, compactionTestGeneratorVersion)
+	jobID, err := store.EnqueueSessionCompactionCampaignJob(context.Background(), "user", "session", generation, turnID, turnID, turnID, compactionTestModel, compactionTestGeneratorVersion)
 	if err != nil {
 		t.Fatal(err)
 	}

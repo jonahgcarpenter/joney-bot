@@ -17,7 +17,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
-	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/testutil"
 )
 
 const testToken = "0123456789abcdef0123456789abcdef"
@@ -217,7 +217,7 @@ func testLinks(t *testing.T) (*accountlinking.Service, *config.Logger) {
 	t.Helper()
 	log := config.NewLogger(config.LevelError)
 	path := filepath.Join(t.TempDir(), "oswald.db")
-	memory := usermemory.NewStore(path, log)
+	memory := testutil.NewMemoryStore(t, path, log)
 	t.Cleanup(func() { _ = memory.Close() })
 	links := accountlinking.NewService(path, memory, nil, log)
 	if err := links.Initialize(); err != nil {

@@ -6,13 +6,13 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/testutil"
 )
 
 func TestNewServiceAlwaysRegistersReset(t *testing.T) {
-	memory := usermemory.NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
+	memory := testutil.NewMemoryStore(t, filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
 	defer memory.Close() // nolint:errcheck
-	service, err := NewService(nil, memory)
+	service, err := NewServiceWithGlobalMemory(nil, memory, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -27,11 +27,11 @@ func TestNewServiceAlwaysRegistersReset(t *testing.T) {
 func TestNewServiceRegistersMemories(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "oswald.db")
 	log := config.NewLogger(config.LevelError)
-	memory := usermemory.NewStore(path, log)
+	memory := testutil.NewMemoryStore(t, path, log)
 	defer memory.Close() // nolint:errcheck
 	users := accountlinking.NewService(path, memory, nil, log)
 	defer users.Close() // nolint:errcheck
-	service, err := NewService(users, memory)
+	service, err := NewServiceWithGlobalMemory(users, memory, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

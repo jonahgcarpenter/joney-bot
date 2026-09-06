@@ -96,9 +96,8 @@ func Execute(req Request, deps Dependencies, responder Responder) Outcome {
 				}
 				if commandErr != nil {
 					response.Text = config.SafeErrorText(commandErr)
-					response.Attachment = nil
 					response.Attachments = nil
-				} else if attachments := response.OrderedAttachments(); len(attachments) > 0 {
+				} else if attachments := response.Attachments; len(attachments) > 0 {
 					totalBytes := 0
 					for _, attachment := range attachments {
 						totalBytes += len(attachment.Data)
@@ -108,7 +107,6 @@ func Execute(req Request, deps Dependencies, responder Responder) Outcome {
 						attachmentValidationFailed = true
 						log.Error("gateway.command.attachment_invalid", "command returned invalid attachments", config.F("request_id", req.RequestID), config.F("user_id", userID), config.F("attachment_count", len(attachments)), config.F("attachment_bytes", totalBytes), config.F("status", "error"))
 						response.Text = config.SafeErrorText(validateErr)
-						response.Attachment = nil
 						response.Attachments = nil
 					} else {
 						log.Debug("gateway.command.attachment_ready", "prepared command attachments", config.F("request_id", req.RequestID), config.F("user_id", userID), config.F("attachment_count", len(attachments)), config.F("attachment_bytes", totalBytes))
@@ -117,7 +115,7 @@ func Execute(req Request, deps Dependencies, responder Responder) Outcome {
 				sendErr = responder.SendCommandResponse(response)
 				deliveryAttempted = true
 				if response.Invalidation != nil && deps.RuntimeInvalidationBus != nil {
-					_ = deps.RuntimeInvalidationBus.Publish(*response.Invalidation)
+					deps.RuntimeInvalidationBus.Publish(*response.Invalidation)
 				}
 				return commandErr
 			}

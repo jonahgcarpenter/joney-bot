@@ -843,11 +843,6 @@ LIMIT 1`, candidate.UserID, memoryID).Scan(&statement, &category, &provenance, &
 	return attached, nil
 }
 
-// LoadCandidate returns one tenant-owned candidate.
-func (s *Store) LoadCandidate(ctx context.Context, userID string, candidateID int64) (FormationCandidate, error) {
-	return loadCandidateSQL(ctx, s.sql, userID, candidateID)
-}
-
 // EnqueueFormationJob records one replay-safe extraction job per source turn/version.
 func (s *Store) EnqueueFormationJob(ctx context.Context, source FormationSource, userID string) (int64, error) {
 	id, _, err := s.enqueueFormationJob(ctx, source, userID, FormationPurposeBackgroundPattern)
@@ -1387,10 +1382,6 @@ func loadCandidateByKeyTx(ctx context.Context, tx *sql.Tx, userID, key string) (
 
 func loadCandidateTx(ctx context.Context, tx *sql.Tx, userID string, id int64) (FormationCandidate, error) {
 	return scanFormationCandidate(tx.QueryRowContext(ctx, candidateSelect+` WHERE memory_candidates.canonical_user_id = ? AND memory_candidates.id = ?`, userID, id))
-}
-
-func loadCandidateSQL(ctx context.Context, db *sql.DB, userID string, id int64) (FormationCandidate, error) {
-	return scanFormationCandidate(db.QueryRowContext(ctx, candidateSelect+` WHERE memory_candidates.canonical_user_id = ? AND memory_candidates.id = ?`, userID, id))
 }
 
 func scanFormationCandidate(row interface{ Scan(...any) error }) (FormationCandidate, error) {

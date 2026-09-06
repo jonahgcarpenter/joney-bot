@@ -93,7 +93,7 @@ func TestDecodeToolArgumentsFallsBackToRaw(t *testing.T) {
 	if got["_raw"] != "not-json" {
 		t.Fatalf("unexpected decoded args: %+v", got)
 	}
-	if responseFormat("json").Type != "json_object" {
-		t.Fatal("expected json alias to json_object")
+	if responseFormat("json_object").Type != "json_object" {
+		t.Fatal("expected canonical json_object response format")
 	}
 }

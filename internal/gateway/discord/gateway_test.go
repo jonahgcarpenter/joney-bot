@@ -34,7 +34,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/runtimeinvalidation"
 	"github.com/jonahgcarpenter/oswald-ai/internal/soul"
-	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/testutil"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 )
@@ -657,9 +657,9 @@ func TestDiscordCommandAttachmentProviderFailure(t *testing.T) {
 	}))
 	defer server.Close()
 	dg := &Gateway{Token: "token", APIBaseURL: server.URL, Log: config.NewLogger(config.LevelError)}
-	_, err := dg.sendCommandAttachment("channel-1", commands.Result{Attachment: &commands.Attachment{
+	_, err := dg.sendCommandAttachment("channel-1", commands.Result{Attachments: []commands.Attachment{{
 		Filename: "export.json", MIMEType: "application/json", Data: []byte("private-content"),
-	}}, "")
+	}}}, "")
 	if err == nil || strings.Contains(err.Error(), "private-content") {
 		t.Fatalf("unexpected provider error: %v", err)
 	}
@@ -1318,7 +1318,7 @@ func newDiscordTestGateway(t *testing.T, apiBaseURL string) (*Gateway, *broker.B
 	log := config.NewLogger(config.LevelError)
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "oswald.db")
-	memories := usermemory.NewStore(dbPath, log)
+	memories := testutil.NewMemoryStore(t, dbPath, log)
 	links := accountlinking.NewService(dbPath, memories, nil, log)
 	soulPath := filepath.Join(dir, "soul.md")
 	if err := os.WriteFile(soulPath, []byte("You are Oswald."), 0o600); err != nil {
@@ -1329,7 +1329,7 @@ func newDiscordTestGateway(t *testing.T, apiBaseURL string) (*Gateway, *broker.B
 	ai := agent.NewAgent(chat, registry.New(log), "test-model", soulStore, memories, promptbudget.ContextBudget{PromptLimit: 100000}, governance.GlobalPolicy{MaxExecutions: 12, MaxToolIterations: 8, MaxConsecutiveFailures: 3}, log)
 	b := broker.NewBroker(ai, 1, log)
 	b.Start()
-	commandService, err := commands.NewService()
+	commandService, err := commands.NewServiceWithCommands()
 	if err != nil {
 		t.Fatalf("new command service: %v", err)
 	}

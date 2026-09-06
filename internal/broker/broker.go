@@ -354,12 +354,7 @@ func (b *Broker) cancelAgentWork(matches func(*work) bool) CancelReport {
 
 // RunInLane runs a synchronous gateway operation in the same FIFO lane used by agent work.
 func (b *Broker) RunInLane(ctx context.Context, principal identity.Principal, sessionID string, operation func() error) error {
-	return b.runOperation(ctx, principal, sessionID, false, operation)
-}
-
-// RunUserExclusive waits for active work for a user and blocks new same-user work until completion.
-func (b *Broker) RunUserExclusive(ctx context.Context, principal identity.Principal, operation func() error) error {
-	return b.RunUsersExclusive(ctx, []string{principal.CanonicalUserID}, operation)
+	return b.runOperationForUsers(ctx, LaneKey{CanonicalUserID: principal.CanonicalUserID, SessionID: sessionID}, []string{principal.CanonicalUserID}, operation)
 }
 
 // RunUsersExclusive waits for active work for every listed user and blocks new
@@ -371,10 +366,6 @@ func (b *Broker) RunUsersExclusive(ctx context.Context, canonicalUserIDs []strin
 		return fmt.Errorf("broker exclusive operation requires a canonical user ID")
 	}
 	return b.runOperationForUsers(ctx, LaneKey{CanonicalUserID: userIDs[0], UserExclusive: true}, userIDs, operation)
-}
-
-func (b *Broker) runOperation(ctx context.Context, principal identity.Principal, sessionID string, exclusive bool, operation func() error) error {
-	return b.runOperationForUsers(ctx, LaneKey{CanonicalUserID: principal.CanonicalUserID, SessionID: sessionID, UserExclusive: exclusive}, []string{principal.CanonicalUserID}, operation)
 }
 
 func (b *Broker) runOperationForUsers(ctx context.Context, key LaneKey, userIDs []string, operation func() error) error {

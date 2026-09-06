@@ -10,7 +10,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
-	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/testutil"
 )
 
 func TestCommandHandlerRequiresAdmin(t *testing.T) {
@@ -32,6 +32,32 @@ func TestCommandHandlerRequiresAdmin(t *testing.T) {
 	}
 }
 
+func TestDeleteFenceReResolvesPrincipal(t *testing.T) {
+	links := newTestService(t)
+	adminID, err := links.EnsureAccount("discord", "901", "Admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin := commandPrincipal(t, links, adminID)
+	if _, claimed, err := links.ClaimBootstrapAdmin(admin); err != nil || !claimed {
+		t.Fatalf("claim admin: claimed=%t err=%v", claimed, err)
+	}
+	userID, err := links.EnsureAccount("discord", "902", "User")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := commandPrincipal(t, links, userID)
+	stale.CanonicalUserID = adminID
+	service := newAdminCommandService(t, links)
+	if targets, err := service.ResolveFenceTargets(context.Background(), commands.Request{Principal: stale, Raw: "/deleteuser " + userID}); err == nil || len(targets) != 0 {
+		t.Fatalf("stale admin ID authorized: targets=%v err=%v", targets, err)
+	}
+	admin.CanonicalUserID = userID
+	if targets, err := service.ResolveFenceTargets(context.Background(), commands.Request{Principal: admin, Raw: "/deleteuser " + userID}); err != nil || len(targets) != 1 || targets[0] != userID {
+		t.Fatalf("current admin owner denied: targets=%v err=%v", targets, err)
+	}
+}
+
 func TestCommandHandlerUsersAdminBanAndUnban(t *testing.T) {
 	links := newTestService(t)
 	adminID, err := links.EnsureAccount("discord", "200", "Admin")
@@ -42,8 +68,8 @@ func TestCommandHandlerUsersAdminBanAndUnban(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensure target: %v", err)
 	}
-	if err := links.SetAdmin(adminID, adminID, true); err != nil {
-		t.Fatalf("set admin: %v", err)
+	if _, claimed, err := links.ClaimBootstrapAdmin(commandPrincipal(t, links, adminID)); err != nil || !claimed {
+		t.Fatalf("claim bootstrap admin: claimed=%t err=%v", claimed, err)
 	}
 	service := newAdminCommandService(t, links)
 
@@ -91,7 +117,7 @@ func TestCommandHandlerUsersAdminBanAndUnban(t *testing.T) {
 	if err != nil || !strings.Contains(response, "Banned "+targetID+".") {
 		t.Fatalf("ban response=%q err=%v", response, err)
 	}
-	isBanned, err := links.IsBanned(targetID)
+	isBanned, _, err := links.BanStatus(targetID)
 	if err != nil || !isBanned {
 		t.Fatalf("expected target banned, got %v err=%v", isBanned, err)
 	}
@@ -100,7 +126,7 @@ func TestCommandHandlerUsersAdminBanAndUnban(t *testing.T) {
 	if err != nil || !strings.Contains(response, "Unbanned "+targetID+".") {
 		t.Fatalf("unban response=%q err=%v", response, err)
 	}
-	isBanned, err = links.IsBanned(targetID)
+	isBanned, _, err = links.BanStatus(targetID)
 	if err != nil || isBanned {
 		t.Fatalf("expected target unbanned, got %v err=%v", isBanned, err)
 	}
@@ -158,6 +184,6 @@ func newTestService(t *testing.T) *accountlinking.Service {
 	dir := t.TempDir()
 	log := config.NewLogger(config.LevelError)
 	dbPath := filepath.Join(dir, "oswald.db")
-	memories := usermemory.NewStore(dbPath, log)
+	memories := testutil.NewMemoryStore(t, dbPath, log)
 	return accountlinking.NewService(dbPath, memories, nil, log)
 }

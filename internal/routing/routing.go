@@ -2,16 +2,12 @@ package routing
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
-	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 )
-
-var previewWhitespaceRE = regexp.MustCompile(`\s+`)
 
 // Decide applies the shared gateway policy for deciding if and how a message reaches the LLM.
 func Decide(input Input) Decision {
@@ -58,19 +54,6 @@ func Preflight(input PreflightInput) Decision {
 // IsCommandAttempt reports whether text begins with command syntax.
 func IsCommandAttempt(text string) bool {
 	return commands.IsAttempt(text)
-}
-
-// MessagePreview returns a single-line, rune-bounded preview safe for debug logs.
-func MessagePreview(text string, limit int) string {
-	if limit <= 0 {
-		return ""
-	}
-	preview := config.SafeText(strings.TrimSpace(previewWhitespaceRE.ReplaceAllString(text, " ")))
-	runes := []rune(preview)
-	if len(runes) <= limit {
-		return preview
-	}
-	return string(runes[:limit])
 }
 
 // ShouldIgnoreUninvokedGroup reports whether a group message lacks any gateway-normalized invocation.

@@ -2,6 +2,7 @@ package maintenanceruntime
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -60,5 +61,39 @@ func TestServiceImmediateSweepDoesNotOverlapAndStops(t *testing.T) {
 	defer sweeper.mu.Unlock()
 	if sweeper.calls != 1 || sweeper.overlapped || sweeper.active != 0 {
 		t.Fatalf("calls=%d active=%d overlapped=%v", sweeper.calls, sweeper.active, sweeper.overlapped)
+	}
+}
+
+type recoveringSweeper struct {
+	calls chan int
+	count int
+}
+
+func (s *recoveringSweeper) MaintenanceSweep(context.Context, time.Time, config.RetentionPolicy) (usermemory.MaintenanceCounts, error) {
+	s.count++
+	select {
+	case s.calls <- s.count:
+	default:
+	}
+	if s.count == 1 {
+		return usermemory.MaintenanceCounts{}, errors.New("transient cleanup failure")
+	}
+	return usermemory.MaintenanceCounts{}, nil
+}
+
+func TestServiceRepeatsAfterSweepFailure(t *testing.T) {
+	sweeper := &recoveringSweeper{calls: make(chan int, 8)}
+	service := NewService(sweeper, config.RetentionPolicy{MaintenanceInterval: time.Millisecond}, config.NewLogger(config.LevelError))
+	service.Start(context.Background())
+	defer service.Stop()
+	for want := 1; want <= 3; want++ {
+		select {
+		case got := <-sweeper.calls:
+			if got != want {
+				t.Fatalf("sweep=%d, want %d", got, want)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("maintenance did not reach sweep %d after failure", want)
+		}
 	}
 }

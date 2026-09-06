@@ -16,7 +16,6 @@ const (
 	SessionCompactionModelSubmissionLimit = 4
 	// SessionCompactionInvalidOutputRetryLimit permits all three retries to correct invalid output.
 	SessionCompactionInvalidOutputRetryLimit = 3
-	maxSessionCompactionAttempts             = SessionCompactionModelSubmissionLimit
 )
 
 const (
@@ -481,11 +480,6 @@ WHERE canonical_user_id = ? AND session_id = ? AND session_generation = ? AND de
 	return turns, nil
 }
 
-// EnqueueSessionCompactionJob creates one idempotent job for an immutable range.
-func (s *Store) EnqueueSessionCompactionJob(ctx context.Context, userID, sessionID string, generation int, fromTurnID, throughTurnID int64, model, generatorVersion string) (int64, error) {
-	return s.EnqueueSessionCompactionCampaignJob(ctx, userID, sessionID, generation, fromTurnID, throughTurnID, throughTurnID, model, generatorVersion)
-}
-
 // EnqueueSessionCompactionCampaignJob creates one idempotent chunk belonging
 // to a stable campaign target.
 func (s *Store) EnqueueSessionCompactionCampaignJob(ctx context.Context, userID, sessionID string, generation int, fromTurnID, throughTurnID, targetTurnID int64, model, generatorVersion string) (int64, error) {
@@ -598,27 +592,6 @@ func (s *Store) RecordUncompactableSessionCompactionCampaign(ctx context.Context
 		}
 	}
 	return id, nil
-}
-
-// ListSessionCompactionJobsForStartup lists nonterminal jobs for reconciliation.
-func (s *Store) ListSessionCompactionJobsForStartup(ctx context.Context, limit int) ([]SessionCompactionJob, error) {
-	if limit <= 0 || limit > 1000 {
-		limit = 100
-	}
-	rows, err := s.sql.QueryContext(ctx, sessionCompactionJobSelect+` WHERE job_kind = 'session_compaction' AND state IN ('queued', 'running', 'retry') ORDER BY available_at, id LIMIT ?`, limit)
-	if err != nil {
-		return nil, fmt.Errorf("list startup session compaction jobs: %w", err)
-	}
-	defer rows.Close()
-	jobs := make([]SessionCompactionJob, 0)
-	for rows.Next() {
-		job, err := scanSessionCompactionJob(rows)
-		if err != nil {
-			return nil, err
-		}
-		jobs = append(jobs, job)
-	}
-	return jobs, rows.Err()
 }
 
 // ReconcileSessionCompactionJobs skips stale generations and releases expired leases.
@@ -1278,12 +1251,4 @@ func sessionSummarySourcesTx(ctx context.Context, tx *sql.Tx, job SessionCompact
 		return nil, err
 	}
 	return sources, nil
-}
-
-func safeCompactionErrorMessage(value string) string {
-	value = strings.TrimSpace(value)
-	if len(value) > 500 {
-		value = value[:500]
-	}
-	return value
 }

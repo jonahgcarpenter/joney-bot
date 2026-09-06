@@ -12,7 +12,6 @@ import (
 type SessionCleanupCounts struct {
 	SessionTurnsDeleted     int64
 	TenantSessionsDeleted   int64
-	ProfileVersionsDeleted  int64
 	MemoryEntriesExpired    int64
 	CandidatesErased        int64
 	FormationJobsDeleted    int64
@@ -20,21 +19,7 @@ type SessionCleanupCounts struct {
 	CompactionJobsDeleted   int64
 }
 
-// SessionCleaner removes expired session state.
-type SessionCleaner interface {
-	CleanupExpiredSessions(context.Context, time.Time) (SessionCleanupCounts, error)
-}
-
-// CleanupExpiredSessions removes expired session artifacts while retaining each
-// session row as the generation high-water record.
-func (s *Store) CleanupExpiredSessions(ctx context.Context, now time.Time) (SessionCleanupCounts, error) {
-	return s.cleanupExpiredSessions(ctx, now, config.RetentionPolicy{
-		SuccessfulJobRetention: 7 * 24 * time.Hour,
-		DeadJobRetention:       30 * 24 * time.Hour,
-	}, false)
-}
-
-func (s *Store) cleanupExpiredSessions(ctx context.Context, now time.Time, policy config.RetentionPolicy, preserveCompactionJobs bool) (SessionCleanupCounts, error) {
+func (s *Store) cleanupExpiredSessions(ctx context.Context, now time.Time, policy config.RetentionPolicy) (SessionCleanupCounts, error) {
 	var counts SessionCleanupCounts
 	if err := ctx.Err(); err != nil {
 		return counts, err
@@ -98,19 +83,7 @@ WHERE job_kind = 'memory_formation' AND id IN (SELECT id FROM durable_jobs WHERE
 		return SessionCleanupCounts{}, fmt.Errorf("count deleted memory formation jobs: %w", err)
 	}
 
-	compactionMutation := `
-DELETE FROM durable_jobs WHERE job_kind = 'session_compaction' AND id IN (SELECT id FROM durable_jobs jobs
-WHERE jobs.job_kind = 'session_compaction' AND NOT EXISTS (
-	SELECT 1 FROM sessions active
-	WHERE active.canonical_user_id = jobs.canonical_user_id
-		AND active.session_id = jobs.session_id
-		AND active.generation = jobs.session_generation
-		AND active.is_active = 1
-		AND active.expires_at > ?
-) ORDER BY id LIMIT ?)
-`
-	if preserveCompactionJobs {
-		compactionMutation = `
+	result, err = tx.ExecContext(ctx, `
 UPDATE durable_jobs
 SET state = CASE WHEN state IN ('queued','running','retry') THEN 'skipped' ELSE state END,
 	artifact_summary_id = NULL, lease_owner = '', lease_until = NULL,
@@ -124,13 +97,9 @@ WHERE job_kind = 'session_compaction' AND id IN (SELECT id FROM durable_jobs job
 		AND active.is_active = 1
 		AND active.expires_at > ?
 ) ORDER BY id LIMIT ?)
-`
-		result, err = tx.ExecContext(ctx, compactionMutation, nowText, nowText, nowText, batch)
-	} else {
-		result, err = tx.ExecContext(ctx, compactionMutation, nowText, batch)
-	}
+`, nowText, nowText, nowText, batch)
 	if err != nil {
-		return SessionCleanupCounts{}, fmt.Errorf("delete inactive session compaction jobs: %w", err)
+		return SessionCleanupCounts{}, fmt.Errorf("retire inactive session compaction jobs: %w", err)
 	}
 	counts.CompactionJobsDeleted, _ = result.RowsAffected()
 	result, err = tx.ExecContext(ctx, `
@@ -202,63 +171,4 @@ WHERE NOT EXISTS (
 	}
 	s.signalDerivedIndex()
 	return counts, nil
-}
-
-// RunSessionCleanup immediately sweeps expired sessions, then repeats at the
-// configured interval until ctx is canceled. Sweeps run synchronously so they
-// can never overlap.
-func RunSessionCleanup(ctx context.Context, cleaner SessionCleaner, interval time.Duration, logger *config.Logger) {
-	if cleaner == nil {
-		return
-	}
-	if logger != nil {
-		logger = logger.Server("session_memory.cleanup")
-	}
-	sweep := func() {
-		started := time.Now()
-		counts, err := cleaner.CleanupExpiredSessions(ctx, started.UTC())
-		if err != nil {
-			if logger != nil && ctx.Err() == nil {
-				logger.Warn("session_memory.cleanup.failed", "session-memory cleanup failed", config.F("duration_ms", time.Since(started).Milliseconds()), config.F("status", "degraded"), config.ErrorField(err))
-			}
-			return
-		}
-		if logger != nil {
-			fields := []config.Field{
-				config.F("session_turn_count", counts.SessionTurnsDeleted),
-				config.F("tenant_session_count", counts.TenantSessionsDeleted),
-				config.F("profile_version_count", counts.ProfileVersionsDeleted),
-				config.F("memory_expired_count", counts.MemoryEntriesExpired),
-				config.F("candidate_erased_count", counts.CandidatesErased),
-				config.F("formation_job_deleted_count", counts.FormationJobsDeleted),
-				config.F("session_summary_deleted_count", counts.SessionSummariesDeleted),
-				config.F("compaction_job_deleted_count", counts.CompactionJobsDeleted),
-				config.F("duration_ms", time.Since(started).Milliseconds()),
-				config.F("status", "ok"),
-			}
-			if counts.SessionTurnsDeleted+counts.TenantSessionsDeleted+counts.ProfileVersionsDeleted+counts.MemoryEntriesExpired+counts.CandidatesErased+counts.FormationJobsDeleted+counts.SessionSummariesDeleted+counts.CompactionJobsDeleted == 0 {
-				logger.Debug("session_memory.cleanup.complete", "session-memory cleanup completed", fields...)
-			} else {
-				logger.Info("session_memory.cleanup.complete", "session-memory cleanup completed", fields...)
-			}
-		}
-	}
-
-	if ctx.Err() != nil {
-		return
-	}
-	sweep()
-	if ctx.Err() != nil || interval <= 0 {
-		return
-	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			sweep()
-		}
-	}
 }

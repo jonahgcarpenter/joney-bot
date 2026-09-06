@@ -23,15 +23,6 @@ type Service struct {
 	definitions map[string]Definition
 }
 
-// NewService creates a command service from concrete command handlers.
-func NewService(handlers ...Handler) (*Service, error) {
-	commands := make([]Command, 0, len(handlers))
-	for _, handler := range handlers {
-		commands = append(commands, Command{Handler: handler})
-	}
-	return NewServiceWithCommands(commands...)
-}
-
 // NewServiceWithCommands creates a command service from command registrations.
 func NewServiceWithCommands(commands ...Command) (*Service, error) {
 	service := &Service{

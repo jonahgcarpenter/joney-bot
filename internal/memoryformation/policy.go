@@ -1072,7 +1072,7 @@ func invalid(field, reason string) error {
 }
 
 // NormalizeClaimIdentity returns the canonical slot/value identity used by
-// memory formation and compatibility writers.
+// memory formation.
 func NormalizeClaimIdentity(category Category, slot, value, statement string) (string, string) {
 	slot = normalizeClaimPart(slot)
 	if slot == "" {

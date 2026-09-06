@@ -230,9 +230,6 @@ func responseFormat(format string) *gatewayResponseFormat {
 	if format == "" {
 		return nil
 	}
-	if strings.EqualFold(format, "json") {
-		format = "json_object"
-	}
 	return &gatewayResponseFormat{Type: format}
 }
 
@@ -259,31 +256,6 @@ func firstChoice(resp gatewayChatResponse) (gatewayChoice, bool) {
 type asyncHTTPError struct {
 	StatusCode int
 	Body       string
-}
-
-// ProviderRequestStartedError marks a failure after Bifrost accepted a model
-// request. The provider may have performed work before cancellation completed.
-type ProviderRequestStartedError struct {
-	Cause error
-}
-
-func (e *ProviderRequestStartedError) Error() string {
-	return fmt.Sprintf("wait for accepted LLM gateway request: %v", e.Cause)
-}
-func (e *ProviderRequestStartedError) Unwrap() error { return e.Cause }
-
-// AsyncJobWaitError is retained as the accepted-request marker for async callers.
-type AsyncJobWaitError = ProviderRequestStartedError
-
-// WasProviderRequestStarted reports whether Bifrost accepted the request before it failed locally.
-func WasProviderRequestStarted(err error) bool {
-	var startedErr *ProviderRequestStartedError
-	return errors.As(err, &startedErr)
-}
-
-// WasAsyncJobSubmitted reports whether Bifrost accepted the request before it failed locally.
-func WasAsyncJobSubmitted(err error) bool {
-	return WasProviderRequestStarted(err)
 }
 
 func (e *asyncHTTPError) Error() string {
@@ -346,14 +318,14 @@ func (c *GatewayClient) runAsync(ctx context.Context, submitPath string, payload
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return nil, 0, &AsyncJobWaitError{Cause: ctx.Err()}
+			return nil, 0, ctx.Err()
 		case <-timer.C:
 		}
 
 		pollResp, pollBody, pollErr := c.doAsyncRequest(ctx, http.MethodGet, pollEndpoint, nil)
 		if pollErr != nil {
 			if ctx.Err() != nil {
-				return nil, 0, &AsyncJobWaitError{Cause: ctx.Err()}
+				return nil, 0, ctx.Err()
 			}
 			pollFailures++
 			if pollFailures >= maxAsyncPollFailures {
@@ -467,11 +439,8 @@ func (c *GatewayClient) Chat(ctx context.Context, req ChatRequest, chatStreamCal
 			chatStreamCallback = func(ChatMessage) {}
 		}
 		chatResp, streamErr := c.readChatStream(ctx, resp, req.Model, startedAt, chatStreamCallback)
-		if streamErr != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			if ctx.Err() != nil {
-				streamErr = ctx.Err()
-			}
-			return nil, &ProviderRequestStartedError{Cause: streamErr}
+		if streamErr != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 && ctx.Err() != nil {
+			return nil, ctx.Err()
 		}
 		return chatResp, streamErr
 	}

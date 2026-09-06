@@ -27,32 +27,23 @@ type MaintenanceCounts struct {
 // Changed returns the number of rows changed, excluding database hygiene.
 func (c MaintenanceCounts) Changed() int64 {
 	s := c.SessionCleanup
-	return s.SessionTurnsDeleted + s.TenantSessionsDeleted + s.ProfileVersionsDeleted + s.MemoryEntriesExpired + s.CandidatesErased + s.FormationJobsDeleted + s.SessionSummariesDeleted + s.CompactionJobsDeleted +
+	return s.SessionTurnsDeleted + s.TenantSessionsDeleted + s.MemoryEntriesExpired + s.CandidatesErased + s.FormationJobsDeleted + s.SessionSummariesDeleted + s.CompactionJobsDeleted +
 		c.PendingDeliveriesFailed + c.CandidatesDeleted + c.FormationJobsDeleted + c.CompactionJobsDeleted + c.DerivedIndexJobsDeleted + c.ChallengesDeleted + c.IndexRowsDeleted + c.IndexRevisionsDegraded + c.IndexTablesDropped
 }
 
 // MaintenanceSweep performs one bounded, serialized retention and consistency pass.
-func (s *Store) MaintenanceSweep(ctx context.Context, now time.Time, policy config.RetentionPolicy) (counts MaintenanceCounts, err error) {
+func (s *Store) MaintenanceSweep(ctx context.Context, now time.Time, policy config.RetentionPolicy) (MaintenanceCounts, error) {
+	var counts MaintenanceCounts
+	var err error
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
 	now = now.UTC()
 	policy = normalizedMaintenancePolicy(policy)
-	runID, runErr := s.startMaintenanceRun(ctx, now)
-	if runErr != nil {
-		return counts, runErr
-	}
-	defer func() {
-		state, code := "completed", ""
-		if err != nil {
-			state, code = "failed", "maintenance_failed"
-		}
-		_ = s.finishMaintenanceRun(context.Background(), runID, state, code, counts, time.Now().UTC())
-	}()
 	if err := maintenanceForeignKeyCheckDB(ctx, s.sql); err != nil {
 		return counts, err
 	}
-	counts.SessionCleanup, err = s.cleanupExpiredSessions(ctx, now, policy, true)
+	counts.SessionCleanup, err = s.cleanupExpiredSessions(ctx, now, policy)
 	if err != nil {
 		return counts, err
 	}
@@ -156,12 +147,6 @@ func maintenanceForeignKeyCheckDB(ctx context.Context, db *sql.DB) error {
 		return fmt.Errorf("maintenance foreign key precheck failed")
 	}
 	return rows.Err()
-}
-
-func (s *Store) startMaintenanceRun(context.Context, time.Time) (int64, error) { return 0, nil }
-
-func (s *Store) finishMaintenanceRun(context.Context, int64, string, string, MaintenanceCounts, time.Time) error {
-	return nil
 }
 
 func (s *Store) databaseHygiene(ctx context.Context, now time.Time, policy config.RetentionPolicy, counts *MaintenanceCounts) error {

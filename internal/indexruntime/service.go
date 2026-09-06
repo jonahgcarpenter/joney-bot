@@ -71,9 +71,6 @@ func (s *Service) Stop() {
 // RunOnce performs startup reconciliation and one complete serialized cycle.
 // It is useful for deterministic maintenance runs and tests.
 func (s *Service) RunOnce(ctx context.Context) error {
-	if err := s.store.BootstrapDerivedIndexes(ctx); err != nil {
-		return err
-	}
 	if err := s.store.ReconcileDerivedIndexChanges(ctx); err != nil {
 		return err
 	}
@@ -83,9 +80,6 @@ func (s *Service) RunOnce(ctx context.Context) error {
 
 func (s *Service) run(ctx context.Context) {
 	defer s.wg.Done()
-	if err := s.store.BootstrapDerivedIndexes(ctx); err != nil {
-		s.warn("index.bootstrap.failed", "bootstrap", err)
-	}
 	if err := s.store.ReconcileDerivedIndexChanges(ctx); err != nil {
 		s.warn("index.outbox.reconcile_failed", "reconcile", err)
 	}

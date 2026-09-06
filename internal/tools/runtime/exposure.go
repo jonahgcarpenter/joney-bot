@@ -51,7 +51,7 @@ func (e *Exposure) Visibility() registry.ToolVisibility {
 	if e == nil {
 		return registry.ToolVisibility{}
 	}
-	return registry.ToolVisibility{ExposedMCPTools: e.mcpTools, HiddenBuiltins: e.hiddenBuiltin}
+	return registry.ToolVisibility{HiddenBuiltins: e.hiddenBuiltin}
 }
 
 // ExposedMCPTools returns a copy of request-local exposed MCP tool names.

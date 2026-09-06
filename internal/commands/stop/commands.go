@@ -21,12 +21,12 @@ type principalResolver interface {
 
 type handler struct {
 	canceler Canceler
-	auth     commands.Authorizer
+	auth     commands.PrincipalAuthorizer
 	resolver principalResolver
 }
 
 // New creates the out-of-band stop command.
-func New(canceler Canceler, auth commands.Authorizer, resolver principalResolver) commands.Handler {
+func New(canceler Canceler, auth commands.PrincipalAuthorizer, resolver principalResolver) commands.Handler {
 	return handler{canceler: canceler, auth: auth, resolver: resolver}
 }
 

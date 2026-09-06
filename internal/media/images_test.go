@@ -246,17 +246,17 @@ func TestNormalizeInputImageCompositesGIFDisposalPrevious(t *testing.T) {
 	assertColorNear(t, decoded.At(3, 7), color.RGBA{G: 255, A: 255})
 }
 
-func TestResizeInputImagesScalesNormalizedImages(t *testing.T) {
-	jpegInput, err := BuildInputImageFromBytes("image/jpeg", encodeTestJPEG(t, 800, 600), "photo.jpg")
+func TestResizeInputImagesForAttemptScalesNormalizedImages(t *testing.T) {
+	jpegInput, err := NormalizeInputImageFromBytes(nil, "image/jpeg", encodeTestJPEG(t, 800, 600), "photo.jpg")
 	if err != nil {
 		t.Fatal(err)
 	}
-	jpegInput.IsGIFContactSheet = true
-	pngInput, err := BuildInputImageFromBytes("image/png", encodeTestPNG(t, 400, 200, true), "alpha.png")
+	jpegInput.Image.IsGIFContactSheet = true
+	pngInput, err := NormalizeInputImageFromBytes(nil, "image/png", encodeTestPNG(t, 400, 200, true), "alpha.png")
 	if err != nil {
 		t.Fatal(err)
 	}
-	resized, err := ResizeInputImages([]llm.InputImage{jpegInput, pngInput}, 0.75)
+	resized, err := ResizeInputImagesForAttempt([]llm.InputImage{jpegInput.Image, pngInput.Image}, 1, 0.75, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

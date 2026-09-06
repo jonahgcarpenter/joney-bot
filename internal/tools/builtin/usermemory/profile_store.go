@@ -228,7 +228,7 @@ FROM memory_entries WHERE canonical_user_id = ?`, userID)
 	if err := rows.Close(); err != nil {
 		return SessionProfile{}, nil, fmt.Errorf("close tenant profile candidates: %w", err)
 	}
-	compiled := CompileTenantProfile(intro, candidates, now)
+	compiled := CompileProfile(intro, candidates, now)
 	sourceIDs := make([]int64, 0, len(compiled.SelectedFacts))
 	for _, fact := range compiled.SelectedFacts {
 		sourceIDs = append(sourceIDs, fact.MemoryID)

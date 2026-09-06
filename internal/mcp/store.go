@@ -269,20 +269,6 @@ ORDER BY scope, name
 	return s.scanConfigs(rows)
 }
 
-func (s *Store) ListGlobal(ctx context.Context) ([]ServerConfig, error) {
-	rows, err := s.db.SQL().QueryContext(ctx, `
-SELECT id, scope, owner_user_id, name, description, transport, url_ciphertext, headers_ciphertext, enabled
-FROM mcp_servers
-WHERE scope = 'global'
-ORDER BY name
-`)
-	if err != nil {
-		return nil, fmt.Errorf("list global MCP server configs: %w", err)
-	}
-	defer rows.Close()
-	return s.scanConfigs(rows)
-}
-
 func (s *Store) Get(ctx context.Context, scope, ownerUserID, name string) (ServerConfig, bool, error) {
 	row := s.db.SQL().QueryRowContext(ctx, `
 SELECT id, scope, owner_user_id, name, description, transport, url_ciphertext, headers_ciphertext, enabled

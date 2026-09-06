@@ -22,7 +22,7 @@ Oswald can also expose additional tools from configured MCP servers. MCP server 
 
 Gateway-level slash commands are separate from model tools. Builtin commands include `/help`, `/connect`, `/disconnect`, `/reset`, `/stop`, `/memories`, `/bootstrap`, user MCP management, and admin-only `/stop all`, `/users`, `/user`, `/admin`, `/unadmin`, `/ban`, `/unban`, `/deleteuser`, `/global-memory`, and global MCP commands. Destructive user-memory and all global-memory mutations remain commands; the primary model can only stage bounded user-memory saves for post-delivery validation.
 
-Oswald supports multimodal user input for the active turn: text-only, image-only, and text-plus-image requests can be sent through every gateway when the active LLM gateway model route supports images.
+Oswald supports multimodal user input for the active turn: text-only, image-only, and text-plus-image requests can be sent through Discord and iMessage when the active LLM gateway model route supports images. Home Assistant accepts text only.
 
 There is no JavaScript, TypeScript, or frontend code in this repository.
 
@@ -81,7 +81,7 @@ Permanent migration history starts at `internal/database/migrations/v4.0.0.sql`.
 
 Migration execution runs on one connection in one `BEGIN IMMEDIATE` transaction with foreign-key actions temporarily disabled. SQL is executed directly without per-migration Go callbacks, `PRAGMA foreign_key_check` must pass before commit, and foreign keys are restored afterward. FTS5 and sqlite-vec tables are derived physical capabilities rather than canonical migration history.
 
-Temporary compatibility for ledgerless tagged-v3.2.0 databases lives under `internal/database/legacy_migrations/`, outside permanent history. Startup accepts only the exact tagged schema as retained by upgraded installations, including its `tasks` memory category and optionally its exact sqlite-vec `memory_entry_vectors` object family at any positive dimension. It validates preserved ownership, safely drops retired `websocket` links, rejects websocket-only administrators or user MCP owners that would become inaccessible, and atomically converts to the exact v4.0.0 target while retaining only reduced account-user, supported linked-account, and MCP-server fields. All other v3 state is dropped, speaker intros are rebuilt with current gateway priority and formatting, the permanent version `1`/`v4.0.0` ledger row is recorded, and later permanent migrations are then applied normally. Unknown ledgerless schemas, old development ledgers, and checksum drift fail closed without mutation. Legacy migration assets can be removed in a later release because converted databases depend only on the permanent ledger.
+Startup accepts an empty database or an exact prefix of the permanent v4 migration ledger. Nonempty ledgerless databases, development ledgers, and checksum drift fail closed without changing canonical schema or data. There is no pre-v4 importer. Databases already converted to the permanent v4 ledger continue through ordinary ordered migrations; persisted v4 jobs and artifacts retain their required decoders.
 
 The baseline has no duplicate `schema_migrations` ledger, confirmation-presentation table, general memory relation graph, memory-event or formation-audit table, persisted administrator-bootstrap state, or persisted maintenance-run history. Formation, compaction, and derived-index work share the typed `durable_jobs` table and are isolated by `job_kind`. A partial session-turn index covers only turns with no delivery outcome so timeout recovery remains bounded. Confirmation is no longer conversational; claim supersession and duplicate outcomes are represented by claim lifecycle fields. Maintenance is serialized in-process, logs aggregate results, and keeps only its process-local optimize interval marker.
 
@@ -229,7 +229,6 @@ Oswald keeps four distinct memory layers.
 - Canonical memory publication occurs only after successful response delivery. The primary agent's `user_memory_save` stages at most five model-assessed current-turn observations in an immutable turn artifact; it never writes canonical memory inline. A separate private extractor forms repeated implicit patterns from a frozen window of two to eight delivered user turns. Session compaction produces continuity summaries only and is not a memory-write path
 - Tenant profiles are explicitly subordinate to deployment policy, are sent at user authority, and cannot grant capabilities, authorization, or tool access
 - A profile version is frozen per canonical user and gateway session; new eligible facts appear automatically only in new, expired, or `/reset` sessions
-- Legacy `system_rules` rows and filters are migrated or aliased to lower-authority `communication_preferences`
 - Active durable memories are indexed by FTS5 and, when embeddings are configured, by sqlite-vec with canonical-user metadata filtering before KNN ranking
 - Candidate policy state is confidence-driven after structural validation: `proposed` means below confidence `0.35`, while `approved` means active itself or linked as supporting evidence for an already-active equivalent claim. Rejection is reserved for malformed structure, invalid source linkage, or other storage invariants rather than semantic keyword filtering. A non-null `published_memory_id` means linked to canonical memory; an approved candidate without one is blocked by conflict. Published memories use the committed `active`, `superseded`, and `expired` lifecycle, while deletion is immediate and physical
 - `memory_candidates` is the one-row-per-extracted-observation evidence ledger. Published candidates link to their consolidated `memory_entries` row; evidence count, source request/session/generation, correlation, representative evidence, and authority are derived through candidate and source-turn data. `memory_entries` retains only compact serving and conflict metadata such as confidence, importance, strongest provenance, and sensitivity. Candidate rows are directly deleted when their memory is deleted or retention expires
@@ -256,7 +255,7 @@ Oswald keeps four distinct memory layers.
 - Canonical account, global-memory, user-memory, profile, candidate, session, summary, job, and MCP rows live in SQLite and remain authoritative when retrieval indexing is unavailable
 - FTS5 and sqlite-vec tables are rebuildable derived revisions. Index kinds are `memory_fts`, `transcript_fts`, `memory_vector`, `global_memory_fts`, and `global_memory_vector`; `durable_jobs` rows with `job_kind = 'derived_index'` form the leased, idempotent canonical-mutation outbox
 - Global-memory outbox rows use `entity_kind = 'global_memory'` and a `NULL` canonical user because the records are shared. Private memory and transcript outbox rows require a canonical user and remain tenant-fenced throughout indexing and retrieval
-- Startup removes obsolete fixed index artifacts, creates internally named generated revisions through the index lifecycle worker, reconciles missing outbox entries, and then polls every 30 seconds in addition to mutation wakeups
+- Startup creates internally named generated revisions through the index lifecycle worker, reconciles missing outbox entries, and then polls every 30 seconds in addition to mutation wakeups
 - Succeeded derived-index history is pruned after `MEMORY_SUCCESSFUL_JOB_RETENTION`, except for one successful upsert receipt per still-live canonical entity. Reconciliation recognizes that receipt, preventing unchanged live state from recreating historical work
 - Canonical writes enqueue outbox changes transactionally. The serialized worker applies each change to all matching live and building revisions and retries stale canonical reads, leases, provider failures, and failed changes without weakening tenant predicates
 - Rebuilds create an internally named shadow table with kind, model, dimension, schema version, and monotonically increasing revision metadata; table names are globally unique and generated names must exactly encode their recorded kind and revision before publication or cleanup
@@ -370,11 +369,12 @@ Context budgeting lives in `internal/promptbudget/`.
 - A non-positive context-window value uses the package default of 32,768 tokens; a non-positive output-token value uses the package default of 8,192 tokens
 - Max input tokens are derived as context window minus max output tokens and the safety margin
 
-The prompt budget is the context window minus reserves for:
+The usable input budget is the context window minus reserves for:
 
 - response generation
-- tool overhead
 - safety margin
+
+Actual tool schemas are estimated as part of each model request rather than deducted as a fixed reserve.
 
 ## Gateways
 
@@ -488,7 +488,7 @@ Reply handling:
 Tools are split into schema and runtime layers.
 
 - Schemas are loaded from `data/tools/*.md`
-- Runtime handlers are wired through `internal/tools/bootstrap.go`, `internal/tools/builtin/`, and `internal/tools/mcp/`
+- Runtime handlers are wired through `internal/tools/bootstrap.go` and `internal/tools/builtin/`; `internal/mcp/` provides request-local MCP discovery and execution
 - Additional tool definitions can be discovered dynamically from connected MCP servers
 
 Current builtin tools:
@@ -897,7 +897,7 @@ Current startup requirements:
 
 ### Adding A Migration
 
-Never edit a released migration. Add exactly one `internal/database/migrations/vMAJOR.MINOR.PATCH.sql` file containing that release's direct SQL and extend fresh, prefix-ledger, checksum-drift, rollback, foreign-key, concurrency, and reopen coverage. Temporary pre-v4 import compatibility belongs under `internal/database/legacy_migrations/` and must not create pre-v4 ledger rows.
+Never edit a released migration. Add exactly one `internal/database/migrations/vMAJOR.MINOR.PATCH.sql` file containing that release's direct SQL and extend fresh, prefix-ledger, checksum-drift, rollback, foreign-key, concurrency, and reopen coverage. Nonempty databases without a permanent migration ledger are unsupported and must remain unchanged on rejection.
 
 ### Changing Personality
 

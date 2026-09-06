@@ -16,12 +16,8 @@ import (
 const (
 	// DefaultMaxProfileBytes is the hard byte limit for a compiled tenant profile.
 	DefaultMaxProfileBytes = 2000
-	// MaxTenantProfileBytes names the hard profile limit explicitly for callers.
-	MaxTenantProfileBytes = DefaultMaxProfileBytes
 	// ProfileRendererVersion changes when eligibility, ordering, or rendering changes.
 	ProfileRendererVersion = "tenant-profile-v3"
-	// TenantProfileRendererVersion is the explicit tenant-profile renderer version.
-	TenantProfileRendererVersion = ProfileRendererVersion
 )
 
 const profilePolicy = "eligible=approved,active,long_term,unexpired;identity:confidence>=0.8;communication_preferences:confidence>=0.8;durable_preferences:confidence>=0.9;environment:confidence>=0.9;order=category,importance_desc,confidence_desc,statement,expiry;authority=lower_user_reference_below_deployment_policy_authorization_capabilities_tools;encoding=json;budget_bytes=2000"
@@ -140,11 +136,6 @@ func CompileProfile(speakerIntro string, candidates []ProfileCandidate, now time
 	compiled.ExcludedCount = len(candidates) - compiled.SelectedCount
 	compiled.Bytes = len(compiled.Content)
 	return compiled
-}
-
-// CompileTenantProfile is an explicit alias for CompileProfile.
-func CompileTenantProfile(speakerIntro string, candidates []ProfileCandidate, now time.Time) CompiledProfile {
-	return CompileProfile(speakerIntro, candidates, now)
 }
 
 func normalizeProfileCandidate(candidate ProfileCandidate) normalizedProfileCandidate {

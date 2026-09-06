@@ -27,6 +27,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/soul"
+	"github.com/jonahgcarpenter/oswald-ai/internal/testutil"
 	"github.com/jonahgcarpenter/oswald-ai/internal/toolnames"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
@@ -145,7 +146,7 @@ func TestProcessPersistsStagedForegroundMemoryWithFinalTurn(t *testing.T) {
 	}}
 	reg := registry.New(config.NewLogger(config.LevelError))
 	agent, store := newTestAgent(t, chat, nil, reg)
-	registerStagingTool(t, reg, store, false)
+	registerStagingTool(t, reg, store.Store, false)
 	response, err := processAgent(agent, "staged", "homeassistant", "session", "user-1", "User", "I prefer dark mode.", nil, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -174,7 +175,7 @@ func TestProcessDoesNotSilentlySucceedWhenStagedTurnIsNotPersisted(t *testing.T)
 	}}
 	reg := registry.New(config.NewLogger(config.LevelError))
 	agent, store := newTestAgent(t, chat, nil, reg)
-	registerStagingTool(t, reg, store, true)
+	registerStagingTool(t, reg, store.Store, true)
 	response, err := processAgent(agent, "staged-failure", "homeassistant", "session", "user-1", "User", "I prefer dark mode.", nil, nil)
 	if err == nil || response != nil || !strings.Contains(err.Error(), "session turn was not stored") {
 		t.Fatalf("response=%+v err=%v", response, err)
@@ -292,7 +293,7 @@ func TestProcessPropagatesToolAttachmentsWithoutPersistingBytes(t *testing.T) {
 	privateBytes := []byte("private-image-bytes")
 	policy := testToolPolicy()
 	policy.History = governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false}
-	if err := reg.RegisterTool(registry.Spec{Name: "test.image", Description: "Image"}, policy, func(context.Context, map[string]interface{}) (governance.Result, error) {
+	if err := registerTestTool(t, reg, registry.Spec{Name: "test.image", Description: "Image"}, policy, func(context.Context, map[string]interface{}) (governance.Result, error) {
 		return governance.Result{Content: `{"attachment_count":1}`, Outcome: governance.OutcomeProductive, Attachments: []media.OutputAttachment{{Filename: "generated.png", MIMEType: "image/png", Data: privateBytes}}}, nil
 	}); err != nil {
 		t.Fatal(err)
@@ -344,7 +345,7 @@ func TestProcessExecutesToolThenFinalAnswerAndStreamsEvents(t *testing.T) {
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "tool-backed answer"}},
 	}}
 	reg := registry.New(config.NewLogger(config.LevelError))
-	if err := reg.RegisterTool(registry.Spec{Name: "test.lookup", Description: "Lookup", Parameters: []registry.ParamSpec{{Name: "q", Type: "string", Required: true}}}, testToolPolicy(), func(_ context.Context, args map[string]interface{}) (governance.Result, error) {
+	if err := registerTestTool(t, reg, registry.Spec{Name: "test.lookup", Description: "Lookup", Parameters: []registry.ParamSpec{{Name: "q", Type: "string", Required: true}}}, testToolPolicy(), func(_ context.Context, args map[string]interface{}) (governance.Result, error) {
 		if args["q"] != "oswald" {
 			t.Fatalf("unexpected tool args: %+v", args)
 		}
@@ -441,7 +442,7 @@ func TestProcessHidesComfyUIToolsByGatewayAndCurrentImages(t *testing.T) {
 			chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "done"}}}}
 			reg := registry.New(config.NewLogger(config.LevelError))
 			for _, name := range []string{toolnames.ComfyUITextToImage, toolnames.ComfyUIImageToImage} {
-				if err := reg.RegisterTool(registry.Spec{Name: name, Description: name}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
+				if err := registerTestTool(t, reg, registry.Spec{Name: name, Description: name}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
 					return productiveResult("unused"), nil
 				}); err != nil {
 					t.Fatal(err)
@@ -465,7 +466,7 @@ func TestProcessDisablesToolsAfterFailureBudget(t *testing.T) {
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "finished without tools"}},
 	}}
 	reg := registry.New(config.NewLogger(config.LevelError))
-	if err := reg.RegisterTool(registry.Spec{Name: "test.fail", Description: "Fail"}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
+	if err := registerTestTool(t, reg, registry.Spec{Name: "test.fail", Description: "Fail"}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
 		return governance.Result{}, errors.New("boom")
 	}); err != nil {
 		t.Fatalf("register tool: %v", err)
@@ -500,7 +501,7 @@ func TestProcessBlocksExactDuplicateButAllowsDistinctCall(t *testing.T) {
 	}}
 	reg := registry.New(config.NewLogger(config.LevelError))
 	var invocations []string
-	if err := reg.RegisterTool(registry.Spec{Name: "test.lookup", Description: "Lookup"}, testToolPolicy(), func(_ context.Context, args map[string]interface{}) (governance.Result, error) {
+	if err := registerTestTool(t, reg, registry.Spec{Name: "test.lookup", Description: "Lookup"}, testToolPolicy(), func(_ context.Context, args map[string]interface{}) (governance.Result, error) {
 		invocations = append(invocations, args["q"].(string))
 		return productiveResult("result " + args["q"].(string)), nil
 	}); err != nil {
@@ -533,7 +534,7 @@ func TestProcessAllowsExactRetryAfterToolFailure(t *testing.T) {
 	}}
 	reg := registry.New(config.NewLogger(config.LevelError))
 	invocations := 0
-	if err := reg.RegisterTool(registry.Spec{Name: "test.lookup", Description: "Lookup"}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
+	if err := registerTestTool(t, reg, registry.Spec{Name: "test.lookup", Description: "Lookup"}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
 		invocations++
 		if invocations == 1 {
 			return governance.Result{}, errors.New("temporary failure")
@@ -564,12 +565,12 @@ func TestProcessRetiresOnlyUnproductiveTool(t *testing.T) {
 	reg := registry.New(config.NewLogger(config.LevelError))
 	policy := testToolPolicy()
 	policy.MaxUnproductive = 1
-	if err := reg.RegisterTool(registry.Spec{Name: "test.stale", Description: "Stale"}, policy, func(context.Context, map[string]interface{}) (governance.Result, error) {
+	if err := registerTestTool(t, reg, registry.Spec{Name: "test.stale", Description: "Stale"}, policy, func(context.Context, map[string]interface{}) (governance.Result, error) {
 		return governance.Result{Content: "nothing useful", Outcome: governance.OutcomeUnproductive}, nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := reg.RegisterTool(registry.Spec{Name: "test.useful", Description: "Useful"}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
+	if err := registerTestTool(t, reg, registry.Spec{Name: "test.useful", Description: "Useful"}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
 		return productiveResult("useful"), nil
 	}); err != nil {
 		t.Fatal(err)
@@ -597,7 +598,7 @@ func TestProcessGlobalCapMidBatchEmitsResultForEveryCall(t *testing.T) {
 	}}
 	reg := registry.New(config.NewLogger(config.LevelError))
 	invocations := 0
-	if err := reg.RegisterTool(registry.Spec{Name: "test.lookup", Description: "Lookup"}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
+	if err := registerTestTool(t, reg, registry.Spec{Name: "test.lookup", Description: "Lookup"}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
 		invocations++
 		return productiveResult("first result"), nil
 	}); err != nil {
@@ -632,7 +633,7 @@ func TestProcessNormalizesMissingToolCallIDsConsistently(t *testing.T) {
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "done"}},
 	}}
 	reg := registry.New(config.NewLogger(config.LevelError))
-	if err := reg.RegisterTool(registry.Spec{Name: "test.lookup", Description: "Lookup"}, testToolPolicy(), func(_ context.Context, args map[string]interface{}) (governance.Result, error) {
+	if err := registerTestTool(t, reg, registry.Spec{Name: "test.lookup", Description: "Lookup"}, testToolPolicy(), func(_ context.Context, args map[string]interface{}) (governance.Result, error) {
 		return productiveResult(args["q"].(string)), nil
 	}); err != nil {
 		t.Fatal(err)
@@ -680,7 +681,7 @@ func TestProcessRetriesEmptyVisibleResponse(t *testing.T) {
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "visible answer"}},
 	}}
 	reg := registry.New(config.NewLogger(config.LevelError))
-	if err := reg.RegisterTool(registry.Spec{Name: "test.lookup", Description: "Lookup"}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
+	if err := registerTestTool(t, reg, registry.Spec{Name: "test.lookup", Description: "Lookup"}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
 		return productiveResult("lookup result"), nil
 	}); err != nil {
 		t.Fatalf("register tool: %v", err)
@@ -758,7 +759,7 @@ func TestProcessRetriesTemporaryOllamaParserErrorWithTools(t *testing.T) {
 		{response: &llm.ChatResponse{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "recovered"}}},
 	}}
 	reg := registry.New(config.NewLogger(config.LevelError))
-	if err := reg.RegisterTool(registry.Spec{Name: "test.lookup", Description: "Lookup"}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
+	if err := registerTestTool(t, reg, registry.Spec{Name: "test.lookup", Description: "Lookup"}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
 		return productiveResult("lookup result"), nil
 	}); err != nil {
 		t.Fatalf("register tool: %v", err)
@@ -978,7 +979,7 @@ func TestProcessUsesCommittedSummaryWithRecentVerbatimTail(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.EnqueueSessionCompactionJob(context.Background(), "user-1", "session-1", profile.Generation, turns.Turns[0].ID, turns.Turns[1].ID, "test-model", "test-v1"); err != nil {
+	if _, err := store.EnqueueSessionCompactionCampaignJob(context.Background(), "user-1", "session-1", profile.Generation, turns.Turns[0].ID, turns.Turns[1].ID, turns.Turns[1].ID, "test-model", "test-v1"); err != nil {
 		t.Fatal(err)
 	}
 	job, err := store.ClaimSessionCompactionJob(context.Background(), "test", time.Minute, "test-model", "test-v1")
@@ -1009,19 +1010,19 @@ func TestProcessUsesCommittedSummaryWithRecentVerbatimTail(t *testing.T) {
 func TestProcessInjectsTenantScopedRecallWithoutPersistingIt(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "Atlas."}}}}
 	agent, store := newTestAgent(t, chat, nil, nil)
-	_, err := store.SaveMemory(context.Background(), "user-1", usermemory.SaveRequest{
+	_, err := testutil.PublishMemory(context.Background(), store.Store, "user-1", testutil.MemoryFixture{
 		Scope: usermemory.ScopeLongTerm, Category: "projects", Statement: "The project codename is Atlas.", Evidence: "The user named it.", Confidence: 0.95, Importance: 4,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = store.SaveMemory(context.Background(), "user-2", usermemory.SaveRequest{
+	_, err = testutil.PublishMemory(context.Background(), store.Store, "user-2", testutil.MemoryFixture{
 		Scope: usermemory.ScopeLongTerm, Category: "projects", Statement: "The private project codename is Borealis.", Evidence: "Another user's project.", Confidence: 1, Importance: 5,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := indexruntime.NewService(store, nil, nil, "", config.NewLogger(config.LevelError)).RunOnce(context.Background()); err != nil {
+	if err := indexruntime.NewService(store.Store, nil, nil, "", config.NewLogger(config.LevelError)).RunOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1072,9 +1073,10 @@ func TestProcessDoesNotConversationallyConfirmPendingMemory(t *testing.T) {
 	if strings.Contains(messages[0].Content, "memory confirmation") || strings.Contains(messages[len(messages)-1].Content, "pending_memory_confirmation") || strings.Contains(messages[len(messages)-1].Content, "555-0100") {
 		t.Fatalf("pending confirmation was injected: %+v", messages)
 	}
-	unchanged, err := store.LoadCandidate(context.Background(), "user-1", candidate.ID)
-	if err != nil || unchanged.PublishedMemoryID != candidate.PublishedMemoryID {
-		t.Fatalf("conversational phrase changed candidate: %+v err=%v", unchanged, err)
+	var publishedID int64
+	err = store.sql.QueryRow(`SELECT COALESCE(published_memory_id, 0) FROM memory_candidates WHERE canonical_user_id = 'user-1' AND id = ?`, candidate.ID).Scan(&publishedID)
+	if err != nil || publishedID != candidate.PublishedMemoryID {
+		t.Fatalf("conversational phrase changed candidate publication: id=%d err=%v", publishedID, err)
 	}
 }
 
@@ -1295,7 +1297,7 @@ func TestProcessPreExposesLatestFourMCPToolsAcrossSummaryBoundary(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.EnqueueSessionCompactionJob(context.Background(), "user-1", "session-mcp", profile.Generation, turns.Turns[0].ID, turns.Turns[1].ID, "test-model", "test-v1"); err != nil {
+	if _, err := store.EnqueueSessionCompactionCampaignJob(context.Background(), "user-1", "session-mcp", profile.Generation, turns.Turns[0].ID, turns.Turns[1].ID, turns.Turns[1].ID, "test-model", "test-v1"); err != nil {
 		t.Fatal(err)
 	}
 	job, err := store.ClaimSessionCompactionJob(context.Background(), "test", time.Minute, "test-model", "test-v1")
@@ -1332,14 +1334,14 @@ func TestProcessFreezesTenantProfileUntilNewSession(t *testing.T) {
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "three"}},
 	}}
 	agent, store := newTestAgent(t, chat, nil, nil)
-	if _, err := store.SaveMemory(context.Background(), "user-1", usermemory.SaveRequest{Scope: usermemory.ScopeLongTerm, Category: "identity", Statement: "The user is Ada.", Confidence: 1, Importance: 5}); err != nil {
+	if _, err := testutil.PublishMemory(context.Background(), store.Store, "user-1", testutil.MemoryFixture{Scope: usermemory.ScopeLongTerm, Category: "identity", Statement: "The user is Ada.", Confidence: 1, Importance: 5}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := processAgent(agent, "req-1", "homeassistant", "session-1", "user-1", "Ada", "first", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	firstProfile := tenantProfileMessage(primaryRequests(chat.requests)[0].Messages)
-	if _, err := store.SaveMemory(context.Background(), "user-1", usermemory.SaveRequest{Scope: usermemory.ScopeLongTerm, Category: "communication_preferences", Statement: "The user prefers concise replies.", Confidence: 1, Importance: 5}); err != nil {
+	if _, err := testutil.PublishMemory(context.Background(), store.Store, "user-1", testutil.MemoryFixture{Scope: usermemory.ScopeLongTerm, Category: "communication_preferences", Statement: "The user prefers concise replies.", Confidence: 1, Importance: 5}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := processAgent(agent, "req-2", "homeassistant", "session-1", "user-1", "Ada", "second", nil, nil); err != nil {
@@ -1369,7 +1371,7 @@ func TestProcessNeverIncludesAnotherUsersTenantProfile(t *testing.T) {
 	}}
 	agent, store := newTestAgent(t, chat, nil, nil)
 	for _, tc := range []struct{ user, statement string }{{"user-1", "The user is Alice."}, {"user-2", "The user is Bob."}} {
-		if _, err := store.SaveMemory(context.Background(), tc.user, usermemory.SaveRequest{Scope: usermemory.ScopeLongTerm, Category: "identity", Statement: tc.statement, Confidence: 1, Importance: 5}); err != nil {
+		if _, err := testutil.PublishMemory(context.Background(), store.Store, tc.user, testutil.MemoryFixture{Scope: usermemory.ScopeLongTerm, Category: "identity", Statement: tc.statement, Confidence: 1, Importance: 5}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1435,7 +1437,7 @@ func TestAgentKeepsDefaultVisibleGlobalMemorySearchAfterGlobalMCPResult(t *testi
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "done"}},
 	}}
 	reg := registry.New(config.NewLogger(config.LevelError))
-	if err := reg.RegisterTool(registry.Spec{Name: toolnames.GlobalMemorySearch, Source: registry.ToolSourceBuiltin}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
+	if err := registerTestTool(t, reg, registry.Spec{Name: toolnames.GlobalMemorySearch}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
 		return productiveResult("global memory"), nil
 	}); err != nil {
 		t.Fatal(err)
@@ -1477,7 +1479,7 @@ func registerStagingTool(t *testing.T, reg *registry.Registry, store *usermemory
 	t.Helper()
 	policy := testToolPolicy()
 	policy.History = governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false}
-	err := reg.RegisterTool(registry.Spec{Name: toolnames.UserMemorySave, Description: "Stage a memory", Schema: &llm.ToolParameters{Type: "object"}}, policy, func(ctx context.Context, _ map[string]interface{}) (governance.Result, error) {
+	err := registerTestTool(t, reg, registry.Spec{Name: toolnames.UserMemorySave, Description: "Stage a memory", Schema: &llm.ToolParameters{Type: "object"}}, policy, func(ctx context.Context, _ map[string]interface{}) (governance.Result, error) {
 		collector := requestctx.MemoryStageCollectorFromContext(ctx)
 		if collector == nil {
 			return governance.Result{}, errors.New("memory collector is missing")
@@ -1646,12 +1648,12 @@ func (f *fakeEmbedder) Embed(_ context.Context, req llm.EmbedRequest) (*llm.Embe
 	return &llm.EmbedResponse{Model: req.Model, Embeddings: [][]float64{vec}}, nil
 }
 
-func newTestAgent(t *testing.T, chat llm.Chatter, embedder llm.Embedder, reg *registry.Registry) (*Agent, *usermemory.Store) {
+func newTestAgent(t *testing.T, chat llm.Chatter, embedder llm.Embedder, reg *registry.Registry) (*Agent, *agentMemoryFixture) {
 	agent, store, _ := newTestAgentWithSoulPath(t, chat, embedder, reg)
 	return agent, store
 }
 
-func newTestAgentWithSoulPath(t *testing.T, chat llm.Chatter, embedder llm.Embedder, reg *registry.Registry) (*Agent, *usermemory.Store, string) {
+func newTestAgentWithSoulPath(t *testing.T, chat llm.Chatter, embedder llm.Embedder, reg *registry.Registry) (*Agent, *agentMemoryFixture, string) {
 	t.Helper()
 	log := config.NewLogger(config.LevelError)
 	if reg == nil {
@@ -1674,7 +1676,7 @@ func newTestAgentWithSoulPath(t *testing.T, chat llm.Chatter, embedder llm.Embed
 	if _, err := db.SQL().Exec(`INSERT INTO linked_accounts (gateway, identifier, canonical_user_id, display_name, verified) VALUES ('homeassistant', 'user-1', 'user-1', 'User 1', 1), ('homeassistant', 'user-2', 'user-2', 'User 2', 1)`); err != nil {
 		t.Fatalf("seed linked accounts: %v", err)
 	}
-	db.Close() // nolint:errcheck
+	t.Cleanup(func() { _ = db.Close() })
 	embeddingModel := ""
 	if embedder != nil {
 		embeddingModel = "embed-model"
@@ -1684,7 +1686,8 @@ func newTestAgentWithSoulPath(t *testing.T, chat llm.Chatter, embedder llm.Embed
 		t.Fatalf("user store: %v", err)
 	}
 	agent := NewAgent(chat, reg, "test-model", soulStore, userStore, promptbudget.ContextBudget{PromptLimit: 100000}, testGlobalPolicy(), log)
-	return agent, userStore, soulPath
+	t.Cleanup(func() { _ = userStore.Close() })
+	return agent, &agentMemoryFixture{Store: userStore, sql: db.SQL()}, soulPath
 }
 
 func primaryRequests(requests []llm.ChatRequest) []llm.ChatRequest {
@@ -1696,10 +1699,6 @@ func primaryRequests(requests []llm.ChatRequest) []llm.ChatRequest {
 		out = append(out, req)
 	}
 	return out
-}
-
-func contains(value, needle string) bool {
-	return strings.Contains(value, needle)
 }
 
 func messagesContain(messages []llm.ChatMessage, needle string) bool {
@@ -1760,11 +1759,11 @@ func testInputImage(t *testing.T, width, height int) llm.InputImage {
 	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 90}); err != nil {
 		t.Fatal(err)
 	}
-	input, err := media.BuildInputImageFromBytes("image/jpeg", buf.Bytes(), "test.jpg")
+	input, err := media.NormalizeInputImageFromBytes(nil, "image/jpeg", buf.Bytes(), "test.jpg")
 	if err != nil {
 		t.Fatal(err)
 	}
-	return input
+	return input.Image
 }
 
 func inputImageDimensions(t *testing.T, input llm.InputImage) image.Point {

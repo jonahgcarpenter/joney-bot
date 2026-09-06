@@ -11,8 +11,8 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/database"
-	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
+	"github.com/jonahgcarpenter/oswald-ai/internal/testutil"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 )
 
@@ -339,7 +339,7 @@ func TestServiceForegroundPreemptionNeverConsumesCompactionBudget(t *testing.T) 
 		t.Fatal(err)
 	}
 	gate := &canceledLowPriorityGate{}
-	extractor := &fakeSummaryExtractor{preempt: func() { gate.cancel() }, err: &llm.ProviderRequestStartedError{Cause: context.Canceled}}
+	extractor := &fakeSummaryExtractor{preempt: func() { gate.cancel() }, err: fmt.Errorf("provider stream canceled: %w", context.Canceled)}
 	service := NewService(store, extractor, "model", promptbudget.ContextBudget{PromptLimit: 100000}, config.NewLogger(config.LevelError))
 	service.SetLowPriorityGate(gate)
 	jobID, err := service.plan(context.Background(), "user-1", "session-1", profile.Generation)
@@ -485,7 +485,7 @@ func TestServiceCampaignTargetExceedsPlannerPage(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A pending gap still bounds the target even when later turns are delivered.
-	if _, err := store.AppendSessionTurnForGenerationResult(ctx, "session-1", "user-1", profile.Generation, "pending", "answer", nil, time.Hour); err != nil {
+	if _, err := testutil.AppendPendingTurn(ctx, store, "session-1", "user-1", profile.Generation, "pending", "answer", nil, time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	if err := appendDeliveredPressureTurn(store, "session-1", "user-1", profile.Generation, "after gap", "answer", 70000, 100000); err != nil {
@@ -547,7 +547,7 @@ func newSessionRuntimeStoreWithDB(t *testing.T) (*usermemory.Store, *database.DB
 	if _, err := db.SQL().Exec(`INSERT INTO account_users(canonical_user_id) VALUES ('user-1')`); err != nil {
 		t.Fatal(err)
 	}
-	store := usermemory.NewStore(path, log)
+	store := testutil.NewMemoryStore(t, path, log)
 	t.Cleanup(func() {
 		store.Close() // nolint:errcheck
 		db.Close()    // nolint:errcheck
@@ -570,7 +570,7 @@ func seedCompactionRuntimeTurns(t *testing.T, store *usermemory.Store, sessionID
 }
 
 func appendDeliveredPressureTurn(store *usermemory.Store, sessionID, userID string, generation int, userText, assistantText string, tokens, limit int) error {
-	turn, err := store.AppendSessionTurnForGenerationResultWithPressure(context.Background(), sessionID, userID, generation, userText, assistantText, nil, time.Hour, usermemory.SessionPromptPressure{Tokens: tokens, Limit: limit, Version: promptPressureVersion("model", limit)})
+	turn, err := store.AppendSessionTurnForGenerationResultWithPressureHistoryAndForegroundMemory(context.Background(), sessionID, userID, generation, userText, assistantText, nil, usermemory.EmptyToolHistory(), nil, time.Hour, usermemory.SessionPromptPressure{Tokens: tokens, Limit: limit, Version: promptPressureVersion("model", limit)})
 	if err != nil {
 		return err
 	}

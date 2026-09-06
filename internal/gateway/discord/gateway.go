@@ -1025,18 +1025,6 @@ func (dg *Gateway) fetchAttachmentImage(attachmentID, rawURL, declaredMIME, file
 	return result.Image, nil
 }
 
-func attachmentFormats(attachments []Attachment) string {
-	formats := make([]string, 0, len(attachments))
-	for _, attachment := range attachments {
-		format := strings.TrimSpace(attachment.ContentType)
-		if format == "" {
-			format = "unknown"
-		}
-		formats = append(formats, format)
-	}
-	return strings.Join(formats, ",")
-}
-
 // sendTyping posts a typing indicator to Discord.
 func (dg *Gateway) sendTyping(channelID string) error {
 	url := fmt.Sprintf("%s/channels/%s/typing", dg.apiBaseURL(), channelID)
@@ -1178,7 +1166,7 @@ func (dg *Gateway) sendCommandAttachment(channelID string, result commands.Resul
 	if err := result.ValidateAttachments(); err != nil {
 		return "", err
 	}
-	attachments := result.OrderedAttachments()
+	attachments := result.Attachments
 	if len(attachments) == 0 {
 		return dg.sendMessage(channelID, result.Text, replyToID)
 	}
@@ -1246,13 +1234,4 @@ func (dg *Gateway) sendCommandAttachment(channelID string, result commands.Resul
 func marshalJSON(v interface{}) json.RawMessage {
 	b, _ := json.Marshal(v)
 	return b
-}
-
-// truncate returns s shortened to at most max runes, appending "..." if cut.
-func truncate(s string, max int) string {
-	r := []rune(s)
-	if len(r) <= max {
-		return s
-	}
-	return string(r[:max]) + "..."
 }

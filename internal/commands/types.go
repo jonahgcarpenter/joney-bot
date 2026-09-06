@@ -51,28 +51,13 @@ type Attachment = media.OutputAttachment
 // Result is the user-facing command response.
 type Result struct {
 	Text         string
-	Attachment   *Attachment
 	Attachments  []Attachment
 	Invalidation *runtimeinvalidation.Event `json:"-"`
 }
 
-// OrderedAttachments returns the attachments in delivery order. Attachments is
-// canonical when populated; Attachment preserves compatibility with callers
-// that return one file.
-func (r Result) OrderedAttachments() []Attachment {
-	if len(r.Attachments) > 0 {
-		return r.Attachments
-	}
-	if r.Attachment != nil {
-		return []Attachment{*r.Attachment}
-	}
-	return nil
-}
-
 // ValidateAttachments validates per-file and aggregate transport limits.
 func (r Result) ValidateAttachments() error {
-	attachments := r.OrderedAttachments()
-	if err := media.ValidateOutputAttachments(attachments); err != nil {
+	if err := media.ValidateOutputAttachments(r.Attachments); err != nil {
 		return fmt.Errorf("invalid command attachments: %w", err)
 	}
 	return nil
@@ -132,24 +117,16 @@ type Command struct {
 	Middleware []Middleware
 }
 
-// Authorizer checks command-level permissions for canonical users.
-type Authorizer interface {
-	IsAdmin(canonicalUserID string) (bool, error)
-}
-
 // PrincipalAuthorizer re-resolves an authenticated external account before
-// checking permissions. Production authorizers should implement this contract.
+// checking permissions.
 type PrincipalAuthorizer interface {
 	IsAdminPrincipal(principal identity.Principal) (bool, error)
 }
 
-// IsPrincipalAdmin uses account-bound authorization when the authorizer supports it.
-func IsPrincipalAdmin(auth Authorizer, principal identity.Principal) (bool, error) {
+// IsPrincipalAdmin requires account-bound authorization for permission checks.
+func IsPrincipalAdmin(auth PrincipalAuthorizer, principal identity.Principal) (bool, error) {
 	if auth == nil || !principal.Authenticated() {
 		return false, nil
 	}
-	if full, ok := auth.(PrincipalAuthorizer); ok {
-		return full.IsAdminPrincipal(principal)
-	}
-	return auth.IsAdmin(principal.CanonicalUserID)
+	return auth.IsAdminPrincipal(principal)
 }

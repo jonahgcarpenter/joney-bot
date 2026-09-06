@@ -29,7 +29,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/runtimeinvalidation"
 	"github.com/jonahgcarpenter/oswald-ai/internal/soul"
-	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/testutil"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 )
@@ -953,7 +953,7 @@ func newIMessageTestGateway(t *testing.T, blueBubblesURL string) (*Gateway, *bro
 	log := config.NewLogger(config.LevelError)
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "oswald.db")
-	memories := usermemory.NewStore(dbPath, log)
+	memories := testutil.NewMemoryStore(t, dbPath, log)
 	links := accountlinking.NewService(dbPath, memories, nil, log)
 	soulPath := filepath.Join(dir, "soul.md")
 	if err := os.WriteFile(soulPath, []byte("You are Oswald."), 0o600); err != nil {
@@ -964,7 +964,7 @@ func newIMessageTestGateway(t *testing.T, blueBubblesURL string) (*Gateway, *bro
 	ai := agent.NewAgent(chat, registry.New(log), "test-model", soulStore, memories, promptbudget.ContextBudget{PromptLimit: 100000}, governance.GlobalPolicy{MaxExecutions: 12, MaxToolIterations: 8, MaxConsecutiveFailures: 3}, log)
 	b := broker.NewBroker(ai, 1, log)
 	b.Start()
-	commandService, err := commands.NewService()
+	commandService, err := commands.NewServiceWithCommands()
 	if err != nil {
 		t.Fatalf("new command service: %v", err)
 	}
