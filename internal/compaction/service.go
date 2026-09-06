@@ -359,9 +359,12 @@ func (s *Service) generateArtifact(ctx context.Context, job *memory.SessionCompa
 	}
 	var artifact memory.SummaryArtifact
 	renewedJob := *job
+	var jobMu sync.Mutex
 	submissionReserved := false
 	err = lease.Run(extractParent, s.lease,
 		func(renewCtx context.Context) error {
+			jobMu.Lock()
+			defer jobMu.Unlock()
 			leaseUntil, renewErr := s.store.RenewSessionCompactionJobLease(renewCtx, renewedJob, s.lease)
 			if renewErr == nil {
 				renewedJob.LeaseUntil = leaseUntil
@@ -375,13 +378,18 @@ func (s *Service) generateArtifact(ctx context.Context, job *memory.SessionCompa
 			compactCtx := requestctx.WithMetadata(workCtx, meta)
 			compactCtx = requestctx.WithPrincipal(compactCtx, identity.Principal{CanonicalUserID: job.UserID})
 			var compactErr error
+			// Keep the exact lease token stable through reservation and its local update.
+			jobMu.Lock()
 			count, reserveErr := s.store.ReserveSessionCompactionModelSubmission(workCtx, renewedJob)
+			if reserveErr == nil {
+				renewedJob.ModelSubmissionCount = count
+			}
+			jobMu.Unlock()
 			if reserveErr != nil {
 				return reserveErr
 			}
-			renewedJob.ModelSubmissionCount = count
 			submissionReserved = true
-			artifact, compactErr = s.compactor.Compact(compactCtx, previous, turns, renewedJob.CorrectiveErrorCode)
+			artifact, compactErr = s.compactor.Compact(compactCtx, previous, turns, job.CorrectiveErrorCode)
 			return compactErr
 		},
 	)

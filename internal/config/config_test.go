@@ -7,7 +7,34 @@ import (
 	"time"
 )
 
+// Load mutates the environment through godotenv. Register restoration even for
+// initially unset keys, and keep defaults tests away from an operator's .env.
+func isolateConfigEnvironment(t *testing.T) {
+	t.Helper()
+	t.Chdir(t.TempDir())
+	for _, key := range []string{
+		"HOME_ASSISTANT_LISTEN_PORT", "HOME_ASSISTANT_AUTH_TOKEN",
+		"BLUEBUBBLES_LISTEN_PORT", "BLUEBUBBLES_URL", "BLUEBUBBLES_PASSWORD",
+		"MCP_CONFIG_ENCRYPTION_KEY", "DISCORD_TOKEN",
+		"LLM_GATEWAY_URL", "LLM_GATEWAY_MODEL", "LLM_GATEWAY_EMBEDDING_MODEL",
+		"LLM_GATEWAY_API_KEY", "LLM_GATEWAY_VIRTUAL_KEY",
+		"MODEL_CONTEXT_WINDOW", "MODEL_MAX_OUTPUT_TOKENS",
+		"BRAVE_API_KEY", "SEARXNG_URL", "COMFYUI_URL",
+		"COMFYUI_TEXT_TO_IMAGE_WORKFLOW", "COMFYUI_IMAGE_TO_IMAGE_WORKFLOW",
+		"COMFYUI_GENERATION_TIMEOUT", "WORKER_POOL_SIZE", "LOG_LEVEL",
+	} {
+		t.Setenv(key, "")
+		if err := os.Unsetenv(key); err != nil {
+			t.Fatalf("unset test configuration key %s: %v", key, err)
+		}
+	}
+}
+
 func TestEnvHelpersUseFallbacksForMissingEmptyAndInvalidValues(t *testing.T) {
+	t.Setenv("OSWALD_TEST_MISSING", "")
+	if err := os.Unsetenv("OSWALD_TEST_MISSING"); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("OSWALD_TEST_STRING", "")
 	t.Setenv("OSWALD_TEST_INT", "not-an-int")
 
@@ -35,6 +62,7 @@ func TestEnvHelpersParseConfiguredValues(t *testing.T) {
 }
 
 func TestLoadModelBudgetConfig(t *testing.T) {
+	isolateConfigEnvironment(t)
 	t.Setenv("MODEL_CONTEXT_WINDOW", "65536")
 	t.Setenv("MODEL_MAX_OUTPUT_TOKENS", "4096")
 
@@ -62,6 +90,7 @@ func TestParseLevelAndRequestID(t *testing.T) {
 }
 
 func TestLoadReadsHomeAssistantConfig(t *testing.T) {
+	isolateConfigEnvironment(t)
 	t.Setenv("HOME_ASSISTANT_AUTH_TOKEN", "0123456789abcdef0123456789abcdef")
 	t.Setenv("HOME_ASSISTANT_LISTEN_PORT", "8124")
 	t.Setenv("BLUEBUBBLES_LISTEN_PORT", "8125")
@@ -76,6 +105,7 @@ func TestLoadReadsHomeAssistantConfig(t *testing.T) {
 }
 
 func TestLoadLeavesOptionalGatewayPortsDisabledByDefault(t *testing.T) {
+	isolateConfigEnvironment(t)
 	t.Setenv("HOME_ASSISTANT_AUTH_TOKEN", "")
 	t.Setenv("HOME_ASSISTANT_LISTEN_PORT", "")
 	t.Setenv("BLUEBUBBLES_LISTEN_PORT", "")
@@ -103,6 +133,7 @@ func TestLoadOptionalWebSearchProviders(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			isolateConfigEnvironment(t)
 			t.Setenv("BRAVE_API_KEY", test.brave)
 			t.Setenv("SEARXNG_URL", test.searxng)
 			cfg, err := Load()
@@ -110,24 +141,20 @@ func TestLoadOptionalWebSearchProviders(t *testing.T) {
 				t.Fatal(err)
 			}
 			if cfg.BraveAPIKey != test.wantBrave || cfg.SearxngURL != test.wantSearxng {
-				t.Fatalf("web search config = brave:%q searxng:%q", cfg.BraveAPIKey, cfg.SearxngURL)
+				t.Fatal("web search configuration did not match the synthetic provider settings")
 			}
 		})
 	}
 }
 
 func TestLoadComfyUIDefaultsAndValidation(t *testing.T) {
-	for _, key := range []string{"COMFYUI_URL", "COMFYUI_TEXT_TO_IMAGE_WORKFLOW", "COMFYUI_IMAGE_TO_IMAGE_WORKFLOW", "COMFYUI_GENERATION_TIMEOUT"} {
-		if err := os.Unsetenv(key); err != nil {
-			t.Fatal(err)
-		}
-	}
+	isolateConfigEnvironment(t)
 	cfg, err := Load()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if cfg.ComfyUIURL != "" || cfg.ComfyUITextToImageWorkflowPath != DefaultComfyUITextToImageWorkflowPath || cfg.ComfyUIImageToImageWorkflowPath != DefaultComfyUIImageToImageWorkflowPath || cfg.ComfyUIGenerationTimeout != 2*time.Minute {
-		t.Fatalf("unexpected ComfyUI defaults: %+v", cfg)
+		t.Fatal("ComfyUI configuration did not use the expected defaults")
 	}
 
 	for _, invalid := range []string{"localhost:8188", "ftp://example.com", "http:///missing", "http://user@example.com", "http://example.com?x=1", "http://example.com#fragment"} {
@@ -141,6 +168,7 @@ func TestLoadComfyUIDefaultsAndValidation(t *testing.T) {
 }
 
 func TestLoadComfyUIOverrides(t *testing.T) {
+	isolateConfigEnvironment(t)
 	t.Setenv("COMFYUI_URL", " https://comfy.example/base ")
 	t.Setenv("COMFYUI_TEXT_TO_IMAGE_WORKFLOW", "text.json")
 	t.Setenv("COMFYUI_IMAGE_TO_IMAGE_WORKFLOW", "image.json")
@@ -150,14 +178,57 @@ func TestLoadComfyUIOverrides(t *testing.T) {
 		t.Fatal(err)
 	}
 	if cfg.ComfyUIURL != "https://comfy.example/base" || cfg.ComfyUITextToImageWorkflowPath != "text.json" || cfg.ComfyUIImageToImageWorkflowPath != "image.json" || cfg.ComfyUIGenerationTimeout != 45*time.Second {
-		t.Fatalf("unexpected ComfyUI config: %+v", cfg)
+		t.Fatal("ComfyUI configuration did not match the synthetic overrides")
 	}
 }
 
 func TestLoadRejectsInvalidComfyUITimeout(t *testing.T) {
-	t.Setenv("COMFYUI_GENERATION_TIMEOUT", "0s")
-	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "COMFYUI_GENERATION_TIMEOUT") {
-		t.Fatalf("Load error = %v", err)
+	for _, value := range []string{"", "0s", "-1s", "not-a-duration"} {
+		t.Run(value, func(t *testing.T) {
+			isolateConfigEnvironment(t)
+			t.Setenv("COMFYUI_GENERATION_TIMEOUT", value)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), "COMFYUI_GENERATION_TIMEOUT") {
+				t.Fatalf("Load error = %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadEnvironmentIsolationRestoresCallerSettings(t *testing.T) {
+	t.Setenv("COMFYUI_GENERATION_TIMEOUT", "invalid-inherited-value")
+	t.Setenv("DISCORD_TOKEN", "synthetic-inherited-token")
+	t.Run("isolated", func(t *testing.T) {
+		isolateConfigEnvironment(t)
+		cfg, err := Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.DiscordToken != "" || cfg.ComfyUIGenerationTimeout != 2*time.Minute {
+			t.Fatal("isolated configuration inherited caller settings")
+		}
+	})
+	if os.Getenv("COMFYUI_GENERATION_TIMEOUT") != "invalid-inherited-value" || os.Getenv("DISCORD_TOKEN") != "synthetic-inherited-token" {
+		t.Fatal("configuration fixture did not restore caller settings")
+	}
+}
+
+func TestLoadDotEnvRespectsExplicitEnvironmentAndEmptyValues(t *testing.T) {
+	isolateConfigEnvironment(t)
+	const dotenv = "LLM_GATEWAY_MODEL=file-model\nLLM_GATEWAY_API_KEY=synthetic-file-key\nMODEL_CONTEXT_WINDOW=16384\nCOMFYUI_GENERATION_TIMEOUT=30s\n"
+	if err := os.WriteFile(".env", []byte(dotenv), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LLM_GATEWAY_MODEL", "environment-model")
+	t.Setenv("LLM_GATEWAY_API_KEY", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LLMGatewayModel != "environment-model" || cfg.LLMGatewayAPIKey != "" {
+		t.Fatal("dotenv overrode an explicitly set environment value")
+	}
+	if cfg.ModelContextWindow != 16384 || cfg.ComfyUIGenerationTimeout != 30*time.Second {
+		t.Fatal("dotenv did not supply unset configuration values")
 	}
 }
 
@@ -179,6 +250,7 @@ func TestDefaultRetentionPolicy(t *testing.T) {
 }
 
 func TestLoadIgnoresRetiredPolicyEnvironment(t *testing.T) {
+	isolateConfigEnvironment(t)
 	before, err := Load()
 	if err != nil {
 		t.Fatal(err)

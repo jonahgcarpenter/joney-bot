@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -47,6 +49,47 @@ func TestLateDeliveryInvalidatesCrossingCheckpointAndCanReplan(t *testing.T) {
 				t.Fatal(err)
 			}
 
+			var failedAt, payload string
+			var summaryID int64
+			var outboxCount int
+			outboxQuery := fmt.Sprintf(`SELECT COUNT(*) FROM durable_jobs WHERE job_kind = 'derived_index' AND entity_kind = 'session_turn' AND entity_id = %d`, middle.ID)
+			if err := store.sql.QueryRow(outboxQuery).Scan(&outboxCount); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.sql.QueryRow(`SELECT delivery_failed_at FROM session_turns WHERE id = ?`, middle.ID).Scan(&failedAt); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.sql.QueryRow(`SELECT artifact_payload, artifact_summary_id FROM durable_jobs WHERE id = ?`, job.ID).Scan(&payload, &summaryID); err != nil {
+				t.Fatal(err)
+			}
+			// Fail only after both crossing checkpoint records have been deleted.
+			if _, err := store.sql.Exec(fmt.Sprintf(`CREATE TRIGGER fail_late_delivery_outbox BEFORE INSERT ON durable_jobs
+WHEN NEW.job_kind = 'derived_index' AND NEW.entity_id = %d AND NEW.entity_kind = 'session_turn'
+BEGIN
+ SELECT CASE WHEN EXISTS (SELECT 1 FROM durable_jobs WHERE id = %d)
+ OR EXISTS (SELECT 1 FROM session_summaries WHERE id = %d)
+ THEN RAISE(ABORT, 'checkpoint deletion not reached') END;
+ SELECT RAISE(ABORT, 'injected late delivery outbox failure');
+END`, middle.ID, job.ID, summaryID)); err != nil {
+				t.Fatal(err)
+			}
+			if err := markDelivered(store, middle.ID); err == nil || !strings.Contains(err.Error(), "injected late delivery outbox failure") {
+				t.Fatalf("outbox failure after checkpoint deletion: %v", err)
+			}
+			var delivered sql.NullString
+			var restoredFailure, restoredPayload, state string
+			var restoredSummaryID int64
+			if err := store.sql.QueryRow(`SELECT delivered_at, delivery_failed_at FROM session_turns WHERE id = ?`, middle.ID).Scan(&delivered, &restoredFailure); err != nil || delivered.Valid || restoredFailure != failedAt {
+				t.Fatalf("delivery rollback: delivered=%v failure=%q err=%v", delivered, restoredFailure, err)
+			}
+			if err := store.sql.QueryRow(`SELECT state, artifact_payload, artifact_summary_id FROM durable_jobs WHERE id = ?`, job.ID).Scan(&state, &restoredPayload, &restoredSummaryID); err != nil || state != "succeeded" || restoredPayload != payload || restoredSummaryID != summaryID {
+				t.Fatalf("checkpoint job rollback: state=%q summary=%d err=%v", state, restoredSummaryID, err)
+			}
+			assertCompactionCount(t, store, fmt.Sprintf(`SELECT COUNT(*) FROM session_summaries WHERE id = %d AND narrative = 'Skipped late turn'`, summaryID), 1)
+			assertCompactionCount(t, store, outboxQuery, outboxCount)
+			if _, err := store.sql.Exec(`DROP TRIGGER fail_late_delivery_outbox`); err != nil {
+				t.Fatal(err)
+			}
 			if err := markDelivered(store, middle.ID); err != nil {
 				t.Fatal(err)
 			}

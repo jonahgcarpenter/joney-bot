@@ -12,6 +12,7 @@ import (
 	"image/jpeg"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1264,6 +1265,68 @@ func TestProcessUsesDynamicMCPDiscoveryTools(t *testing.T) {
 	}
 }
 
+func TestProcessMCPDiscoveryDoesNotAuthorizeSameBatchCall(t *testing.T) {
+	for _, streaming := range []bool{false, true} {
+		t.Run(fmt.Sprintf("streaming=%t", streaming), func(t *testing.T) {
+			batch := toolCallResponse("discover", "home.tools", map[string]interface{}{"query": "light"})
+			batch.Message.ToolCalls = append(batch.Message.ToolCalls, toolCallResponse("premature", "home.turn_on", map[string]interface{}{"entity": "light.office"}).Message.ToolCalls...)
+			chat := &fakeChatter{responses: []*llm.ChatResponse{
+				batch,
+				toolCallResponse("authorized", "home.turn_on", map[string]interface{}{"entity": "light.office"}),
+				{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "done"}},
+			}}
+			a, _ := newTestAgent(t, chat, nil, nil)
+			provider := &fakeMCPProvider{}
+			a.mcpProvider = provider
+			var callback func(StreamChunk)
+			if streaming {
+				callback = func(StreamChunk) {}
+			}
+			resp, err := processAgent(a, "req-mcp-batch", "homeassistant", "session-mcp-batch", "user-1", "User", "turn on office light", nil, callback)
+			if err != nil || resp == nil || resp.Response != "done" {
+				t.Fatalf("process = %+v, %v", resp, err)
+			}
+			if got := provider.executed; !slices.Equal(got, []string{"home.tools", "home.turn_on"}) {
+				t.Fatalf("provider executions = %v, want discovery and one authorized execution", got)
+			}
+			if len(chat.requests) != 3 {
+				t.Fatalf("model requests = %d, want 3", len(chat.requests))
+			}
+			for i, req := range chat.requests {
+				if req.Stream != streaming || !requestHasTool(req, "home.tools") || requestHasTool(req, "home.turn_on") != (i > 0) {
+					t.Fatalf("request %d: stream=%t tools=%v", i, req.Stream, toolNames(req))
+				}
+			}
+			wantResults := []llm.ChatMessage{
+				{Role: "tool", ToolCallID: "discover", Content: "Available MCP tools from home:\n1. home.turn_on"},
+				{Role: "tool", ToolCallID: "premature", Content: "Tool call blocked: this tool was not available for this model step. Use only currently available tools."},
+				{Role: "tool", ToolCallID: "authorized", Content: "light turned on"},
+			}
+			for i, count := range []int{0, 2, 3} {
+				var results []llm.ChatMessage
+				var callIDs []string
+				for _, message := range chat.requests[i].Messages {
+					for _, call := range message.ToolCalls {
+						callIDs = append(callIDs, call.ID)
+					}
+					if message.Role == "tool" {
+						results = append(results, message)
+					}
+				}
+				if len(results) != count || len(callIDs) != count {
+					t.Fatalf("request %d: calls=%v results=%+v, want %d correlated pairs", i, callIDs, results, count)
+				}
+				for j, result := range results {
+					want := wantResults[j]
+					if callIDs[j] != want.ToolCallID || result.ToolCallID != want.ToolCallID || result.Content != want.Content {
+						t.Fatalf("request %d result %d: call=%q result=%+v, want %+v", i, j, callIDs[j], result, want)
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestProcessPreExposesMCPToolsFromRecentSessionTurns(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "done"}}}}
 	agent, store := newTestAgent(t, chat, nil, nil)
@@ -1584,7 +1647,10 @@ type fakeEmbedder struct {
 	inputs  []string
 }
 
-type fakeMCPProvider struct{ scope string }
+type fakeMCPProvider struct {
+	scope    string
+	executed []string
+}
 
 func (p *fakeMCPProvider) DiscoveryTools(context.Context, identity.Principal) []llm.Tool {
 	return []llm.Tool{{Type: "function", Function: llm.ToolDefinition{Name: "home.tools", Description: "Search Home Assistant tools", Parameters: llm.ToolParameters{Type: "object"}}}}
@@ -1611,6 +1677,7 @@ func (p *fakeMCPProvider) ToolPolicy(string) governance.ToolPolicy {
 }
 
 func (p *fakeMCPProvider) Execute(ctx context.Context, _ identity.Principal, name string, _ map[string]interface{}, exposed map[string]bool) (mcp.ExecutionResult, bool, error) {
+	p.executed = append(p.executed, name)
 	if name == "home.tools" {
 		if exposer := requestctx.ToolExposerFromContext(ctx); exposer != nil {
 			exposer.ExposeTools([]string{"home.turn_on"})
