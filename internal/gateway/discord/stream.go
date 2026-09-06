@@ -14,6 +14,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
+	toolnames "github.com/jonahgcarpenter/oswald-ai/internal/tools/names"
 )
 
 const (
@@ -27,7 +28,7 @@ const (
 
 type discordStreamEvent struct {
 	chunk     *agent.StreamChunk
-	response  *agent.AgentResponse
+	response  *agent.Response
 	errorText string
 	result    chan error
 	abort     bool
@@ -89,7 +90,7 @@ func (s *discordResponseStream) Push(chunk agent.StreamChunk) {
 	}
 }
 
-func (s *discordResponseStream) Finish(response *agent.AgentResponse) error {
+func (s *discordResponseStream) Finish(response *agent.Response) error {
 	return s.terminalEvent(discordStreamEvent{response: response})
 }
 
@@ -453,38 +454,38 @@ func discordToolStatusFor(tool *agent.ToolStreamPayload) discordToolStatus {
 	}
 
 	switch tool.Name {
-	case "user_memory_save":
+	case toolnames.UserMemorySave:
 		return actionToolStatus(tool.Name, "Staging a memory for delivery", "Staged a memory for post-delivery validation", "Memory staging failed")
-	case "web.fetch":
+	case toolnames.WebFetch:
 		completed := "Fetched the requested public page"
 		if tool.WebFetch != nil && tool.WebFetch.IsDegraded {
 			completed += " with limited extraction"
 		}
 		return actionToolStatus(tool.Name, "Fetching the requested public page", completed, "Public page fetch failed")
-	case "web.search":
+	case toolnames.WebSearch:
 		completed := "Searched the web for " + quoteToolDetail(query)
 		if tool.WebSearch != nil && tool.WebSearch.IsDegraded {
 			completed += " with limited sources"
 		}
 		return actionToolStatus(tool.Name, "Searching the web for "+quoteToolDetail(query), completed, "Web search failed for "+quoteToolDetail(query))
-	case "time.current":
+	case toolnames.CurrentTime:
 		timezone := toolStringArgument(tool.Arguments, "timezone")
 		if timezone == "" {
 			timezone = "the requested timezone"
 		}
 		return actionToolStatus(tool.Name, "Checking the time in `"+sanitizeDiscordInline(timezone)+"`", "Checked the time in `"+sanitizeDiscordInline(timezone)+"`", "Time lookup failed for `"+sanitizeDiscordInline(timezone)+"`")
-	case "user_memory_search":
+	case toolnames.UserMemorySearch:
 		detail := memoryFilterDetail(tool.Arguments)
 		if query != "" {
 			detail = " for " + quoteToolDetail(query) + detail
 		}
 		return actionToolStatus(tool.Name, "Searching your memories"+detail, "Searched your memories"+detail, "Memory search failed"+detail)
-	case "user_memory_list":
+	case toolnames.UserMemoryList:
 		detail := memoryFilterDetail(tool.Arguments)
 		return actionToolStatus(tool.Name, "Listing your memories"+detail, "Listed your memories"+detail, "Memory listing failed"+detail)
-	case "session_transcript_search":
+	case toolnames.SessionTranscriptSearch:
 		return actionToolStatus(tool.Name, "Searching this conversation for "+quoteToolDetail(query), "Searched this conversation for "+quoteToolDetail(query), "Conversation search failed for "+quoteToolDetail(query))
-	case "global_memory_search":
+	case toolnames.GlobalMemorySearch:
 		if tool.GlobalMemory != nil && tool.GlobalMemory.Query != "" {
 			query = tool.GlobalMemory.Query
 		}
@@ -650,7 +651,7 @@ func truncateDiscordText(value string, limit int) string {
 	return result.String() + "..."
 }
 
-func (s *discordStreamState) finish(response *agent.AgentResponse) error {
+func (s *discordStreamState) finish(response *agent.Response) error {
 	attachmentErr := s.deliverRemainingAttachments(response.Attachments)
 	responseText := response.Response
 	chunks := splitMessage(responseText, 2000)

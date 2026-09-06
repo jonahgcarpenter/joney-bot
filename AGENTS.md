@@ -32,27 +32,34 @@ Current layers:
 
 1. `cmd/agent/main.go` — startup wiring
 2. `internal/commands/` — shared command routing and command implementations
-3. `internal/commands/bootstrap/` and `internal/commands/accountlinking/` — first-administrator bootstrap, canonical user identity, and cross-gateway account-link commands
+3. `internal/accounts/` - canonical user identity, account linking, and moderation services; `internal/commands/bootstrap/` and `internal/commands/accountlinking/` own command adapters, not account infrastructure
 4. `internal/identity/` — typed request principals and identity assurance
 5. `internal/commands/usermanagement/` — admin, ban, and canonical-user inspection commands
 6. `internal/database/` — SQLite schema, account-link persistence, user memory tables, and sqlite-vec setup
 7. `internal/gateway/` — gateway bootstrap, shared gateway runtime, and implementations
-8. `internal/routing/` — shared gateway routing policy and reply-context prompt construction
+8. `internal/gateway/routing/` - shared gateway routing policy and reply-context prompt construction
 9. `internal/broker/` — request queue and worker pool
-10. `internal/memoryformation/` — pure evidence validation, sensitivity classification, and activation policy
-11. `internal/memoryextractor/` — private background user-memory model call, schema, and decoding
-12. `internal/formationruntime/` — durable serialized fallback extraction and retry worker
-13. `internal/sessionruntime/` — durable proactive session-compaction planning, extraction, and serialized retry worker
+10. `internal/memory/` - transactional user-memory, profile, session, candidate, durable-job, and derived-index storage; `internal/memory/policy/` owns pure evidence validation, sensitivity classification, and activation policy
+11. `internal/memory/extraction/` - private background user-memory model call, schema, and decoding
+12. `internal/memory/formation/` - durable serialized fallback extraction and retry worker
+13. `internal/compaction/` - durable proactive session-compaction planning, shared foreground/background model compactor, and serialized retry worker
 14. `internal/agent/` — iterative tool-calling agent loop
 15. `internal/soul/` — read-only operator-managed system-prompt loader
-16. `internal/promptbudget/` — model context budget and prompt token estimates
-17. `internal/tools/` — tool registry, request governance, builtin handlers, and schema loading
+16. `internal/compaction/budget/` - model context budget and prompt token estimates
+17. `internal/tools/` - tool registry, request governance, builtin handlers, and schema loading; `names/` owns stable builtin names and `exposure/` owns request-local catalogs
 18. `internal/mcp/` — MCP client sessions and discovered tools
 19. `internal/media/` — image validation, normalization, and unsupported-file prompt notes
 20. `internal/llm/` — OpenAI-compatible LLM gateway client and provider-neutral request/response schema
-21. `internal/indexruntime/` - serialized derived-index outbox and shadow-revision worker
-22. `internal/maintenanceruntime/` - serialized retention, consistency, and SQLite hygiene worker
-23. `internal/runtimeinvalidation/` - in-process authorization and gateway-cache invalidation
+21. `internal/memory/indexing/` - serialized derived-index outbox and shadow-revision worker; `internal/memory/global/` owns shared global-memory storage and retrieval
+22. `internal/database/maintenance/` - serialized retention, consistency, and SQLite hygiene worker
+23. `internal/shared/requestctx/`, `internal/shared/lease/`, and `internal/shared/invalidation/` - cross-cutting request metadata, renewable lease heartbeat, and in-process authorization/gateway-cache invalidation
+
+### Organization and Dependencies
+
+- Organize by domain ownership, not the caller: accounts do not live under commands, and memory storage does not live under model tools. Command and tool packages adapt their respective entry points to domain services.
+- `internal/shared/` is only a directory grouping for the three focused packages above, not an importable facade or a general-purpose domain container. Import concrete owning packages directly; do not add forwarding aliases or compatibility facades for moved Go APIs.
+- Transactional stores remain in their owning parent packages. Worker packages depend on those stores, never the reverse: `memory` must not import its formation/indexing workers, and `database` must not import `database/maintenance`. Keep transaction-fenced job, outbox, merge, and deletion operations together even when workers orchestrate them.
+- Package moves and Go API renames do not change model-visible names, gateway wire fields, commands, environment variables, schema migrations, persisted artifact versions, or behavioral policy.
 
 ## Startup Flow
 
@@ -91,7 +98,7 @@ Every request follows the same high-level path:
 
 1. A gateway receives user input
 2. The gateway normalizes text, attachments, sender metadata, and reply context
-3. The gateway resolves or creates the canonical user identity through `internal/commands/accountlinking/`
+3. The gateway resolves or creates the canonical user identity through `internal/accounts/`
 4. The gateway creates an `identity.Principal` containing the canonical user, normalized external identity, gateway, and identity assurance
 5. The gateway builds a `runtime.Request` with that principal and normalized gateway facts like `IsMention` and `IsReplyToBot`; command-attempt status is derived by the shared runtime from normalized text
 6. `internal/gateway/runtime.Execute()` applies shared routing, command handling, fallback handling, and broker submission
@@ -125,7 +132,7 @@ Relevant config:
 
 ## Agent Flow
 
-The core runtime is `(*Agent).Process()` in `internal/agent/agent.go`.
+The core runtime is `(*Agent).Process()` in `internal/agent/agent.go`. Request/response types live in `types.go`; prompt assembly, foreground compaction, tool execution, history replay, image retries, and streaming helpers live in `context.go`, `compaction.go`, `tools.go`, `tool_history.go`, `image_retry.go`, and `stream.go` in the same package.
 
 Per request it does the following:
 
@@ -153,7 +160,7 @@ Per request it does the following:
 
 14. If the global execution or tool-iteration budget is exhausted, make one final model call with all tools disabled
 15. Persist the cleaned final user message, final assistant reply, successful tool-name continuity projection, and bounded immutable native tool-call/result trace to the active session generation
-16. Return the final `AgentResponse`
+16. Return the final `agent.Response` defined in `internal/agent/types.go`; its JSON fields and non-serialized attachment/delivery metadata retain the existing gateway contract
 
 Multimodal request notes:
 
@@ -174,7 +181,7 @@ Streaming behavior:
 
 ## Shared Routing
 
-Gateway-neutral routing policy lives in `internal/routing/` and shared gateway execution lives in `internal/gateway/runtime/`.
+Gateway-neutral routing policy lives in `internal/gateway/routing/` and shared gateway execution lives in `internal/gateway/runtime/`.
 
 - Concrete gateways own transport-specific parsing: mention detection, reply lookup, attachment downloads, account identity extraction, and response sending
 - `runtime.Request` carries normalized text, channel type, mention state, reply-to-bot state, current-turn images, unsupported attachment labels, and optional reply context; the runtime derives command-attempt state
@@ -232,7 +239,7 @@ Oswald keeps four distinct memory layers.
 - Active durable memories are indexed by FTS5 and, when embeddings are configured, by sqlite-vec with canonical-user metadata filtering before KNN ranking
 - Candidate policy state is confidence-driven after structural validation: `proposed` means below confidence `0.35`, while `approved` means active itself or linked as supporting evidence for an already-active equivalent claim. Rejection is reserved for malformed structure, invalid source linkage, or other storage invariants rather than semantic keyword filtering. A non-null `published_memory_id` means linked to canonical memory; an approved candidate without one is blocked by conflict. Published memories use the committed `active`, `superseded`, and `expired` lifecycle, while deletion is immediate and physical
 - `memory_candidates` is the one-row-per-extracted-observation evidence ledger. Published candidates link to their consolidated `memory_entries` row; evidence count, source request/session/generation, correlation, representative evidence, and authority are derived through candidate and source-turn data. `memory_entries` retains only compact serving and conflict metadata such as confidence, importance, strongest provenance, and sensitivity. Candidate rows are directly deleted when their memory is deleted or retention expires
-- The serialized post-delivery extractor in `internal/memoryextractor/` exposes only the private `user_memory_pattern_extract` schema for new work and forces one call with standard `tool_choice = "required"`, parallel tool calls disabled, temperature `0`, and the resolved model output limit. It receives only a frozen ordered window of two to eight delivered user turns and returns at most three patterns, each supported by two to five exact whole-turn observations including the newest anchor turn as new evidence. The model supplies one holistic confidence assessment for the complete window; repetition is a two-distinct-turn corroboration requirement, not a fixed confidence increment. Category-compatible dotted claim identity, source membership, exact whole-turn evidence, and newest-anchor inclusion are validated before the first decoded artifact is persisted for idempotent replay. Legacy `formation-v4` jobs and artifacts retain their private single-turn decoder until drained. A structurally invalid response receives one durable reason-aware retry that instructs the model to finish reasoning with exactly one schema-conforming tool call, including an empty-array call when nothing qualifies; prior model output is not persisted or replayed. Any later policy rejection is logged with bounded reason codes and aggregate counts without candidate content
+- The serialized post-delivery extractor in `internal/memory/extraction/` exposes only the private `user_memory_pattern_extract` schema for new work and forces one call with standard `tool_choice = "required"`, parallel tool calls disabled, temperature `0`, and the resolved model output limit. It receives only a frozen ordered window of two to eight delivered user turns and returns at most three patterns, each supported by two to five exact whole-turn observations including the newest anchor turn as new evidence. The model supplies one holistic confidence assessment for the complete window; repetition is a two-distinct-turn corroboration requirement, not a fixed confidence increment. Category-compatible dotted claim identity, source membership, exact whole-turn evidence, and newest-anchor inclusion are validated before the first decoded artifact is persisted for idempotent replay. Legacy `formation-v4` jobs and artifacts retain their private single-turn decoder until drained. A structurally invalid response receives one durable reason-aware retry that instructs the model to finish reasoning with exactly one schema-conforming tool call, including an empty-array call when nothing qualifies; prior model output is not persisted or replayed. Any later policy rejection is logged with bounded reason codes and aggregate counts without candidate content
 - Formation jobs use renewable exact-token leases with a five-minute initial duration and idempotency keys. Every model-backed formation job receives at most three total failed provider submissions across operational failures, timeouts, and the one reason-aware structured-output retry; the submission is reserved durably immediately before provider invocation. Private background model calls use a silent synchronous stream so foreground admission cancels their active HTTP request through the low-priority context. Intentional foreground preemption always refunds the current submission, restores the claimed attempt, and durably defers the job, regardless of whether Bifrost had already accepted the stream. Local `agent_save` formation jobs do not invoke a model and retain their bounded storage retry behavior. Candidate proposal, publication, and completion require a transactionally checked live exact lease; retry and terminal skip may release a naturally expired lease only while its exact token remains stored. Startup reconciliation backfills missing jobs only for delivered turns created during the previous 24 hours
 - New foreground and pattern formation validates structure, exact source evidence, category-compatible claim identity, finite confidence, tenant ownership, delivery, and leases without regex-based semantic filtering. User-provided secrets, directives, negative or conditional statements, historical material, quotations, and third-party information may be retained. Legacy `formation-v4` artifacts retain their original stricter decoder and policy until drained
 - Foreground evidence is classified by the model as `direct_statement` or `model_inference`; the model supplies confidence from `0` through `1` based on how definitively the available context supports the statement. Confidence below `0.35` remains retained candidate evidence rather than active recall. Background patterns use the same model-assessed confidence semantics over their complete frozen window
@@ -323,6 +330,8 @@ Operator backup contract: `data/database/oswald.db` is canonical, but a live fil
 
 ### Session Chat Memory
 
+- `(*memory.Store).AppendPendingSessionTurn(ctx, memory.SessionTurnWrite{...})` in `internal/memory/session_store.go` atomically writes the completed exchange, native tool history, staged memory artifact, pressure snapshot, and derived-index outbox entry under the active tenant/session/generation fence. Pressure requires nonnegative tokens, a positive input limit, and a nonblank version. This is a pending-delivery write, not publication or delivery acknowledgement; only successful delivery activates downstream eligibility.
+- `compaction.NewLLMCompactor` in `internal/compaction/compactor.go` constructs the shared structured foreground/background compactor, requiring a client, nonblank model, and positive resolved output limit. Durable orchestration lives in `service.go`; transactional compaction jobs and summary publication remain in `internal/memory/`.
 - Stored in SQLite table `session_turns`
 - Keyed by gateway-provided `SessionKey` and canonical user ID
 - Stores only completed final user/assistant turn pairs
@@ -337,7 +346,7 @@ Operator backup contract: `data/database/oswald.db` is canonical, but a live fil
 - Foreground checkpoints use the same validated summary schema and four-submission budget as durable compaction but are never published to SQLite. A provider context-length rejection can force one compaction pass; provider-rejected compaction chunks are reduced on retry. The previous message epoch remains active until a valid replacement checkpoint exists
 - Initial foreground compaction considers pressure before optional history is omitted. Active tool rounds supply their live model-visible arguments and results to compaction independently of durable-history redaction or truncation; reasoning and attachment bytes are excluded. Persisted history retains its existing per-tool policy
 - Non-cancellation context failures return a deterministic partial-completion fallback through ordinary turn finalization, retaining permitted completed tool history, staged memory, attachments, and pressure metadata. The fallback warns that completed actions were not undone. Cancellation still exits without publishing a completed turn
-- Foreground history loaders should page `AllDeliveredSessionTurnsAfter` by the last returned ID to include delivered exchanges beyond pending-delivery gaps. Durable planning instead uses the pending-barrier-aware `DeliveredSessionTurnsAfter`; its unbounded `NewestTurnID` pins the campaign target independently of the page size. Both foreground and durable chunk sizing reserve corrective structured-output prompt overhead before the initial submission
+- Foreground history loaders should page `PageDeliveredSessionTurnsAfter` in ascending ID order, advancing the exclusive boundary to the last returned ID to include delivered exchanges beyond pending-delivery gaps. Durable planning instead uses the pending-barrier-aware `CompactionWindowAfter`; its `TotalCount` and `NewestTurnID` cover the eligible window independently of the page size, and the latter pins the campaign target. Both APIs enforce canonical tenant, session, and active-generation scope. Both foreground and durable chunk sizing reserve corrective structured-output prompt overhead before the initial submission
 - If the budget cannot hold all optional context, selection preserves whole exchanges and drops optional recall or history before required policy, profile, tools, current-turn text/images, and an installed foreground checkpoint
 - Compaction does not delete covered turns. Delivered transcripts normally remain in SQLite and the FTS5 transcript index for the active session generation so exact episodic details remain searchable, except when forget-all or account deletion resets all user data
 - `session_transcript_search` derives canonical user, session, and generation from authenticated request context and returns bounded, role-preserving complete exchanges with session, generation, turn, creation, and delivery provenance, labeled as untrusted historical records
@@ -362,7 +371,7 @@ Prompt-budget behavior:
 
 ## Context Budget Resolution
 
-Context budgeting lives in `internal/promptbudget/`.
+Context budgeting lives in `internal/compaction/budget/`.
 
 - Oswald uses an OpenAI-compatible model gateway at runtime and does not perform model-metadata discovery
 - `MODEL_CONTEXT_WINDOW` and `MODEL_MAX_OUTPUT_TOKENS` directly configure prompt budgeting and should match the limits configured in the model gateway
@@ -415,6 +424,8 @@ Files:
 - `internal/gateway/discord/gateway.go`
 - `internal/gateway/discord/types.go`
 
+`gateway.go` owns construction and lifecycle; `connection.go` owns websocket handling, `inbound.go` message admission, `attachments.go` and `replies.go` input enrichment, `rest.go` transport calls, and `text.go`, `stream.go`, and `responder.go` response rendering/delivery.
+
 Behavior:
 
 - Maintains a reconnecting Discord Gateway websocket session
@@ -453,6 +464,8 @@ Files:
 - `internal/gateway/imessage/gateway.go`
 - `internal/gateway/imessage/types.go`
 
+`gateway.go` owns construction and lifecycle; `webhook.go` owns authenticated webhook transport, `inbound.go` message admission, `attachments.go`, `contacts.go`, and `replies.go` input enrichment, and `bluebubbles.go` and `responder.go` outbound transport/delivery.
+
 Behavior:
 
 - Listens for BlueBubbles webhook events at the fixed `/bluebubbles/webhook` path on `BLUEBUBBLES_LISTEN_PORT`
@@ -489,6 +502,7 @@ Reply handling:
 Tools are split into schema and runtime layers.
 
 - Schemas are loaded from `data/tools/*.md`
+- All ten stable builtin names are consolidated in `internal/tools/names/names.go`. Contract tests in that package pin their literal values and require an exact match with the loaded markdown schema names; private extraction/compaction tools are not part of this builtin catalog.
 - Runtime handlers are wired through `internal/tools/bootstrap.go` and `internal/tools/builtin/`; `internal/mcp/` provides request-local MCP discovery and execution
 - Additional tool definitions can be discovered dynamically from connected MCP servers
 
@@ -499,6 +513,7 @@ Current builtin tools:
 - `time.current` — authoritative current date and time in a requested IANA timezone
 - `user_memory_search` — run deeper tenant-scoped hybrid retrieval with confidence and provenance
 - `user_memory_list` — inspect active stored user facts
+- `user_memory_save` - stage bounded high-intent current-turn observations for post-delivery validation and publication
 - `session_transcript_search` — search delivered role-preserving exchanges in the authenticated current session's active generation for exact episodic details
 - `global_memory_search` — search administrator-curated facts about Oswald for the authenticated tenant
 - `comfyui.text_to_image` — optional prompt-only text-to-image generation with operator-owned workflow settings and attachment delivery
@@ -560,8 +575,10 @@ Runtime governance lives in `internal/tools/governance/`. Builtin policies are d
 Files:
 
 - `internal/llm/gateway.go`
-- `internal/llm/schema.go`
+- `internal/llm/gateway_wire.go` - private OpenAI-compatible wire structs
 - `internal/llm/types.go`
+
+`types.go` owns provider-neutral request/response and tool-schema types; `gateway.go` owns HTTP, streaming, async polling, and mapping to the private wire representation.
 
 Notes:
 
@@ -621,6 +638,7 @@ Tests run in GitHub Actions without project secrets or local `.env` variables, s
 - Do not make live network calls from normal unit tests; external integrations must be mocked or guarded behind explicit opt-in checks
 - Tests may validate request/response mapping and error handling, but they should not depend on a real model response
 - Keep test data deterministic and avoid relying on existing files under `data/database/`, `data/accounts/`, or user memory directories
+- Tests outside the `memory` package use `internal/memory/memorytest/` for isolated stores, pending/delivered turns, and canonical candidate publication fixtures. Same-package memory tests keep private helpers in local `*_test.go` files rather than importing `memorytest` back into its parent or exporting test-only production APIs. Fixtures must retain generation fences and explicit delivery transitions rather than introduce parallel SQL writers.
 
 ## Logging
 
@@ -832,33 +850,57 @@ Current startup requirements:
 | `cmd/agent/main.go`                            | Startup wiring and shutdown                  |
 | `internal/agent/agent.go`                      | Main agent loop                              |
 | `internal/broker/broker.go`                    | Request queue and worker pool                |
-| `internal/promptbudget/`                       | Context budget and prompt token estimates    |
-| `internal/memoryformation/`                    | Pure memory evidence and activation policy   |
-| `internal/formationruntime/`                   | Durable post-delivery memory extraction      |
-| `internal/sessionruntime/`                     | Durable background session compaction worker |
-| `internal/indexruntime/`                       | Derived-index lifecycle worker               |
-| `internal/maintenanceruntime/`                 | Retention and SQLite maintenance worker      |
-| `internal/runtimeinvalidation/`                | Runtime authorization/cache invalidation     |
+| `internal/compaction/budget/`                  | Context budget and prompt token estimates    |
+| `internal/memory/policy/`                      | Pure memory evidence and activation policy   |
+| `internal/memory/extraction/extractor.go`       | Private memory model call and decoding       |
+| `internal/memory/formation/`                   | Durable post-delivery memory extraction      |
+| `internal/compaction/service.go`               | Durable session compaction planning/worker   |
+| `internal/compaction/compactor.go`             | Shared foreground/background LLM compactor   |
+| `internal/memory/indexing/`                    | Derived-index lifecycle worker               |
+| `internal/database/maintenance/`              | Retention and SQLite maintenance worker      |
+| `internal/shared/invalidation/`               | Runtime authorization/cache invalidation     |
+| `internal/shared/lease/`                       | Renewable exact-token lease heartbeat        |
 | `internal/mcp/manager.go`                      | MCP client bootstrap and catalog             |
-| `internal/routing/routing.go`                  | Shared gateway routing policy                |
-| `internal/routing/types.go`                    | Gateway-neutral routing types                |
+| `internal/gateway/routing/routing.go`          | Shared gateway routing policy                |
+| `internal/gateway/routing/types.go`            | Gateway-neutral routing types                |
 | `internal/llm/gateway.go`                      | LLM gateway HTTP client                      |
+| `internal/llm/gateway_wire.go`                 | Private OpenAI-compatible wire representation |
+| `internal/llm/types.go`                        | Provider-neutral model and tool-schema types |
 | `internal/database/`                           | SQLite schema and database helpers           |
 | `internal/tools/registry/`                     | Tool schema loading and execution            |
 | `internal/tools/governance/`                   | Request-local tool policy and limits         |
-| `internal/tools/runtime/`                      | Request-local tool exposure state            |
+| `internal/tools/exposure/`                     | Request-local tool exposure state            |
+| `internal/tools/names/names.go`                | All ten stable builtin model-tool names      |
 | `internal/tools/bootstrap.go`                  | Tool registry assembly                       |
 | `internal/tools/builtin/`                      | Builtin tool wiring and handlers             |
-| `internal/tools/builtin/globalmemory/`         | Shared global-memory store and handler       |
-| `internal/tools/builtin/usermemory/store.go`   | Persistent per-user memory store             |
+| `internal/tools/builtin/globalmemory/handler.go` | Global-memory tool adapter                 |
+| `internal/tools/builtin/usermemory/`           | User-memory and transcript tool adapters     |
+| `internal/memory/global/`                      | Shared global-memory store and retrieval     |
+| `internal/memory/store.go`                     | User-memory store construction and lifecycle |
+| `internal/memory/memory_store.go`              | Canonical user-memory reads and updates      |
+| `internal/memory/session_store.go`            | Atomic pending exchange/artifact writes      |
+| `internal/memory/session_history.go`          | Delivered history paging/compaction windows  |
+| `internal/memory/session_delivery.go`         | Delivery outcomes and post-delivery work     |
+| `internal/memory/session_summary.go`          | Structured checkpoints and publication       |
+| `internal/memory/candidate_store.go`          | Candidate evidence and canonical publication |
+| `internal/memory/formation_jobs.go`           | Transactional formation jobs and leases      |
+| `internal/memory/compaction_jobs.go`          | Transactional compaction jobs and leases     |
+| `internal/memory/index_outbox.go`             | Transactional derived-index outbox           |
+| `internal/memory/account_merge.go`            | Atomic account data merge                    |
+| `internal/memory/deletion.go`                 | Atomic user-memory/data deletion             |
+| `internal/memory/memorytest/`                  | External-package memory test fixtures        |
 | `internal/soul/store.go`                       | Read-only soul system-prompt loader          |
 | `internal/commands/service.go`                 | Shared command service                       |
 | `internal/commands/parser.go`                  | Slash-command parser                         |
 | `internal/commands/bootstrap/`                 | Process-local first-administrator bootstrap  |
-| `internal/commands/accountlinking/store.go`    | Canonical account link store                 |
+| `internal/commands/accountlinking/commands.go` | Account-link command adapter                 |
+| `internal/accounts/service.go`                | Canonical account service lifecycle          |
+| `internal/accounts/identity.go`               | Canonical identity resolution and disconnect |
+| `internal/accounts/challenges.go`             | Cross-gateway account-link challenges        |
+| `internal/accounts/moderation.go`             | Canonical-user moderation                    |
 | `internal/commands/usermanagement/commands.go` | Admin and ban command handlers               |
 | `internal/identity/principal.go`               | Typed request principal and assurance        |
-| `internal/requestctx/requestctx.go`            | Request metadata propagation through context |
+| `internal/shared/requestctx/requestctx.go`     | Request metadata propagation through context |
 | `internal/media/images.go`                     | Image normalization and validation           |
 | `internal/media/video.go`                      | Discord GIFV contact-sheet extraction        |
 | `internal/gateway/runtime/`                    | Shared gateway request execution             |
@@ -880,9 +922,9 @@ Current startup requirements:
 
 ### Adding a Tool
 
-1. Add a schema file to `data/tools/<name>.md`
-2. Add runtime code under `internal/tools/<name>/` if needed
-3. Register the handler in `internal/tools/builtin/`
+1. Add a schema file to `data/tools/<name>.md` and a stable name in `internal/tools/names/names.go`; extend the schema/name contract test
+2. Add a handler under `internal/tools/builtin/<domain>/`; keep reusable domain storage and policy outside tool infrastructure
+3. Register the handler and its governance policy in `internal/tools/builtin/`
 
 ### Adding a Gateway
 

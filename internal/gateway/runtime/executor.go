@@ -9,9 +9,9 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/usermanagement"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/routing"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
-	"github.com/jonahgcarpenter/oswald-ai/internal/routing"
-	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
 )
 
 // Execute applies shared routing policy, command handling, and broker submission.
@@ -251,18 +251,18 @@ func Execute(req Request, deps Dependencies, responder Responder) Outcome {
 			config.F("status", "ok"),
 		)
 		if deps.Formation != nil && result.Response.SourceTurnID > 0 {
-			source := usermemory.FormationSource{
+			source := memory.FormationSource{
 				RequestID: req.RequestID, SessionID: req.SessionKey,
 				SessionGeneration: result.Response.SessionGeneration,
 				TurnID:            result.Response.SourceTurnID, Model: result.Response.Model,
-				ExtractorVersion: usermemory.FormationExtractorVersion,
+				ExtractorVersion: memory.FormationExtractorVersion,
 			}
 			if enqueueErr := deps.Formation.Enqueue(context.Background(), userID, source); enqueueErr != nil {
 				log.Warn("user_memory.formation.job.enqueue_failed", "failed to enqueue post-turn user-memory formation", config.F("request_id", req.RequestID), config.F("user_id", userID), config.F("turn_id", result.Response.SourceTurnID), config.F("status", "degraded"), config.ErrorField(enqueueErr))
 			}
 		}
 		if deps.Compaction != nil && result.Response.SourceTurnID > 0 {
-			source := usermemory.FormationSource{
+			source := memory.FormationSource{
 				RequestID: req.RequestID, SessionID: req.SessionKey,
 				SessionGeneration: result.Response.SessionGeneration,
 				TurnID:            result.Response.SourceTurnID, Model: result.Response.Model,

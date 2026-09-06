@@ -6,11 +6,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/accounts"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
-	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
-	"github.com/jonahgcarpenter/oswald-ai/internal/testutil"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memory/memorytest"
 )
 
 func TestCommandHandlerRequiresAdmin(t *testing.T) {
@@ -150,7 +150,7 @@ func TestCommandHandlerUsersAdminBanAndUnban(t *testing.T) {
 	}
 }
 
-func newAdminCommandService(t *testing.T, links *accountlinking.Service) *commands.Service {
+func newAdminCommandService(t *testing.T, links *accounts.Service) *commands.Service {
 	t.Helper()
 	registrations := make([]commands.Command, 0)
 	for _, handler := range New(links) {
@@ -163,13 +163,13 @@ func newAdminCommandService(t *testing.T, links *accountlinking.Service) *comman
 	return service
 }
 
-func executeCommand(t *testing.T, service *commands.Service, links *accountlinking.Service, userID, raw string) (string, error) {
+func executeCommand(t *testing.T, service *commands.Service, links *accounts.Service, userID, raw string) (string, error) {
 	t.Helper()
 	result, err := service.Execute(context.Background(), commands.Request{Principal: commandPrincipal(t, links, userID), Raw: raw})
 	return result.Text, err
 }
 
-func commandPrincipal(t *testing.T, links *accountlinking.Service, userID string) identity.Principal {
+func commandPrincipal(t *testing.T, links *accounts.Service, userID string) identity.Principal {
 	t.Helper()
 	accounts, err := links.AccountsForUser(userID)
 	if err != nil || len(accounts) == 0 {
@@ -179,11 +179,11 @@ func commandPrincipal(t *testing.T, links *accountlinking.Service, userID string
 	return identity.Principal{CanonicalUserID: userID, Gateway: account.Gateway, ExternalID: account.Identifier, Assurance: identity.AssuranceDiscordGateway}
 }
 
-func newTestService(t *testing.T) *accountlinking.Service {
+func newTestService(t *testing.T) *accounts.Service {
 	t.Helper()
 	dir := t.TempDir()
 	log := config.NewLogger(config.LevelError)
 	dbPath := filepath.Join(dir, "oswald.db")
-	memories := testutil.NewMemoryStore(t, dbPath, log)
-	return accountlinking.NewService(dbPath, memories, nil, log)
+	memories := memorytest.NewStore(t, dbPath, log)
+	return accounts.NewService(dbPath, memories, nil, log)
 }

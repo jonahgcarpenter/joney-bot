@@ -7,7 +7,8 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/toolnames"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memory/global"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/comfyui"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/currenttime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/globalmemory"
@@ -15,11 +16,12 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/webfetch"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/websearch"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
+	toolnames "github.com/jonahgcarpenter/oswald-ai/internal/tools/names"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 )
 
 // Register wires all builtin tools into the shared registry.
-func Register(reg *registry.Registry, cfg *config.Config, userMemStore *usermemory.Store, globalMemStore *globalmemory.Store, log *config.Logger) error {
+func Register(reg *registry.Registry, cfg *config.Config, userMemStore *memory.Store, globalMemStore *global.Store, log *config.Logger) error {
 	bootstrapLog := log.Server("tool.bootstrap")
 	comfyURL := strings.TrimSpace(cfg.ComfyUIURL)
 	if comfyURL == "" {
@@ -87,20 +89,20 @@ func Register(reg *registry.Registry, cfg *config.Config, userMemStore *usermemo
 		searcher = searxngClient
 		primary = "searxng"
 	default:
-		for _, name := range []string{"web.fetch", "web.search"} {
+		for _, name := range []string{toolnames.WebFetch, toolnames.WebSearch} {
 			if err := reg.DisableBuiltin(name); err != nil {
 				return fmt.Errorf("failed to disable %s tool: %w", name, err)
 			}
 		}
-		bootstrapLog.Info("tool.bootstrap.disabled", "disabled web tools because no search provider is configured", config.F("tool_name", "web.search,web.fetch"), config.F("status", "ok"))
+		bootstrapLog.Info("tool.bootstrap.disabled", "disabled web tools because no search provider is configured", config.F("tool_name", toolnames.WebSearch+","+toolnames.WebFetch), config.F("status", "ok"))
 	}
 	if searcher != nil {
 		searchPolicy := toolPolicy(2, normalizeSearchArgs)
 		searchPolicy.MaxFailures = 2
-		if err := reg.RegisterHandler("web.search", searchPolicy, registry.Handler(websearch.NewHandler(searcher, log))); err != nil {
+		if err := reg.RegisterHandler(toolnames.WebSearch, searchPolicy, registry.Handler(websearch.NewHandler(searcher, log))); err != nil {
 			return fmt.Errorf("failed to initialize web.search tool: %w", err)
 		}
-		bootstrapLog.Debug("tool.bootstrap.configured", "configured web search tool", config.F("tool_name", "web.search"), config.F("primary_provider", primary), config.F("fallback_provider", fallback))
+		bootstrapLog.Debug("tool.bootstrap.configured", "configured web search tool", config.F("tool_name", toolnames.WebSearch), config.F("primary_provider", primary), config.F("fallback_provider", fallback))
 
 		fetchPolicy := governance.ToolPolicy{
 			MaxExecutions:   4,
@@ -110,16 +112,16 @@ func Register(reg *registry.Registry, cfg *config.Config, userMemStore *usermemo
 			NormalizeArgs:   normalizeFetchArgs,
 			History:         governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false},
 		}
-		if err := reg.RegisterHandler("web.fetch", fetchPolicy, registry.Handler(webfetch.NewHandler(webfetch.NewClient(), log))); err != nil {
+		if err := reg.RegisterHandler(toolnames.WebFetch, fetchPolicy, registry.Handler(webfetch.NewHandler(webfetch.NewClient(), log))); err != nil {
 			return fmt.Errorf("failed to initialize web.fetch tool: %w", err)
 		}
-		bootstrapLog.Debug("tool.bootstrap.configured", "configured direct web fetch tool", config.F("tool_name", "web.fetch"))
+		bootstrapLog.Debug("tool.bootstrap.configured", "configured direct web fetch tool", config.F("tool_name", toolnames.WebFetch))
 	}
 
-	if err := reg.RegisterHandler("time.current", toolPolicy(0, normalizeTimeArgs), registry.Handler(currenttime.NewHandler(time.Now))); err != nil {
+	if err := reg.RegisterHandler(toolnames.CurrentTime, toolPolicy(0, normalizeTimeArgs), registry.Handler(currenttime.NewHandler(time.Now))); err != nil {
 		return fmt.Errorf("failed to initialize time.current tool: %w", err)
 	}
-	bootstrapLog.Debug("tool.bootstrap.configured", "configured current time tool", config.F("tool_name", "time.current"))
+	bootstrapLog.Debug("tool.bootstrap.configured", "configured current time tool", config.F("tool_name", toolnames.CurrentTime))
 
 	savePolicy := governance.ToolPolicy{
 		MaxExecutions: 2, BlockDuplicates: true, NormalizeArgs: normalizeMemorySaveArgs,
@@ -133,18 +135,18 @@ func Register(reg *registry.Registry, cfg *config.Config, userMemStore *usermemo
 	if err := reg.RegisterHandler(toolnames.UserMemorySearch, toolPolicy(0, normalizeMemorySearchArgs(8)), registry.Handler(usermemory.NewSearchHandler(userMemStore, log))); err != nil {
 		return fmt.Errorf("failed to initialize %s tool: %w", toolnames.UserMemorySearch, err)
 	}
-	bootstrapLog.Debug("tool.bootstrap.configured", "configured user memory tool", config.F("tool_name", toolnames.UserMemorySearch), config.F("path", config.DefaultAccountLinkPath))
+	bootstrapLog.Debug("tool.bootstrap.configured", "configured user memory tool", config.F("tool_name", toolnames.UserMemorySearch), config.F("path", config.DefaultDatabasePath))
 
 	if err := reg.RegisterHandler(toolnames.UserMemoryList, toolPolicy(0, normalizeMemorySearchArgs(25)), registry.Handler(usermemory.NewListHandler(userMemStore, log))); err != nil {
 		return fmt.Errorf("failed to initialize %s tool: %w", toolnames.UserMemoryList, err)
 	}
-	bootstrapLog.Debug("tool.bootstrap.configured", "configured user memory tool", config.F("tool_name", toolnames.UserMemoryList), config.F("path", config.DefaultAccountLinkPath))
+	bootstrapLog.Debug("tool.bootstrap.configured", "configured user memory tool", config.F("tool_name", toolnames.UserMemoryList), config.F("path", config.DefaultDatabasePath))
 
 	if err := reg.RegisterHandler(toolnames.SessionTranscriptSearch, toolPolicy(0, normalizeMemorySearchArgs(5)), registry.Handler(usermemory.NewTranscriptSearchHandler(userMemStore, log))); err != nil {
 		return fmt.Errorf("failed to initialize %s tool: %w", toolnames.SessionTranscriptSearch, err)
 	}
 
-	if err := reg.RegisterHandler(toolnames.GlobalMemorySearch, toolPolicy(0, normalizeMemorySearchArgs(globalmemory.DefaultSearchLimit)), registry.Handler(globalmemory.NewSearchHandler(globalMemStore, log))); err != nil {
+	if err := reg.RegisterHandler(toolnames.GlobalMemorySearch, toolPolicy(0, normalizeMemorySearchArgs(global.DefaultSearchLimit)), registry.Handler(globalmemory.NewSearchHandler(globalMemStore, log))); err != nil {
 		return fmt.Errorf("failed to initialize %s tool: %w", toolnames.GlobalMemorySearch, err)
 	}
 	bootstrapLog.Debug("tool.bootstrap.configured", "configured session transcript tool", config.F("tool_name", toolnames.SessionTranscriptSearch))

@@ -832,22 +832,22 @@ type sequencedCancelProcessor struct {
 	started chan string
 }
 
-func (p *sequencedCancelProcessor) Process(ctx context.Context, req agent.Request) (*agent.AgentResponse, error) {
+func (p *sequencedCancelProcessor) Process(ctx context.Context, req agent.Request) (*agent.Response, error) {
 	p.started <- req.RequestID
 	if req.RequestID == "active" {
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}
-	return &agent.AgentResponse{Response: "queued complete"}, nil
+	return &agent.Response{Response: "queued complete"}, nil
 }
 
-func (p *cancelProcessor) Process(ctx context.Context, _ agent.Request) (*agent.AgentResponse, error) {
+func (p *cancelProcessor) Process(ctx context.Context, _ agent.Request) (*agent.Response, error) {
 	close(p.started)
 	<-ctx.Done()
 	return nil, ctx.Err()
 }
 
-func (p *captureProcessor) Process(_ context.Context, req agent.Request) (*agent.AgentResponse, error) {
+func (p *captureProcessor) Process(_ context.Context, req agent.Request) (*agent.Response, error) {
 	p.requests <- req
-	return &agent.AgentResponse{Response: "ok"}, nil
+	return &agent.Response{Response: "ok"}, nil
 }

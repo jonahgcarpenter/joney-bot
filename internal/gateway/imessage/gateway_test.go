@@ -16,20 +16,20 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/accounts"
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
-	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
+	"github.com/jonahgcarpenter/oswald-ai/internal/compaction/budget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
-	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
-	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
-	"github.com/jonahgcarpenter/oswald-ai/internal/runtimeinvalidation"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memory/memorytest"
+	"github.com/jonahgcarpenter/oswald-ai/internal/shared/invalidation"
+	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/soul"
-	"github.com/jonahgcarpenter/oswald-ai/internal/testutil"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 )
@@ -46,7 +46,7 @@ func TestRuntimeInvalidationPurgesOnlyMatchingIMessageState(t *testing.T) {
 			"+15550000002": {DisplayName: "Two"},
 		},
 	}
-	g.HandleRuntimeInvalidation(runtimeinvalidation.Event{SessionIDs: []string{"imessage:chat:one"}, ExternalIdentities: []string{"imessage:+15550000001", "discord:one"}})
+	g.HandleRuntimeInvalidation(invalidation.Event{SessionIDs: []string{"imessage:chat:one"}, ExternalIdentities: []string{"imessage:+15550000001", "discord:one"}})
 	if _, ok := g.messageIndex["session"]; ok {
 		t.Fatal("matching session message context remained")
 	}
@@ -224,7 +224,7 @@ func TestIMessageAgentResponseDeliversAttachmentBeforeText(t *testing.T) {
 	defer server.Close()
 	g := &Gateway{BlueBubblesURL: server.URL, BlueBubblesPassword: "pw", Log: config.NewLogger(config.LevelError), messageIndex: make(map[string]messageContext)}
 	responder := runtimeResponder{gateway: g, chatGUID: "chat-1", requestID: "request"}
-	err := responder.SendAgentResponse(&agent.AgentResponse{Response: "generated", Attachments: []media.OutputAttachment{{Filename: "generated.png", MIMEType: "image/png", Data: []byte("image-data")}}})
+	err := responder.SendAgentResponse(&agent.Response{Response: "generated", Attachments: []media.OutputAttachment{{Filename: "generated.png", MIMEType: "image/png", Data: []byte("image-data")}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -953,15 +953,15 @@ func newIMessageTestGateway(t *testing.T, blueBubblesURL string) (*Gateway, *bro
 	log := config.NewLogger(config.LevelError)
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "oswald.db")
-	memories := testutil.NewMemoryStore(t, dbPath, log)
-	links := accountlinking.NewService(dbPath, memories, nil, log)
+	memories := memorytest.NewStore(t, dbPath, log)
+	links := accounts.NewService(dbPath, memories, nil, log)
 	soulPath := filepath.Join(dir, "soul.md")
 	if err := os.WriteFile(soulPath, []byte("You are Oswald."), 0o600); err != nil {
 		t.Fatalf("write soul fixture: %v", err)
 	}
 	soulStore := soul.NewStore(soulPath)
 	chat := &imFakeChatter{}
-	ai := agent.NewAgent(chat, registry.New(log), "test-model", soulStore, memories, promptbudget.ContextBudget{PromptLimit: 100000}, governance.GlobalPolicy{MaxExecutions: 12, MaxToolIterations: 8}, log)
+	ai := agent.NewAgent(chat, registry.New(log), "test-model", soulStore, memories, budget.ContextBudget{PromptLimit: 100000}, governance.GlobalPolicy{MaxExecutions: 12, MaxToolIterations: 8}, log)
 	b := broker.NewBroker(ai, 1, log)
 	b.Start()
 	commandService, err := commands.NewServiceWithCommands()

@@ -55,7 +55,7 @@ type Request struct {
 
 // Result is the response payload delivered to the originating gateway.
 type Result struct {
-	Response  *agent.AgentResponse
+	Response  *agent.Response
 	Principal identity.Principal
 	Err       error
 }
@@ -177,7 +177,7 @@ type backgroundPermit struct {
 
 // Processor handles one typed agent request.
 type Processor interface {
-	Process(context.Context, agent.Request) (*agent.AgentResponse, error)
+	Process(context.Context, agent.Request) (*agent.Response, error)
 }
 
 // NewBroker creates a lane-aware broker. Call Start before production use.
@@ -301,7 +301,7 @@ func (b *Broker) Submit(req *Request) error {
 		b.log.Warn("broker.request.rejected", "rejected broker request",
 			config.F("request_id", req.RequestID), config.F("gateway", req.Principal.Gateway),
 			config.F("chat_id", req.ChatID), config.F("status", "rejected"), config.F("reason", reason))
-		deliverResult(req.ResponseChan, Result{Response: &agent.AgentResponse{Response: config.SafeText(text)}})
+		deliverResult(req.ResponseChan, Result{Response: &agent.Response{Response: config.SafeText(text)}})
 		return err
 	}
 	return nil

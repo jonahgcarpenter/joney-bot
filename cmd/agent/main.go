@@ -7,28 +7,28 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/accounts"
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
-	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
 	bootstrapcommands "github.com/jonahgcarpenter/oswald-ai/internal/commands/bootstrap"
 	commandbuiltin "github.com/jonahgcarpenter/oswald-ai/internal/commands/builtin"
+	"github.com/jonahgcarpenter/oswald-ai/internal/compaction"
+	tokenbudget "github.com/jonahgcarpenter/oswald-ai/internal/compaction/budget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/formationruntime"
+	"github.com/jonahgcarpenter/oswald-ai/internal/database/maintenance"
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
-	"github.com/jonahgcarpenter/oswald-ai/internal/indexruntime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
-	"github.com/jonahgcarpenter/oswald-ai/internal/maintenanceruntime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/mcp"
-	"github.com/jonahgcarpenter/oswald-ai/internal/memoryextractor"
-	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
-	"github.com/jonahgcarpenter/oswald-ai/internal/runtimeinvalidation"
-	"github.com/jonahgcarpenter/oswald-ai/internal/sessionruntime"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memory/extraction"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memory/formation"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memory/global"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memory/indexing"
+	"github.com/jonahgcarpenter/oswald-ai/internal/shared/invalidation"
 	"github.com/jonahgcarpenter/oswald-ai/internal/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/startup"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools"
-	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/globalmemory"
-	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 )
 
@@ -56,7 +56,7 @@ func main() {
 
 	llmClient := llm.NewGatewayClient(cfg.LLMGatewayURL, cfg.LLMGatewayAPIKey, cfg.LLMGatewayVirtualKey, rootLog)
 
-	budget := promptbudget.NewContextBudget(cfg.ModelContextWindow, cfg.ModelMaxOutputTokens)
+	budget := tokenbudget.NewContextBudget(cfg.ModelContextWindow, cfg.ModelMaxOutputTokens)
 	log.Info("app.context_budget.configured", "configured context budget",
 		config.F("model", cfg.LLMGatewayModel),
 		config.F("context_window", budget.ContextWindow),
@@ -71,27 +71,27 @@ func main() {
 
 	// The user memory store shares the account-link database and initializes its
 	// permanent schema before the other stores open their own handles.
-	userMemStore, err := usermemory.NewSQLiteStore(config.DefaultAccountLinkPath, llmClient, cfg.LLMGatewayEmbeddingModel, rootLog.Server("memory.user"))
+	userMemStore, err := memory.NewSQLiteStore(config.DefaultDatabasePath, llmClient, cfg.LLMGatewayEmbeddingModel, rootLog.Server("memory.user"))
 	if err != nil {
 		log.Fatal("app.memory_user.init_failed", "failed to initialize user memory store", config.ErrorField(err))
 	}
 	defer userMemStore.Close() // nolint:errcheck
 	retentionPolicy := config.DefaultRetentionPolicy()
 	userMemStore.SetRetentionPolicy(retentionPolicy)
-	log.Debug("app.memory_user.configured", "configured user memory database", config.F("path", config.DefaultAccountLinkPath))
-	globalMemStore, err := globalmemory.NewStore(config.DefaultAccountLinkPath, llmClient, cfg.LLMGatewayEmbeddingModel, rootLog.Server("memory.global"))
+	log.Debug("app.memory_user.configured", "configured user memory database", config.F("path", config.DefaultDatabasePath))
+	globalMemStore, err := global.NewStore(config.DefaultDatabasePath, llmClient, cfg.LLMGatewayEmbeddingModel, rootLog.Server("memory.global"))
 	if err != nil {
 		log.Fatal("app.memory_global.init_failed", "failed to initialize global memory store", config.ErrorField(err))
 	}
 	defer globalMemStore.Close() // nolint:errcheck
-	log.Debug("app.memory_global.configured", "configured global memory database", config.F("path", config.DefaultAccountLinkPath))
-	mcpStore, err := mcp.NewStore(config.DefaultAccountLinkPath, cfg.MCPConfigEncryptionKey, rootLog.Server("mcp.store"))
+	log.Debug("app.memory_global.configured", "configured global memory database", config.F("path", config.DefaultDatabasePath))
+	mcpStore, err := mcp.NewStore(config.DefaultDatabasePath, cfg.MCPConfigEncryptionKey, rootLog.Server("mcp.store"))
 	if err != nil {
 		log.Fatal("app.mcp.init_failed", "failed to initialize MCP config store", config.ErrorField(err))
 	}
 	defer mcpStore.Close() // nolint:errcheck
 	mcpManager := mcp.NewManagerFromStore(mcpStore, rootLog)
-	accountLinkService := accountlinking.NewService(config.DefaultAccountLinkPath, userMemStore, mcpManager, rootLog.Server("account_link"))
+	accountLinkService := accounts.NewService(config.DefaultDatabasePath, userMemStore, mcpManager, rootLog.Server("account_link"))
 	if err := accountLinkService.Initialize(); err != nil {
 		log.Fatal("app.account_link.init_failed", "failed to initialize account link store", config.ErrorField(err))
 	}
@@ -104,27 +104,27 @@ func main() {
 		fmt.Fprintf(os.Stdout, "\nOswald first-administrator bootstrap\n\nBootstrap code: %s\n\nRun /bootstrap %s from an authenticated Discord, iMessage, or Home Assistant account. The code is valid once for this process. Restart Oswald to replace a lost code while no administrator exists.\n\n", bootstrapCode, bootstrapCode)
 		log.Info("app.bootstrap.available", "generated first-administrator bootstrap code", config.F("status", "ok"))
 	}
-	indexService := indexruntime.NewService(userMemStore, globalMemStore, llmClient, cfg.LLMGatewayEmbeddingModel, rootLog)
+	indexService := indexing.NewService(userMemStore, globalMemStore, llmClient, cfg.LLMGatewayEmbeddingModel, rootLog)
 	indexService.Start(context.Background())
-	maintenanceService := maintenanceruntime.NewService(userMemStore, retentionPolicy, rootLog)
+	maintenanceService := maintenance.NewService(userMemStore, retentionPolicy, rootLog)
 	maintenanceService.Start(context.Background())
-	log.Debug("app.account_link.configured", "configured account link database", config.F("path", config.DefaultAccountLinkPath))
+	log.Debug("app.account_link.configured", "configured account link database", config.F("path", config.DefaultDatabasePath))
 
 	toolRegistry, err := tools.NewRegistryFromConfig(cfg, userMemStore, globalMemStore, rootLog)
 	if err != nil {
 		log.Fatal("app.tools.init_failed", "failed to initialize tools", config.ErrorField(err))
 	}
 	mcpProvider := mcp.NewProvider(mcpManager, toolRegistry.Names()...)
-	formationExtractor, err := memoryextractor.NewLLMExtractor(llmClient, cfg.LLMGatewayModel, budget.ResponseReserve)
+	formationExtractor, err := extraction.NewLLMExtractor(llmClient, cfg.LLMGatewayModel, budget.ResponseReserve)
 	if err != nil {
 		log.Fatal("app.memory_extractor.init_failed", "failed to initialize background user-memory extractor", config.ErrorField(err))
 	}
-	formationService := formationruntime.NewService(userMemStore, formationExtractor, cfg.LLMGatewayModel, rootLog)
-	compactionExtractor, err := sessionruntime.NewLLMExtractor(llmClient, cfg.LLMGatewayModel, budget.ResponseReserve)
+	formationService := formation.NewService(userMemStore, formationExtractor, cfg.LLMGatewayModel, rootLog)
+	compactor, err := compaction.NewLLMCompactor(llmClient, cfg.LLMGatewayModel, budget.ResponseReserve)
 	if err != nil {
 		log.Fatal("app.session_compactor.init_failed", "failed to initialize background session compactor", config.ErrorField(err))
 	}
-	compactionService := sessionruntime.NewService(userMemStore, compactionExtractor, cfg.LLMGatewayModel, budget, rootLog)
+	compactionService := compaction.NewService(userMemStore, compactor, cfg.LLMGatewayModel, budget, rootLog)
 
 	if cfg.LLMGatewayEmbeddingModel != "" {
 		log.Info("app.memory_vector.enabled", "enabled semantic durable-memory retrieval",
@@ -145,18 +145,22 @@ func main() {
 		rootLog,
 		mcpProvider,
 	)
-	agentEngine.SetForegroundCompactor(compactionExtractor)
+	agentEngine.SetForegroundCompactor(compactor)
 
 	// Create the broker and start its worker pool.
 	// All gateways submit requests through the broker; it enforces the concurrency
 	// limit and routes responses back to the originating gateway.
 	requestBroker := broker.NewBroker(agentEngine, cfg.WorkerPoolSize, rootLog.Server("broker"))
 	requestBroker.Start()
-	commandService, err := commandbuiltin.NewServiceWithGlobalMemory(accountLinkService, userMemStore, globalMemStore, rootLog.Server("commands"), bootstrapCommand, commandbuiltin.MCPDeps{Store: mcpStore, Manager: mcpManager, Canceler: requestBroker})
+	commandService, err := commandbuiltin.NewService(commandbuiltin.Dependencies{
+		Accounts: accountLinkService, Memory: userMemStore, GlobalMemory: globalMemStore,
+		Logger: rootLog.Server("commands"), Bootstrap: bootstrapCommand,
+		MCPStore: mcpStore, MCPManager: mcpManager, Canceler: requestBroker,
+	})
 	if err != nil {
 		log.Fatal("app.commands.init_failed", "failed to initialize command service", config.ErrorField(err))
 	}
-	runtimeInvalidationBus := runtimeinvalidation.NewBus()
+	runtimeInvalidationBus := invalidation.NewBus()
 	runtimeDeps := gatewayruntime.Dependencies{
 		Broker:                 requestBroker,
 		Commands:               commandService,

@@ -1,108 +1,130 @@
 package llm
 
-import "encoding/json"
+import "context"
 
-type gatewayToolFunction struct {
-	Name      string `json:"name"`
-	Arguments string `json:"arguments"`
+// ToolFunction holds the name and arguments of a single tool invocation.
+type ToolFunction struct {
+	Name         string                 `json:"name"`
+	Arguments    map[string]interface{} `json:"arguments"`
+	RawArguments string                 `json:"-"`
 }
 
-type gatewayToolCall struct {
-	ID       string              `json:"id,omitempty"`
-	Index    int                 `json:"index,omitempty"`
-	Type     string              `json:"type,omitempty"`
-	Function gatewayToolFunction `json:"function"`
+// ToolCall represents a single tool call emitted by the model.
+type ToolCall struct {
+	ID       string       `json:"id,omitempty"`
+	Function ToolFunction `json:"function"`
 }
 
-type gatewayImageURL struct {
-	URL string `json:"url"`
+// InputImage is a validated image payload attached to a user request.
+// Data must contain base64-encoded normalized image bytes.
+type InputImage struct {
+	MimeType          string `json:"mime_type,omitempty"`
+	Data              string `json:"data"`
+	Source            string `json:"source,omitempty"`
+	IsGIFContactSheet bool   `json:"-"`
 }
 
-type gatewayContentPart struct {
-	Type     string           `json:"type"`
-	Text     string           `json:"text,omitempty"`
-	ImageURL *gatewayImageURL `json:"image_url,omitempty"`
+// ChatMessage is a single turn in a conversation.
+type ChatMessage struct {
+	Role       string       `json:"role"`
+	Content    string       `json:"content"`
+	Images     []InputImage `json:"images,omitempty"`
+	Thinking   string       `json:"thinking,omitempty"`
+	ToolCalls  []ToolCall   `json:"tool_calls,omitempty"`
+	ToolName   string       `json:"tool_name,omitempty"`
+	ToolCallID string       `json:"tool_call_id,omitempty"`
 }
 
-type gatewayMessage struct {
-	Role             string            `json:"role"`
-	Content          interface{}       `json:"content,omitempty"`
-	Reasoning        string            `json:"reasoning,omitempty"`
-	Thinking         string            `json:"thinking,omitempty"`
-	ReasoningContent string            `json:"reasoning_content,omitempty"`
-	ToolCalls        []gatewayToolCall `json:"tool_calls,omitempty"`
-	ToolCallID       string            `json:"tool_call_id,omitempty"`
+// ToolParameterProperty describes a single property within a tool's parameter schema.
+type ToolParameterProperty struct {
+	Type                 string                           `json:"type"`
+	Description          string                           `json:"description,omitempty"`
+	Enum                 []string                         `json:"enum,omitempty"`
+	Properties           map[string]ToolParameterProperty `json:"properties,omitempty"`
+	Required             []string                         `json:"required,omitempty"`
+	Items                *ToolParameterProperty           `json:"items,omitempty"`
+	MinItems             *int                             `json:"minItems,omitempty"`
+	MaxItems             *int                             `json:"maxItems,omitempty"`
+	Minimum              *float64                         `json:"minimum,omitempty"`
+	Maximum              *float64                         `json:"maximum,omitempty"`
+	MinLength            *int                             `json:"minLength,omitempty"`
+	MaxLength            *int                             `json:"maxLength,omitempty"`
+	AdditionalProperties *bool                            `json:"additionalProperties,omitempty"`
 }
 
-type gatewayResponseFormat struct {
-	Type string `json:"type"`
+// ToolParameters is the JSON Schema object describing a tool's input parameters.
+type ToolParameters struct {
+	Type                 string                           `json:"type"`
+	Properties           map[string]ToolParameterProperty `json:"properties"`
+	Required             []string                         `json:"required,omitempty"`
+	AdditionalProperties *bool                            `json:"additionalProperties,omitempty"`
 }
 
-type gatewayChatRequest struct {
-	Model             string                 `json:"model"`
-	User              string                 `json:"user,omitempty"`
-	Messages          []gatewayMessage       `json:"messages"`
-	Tools             []Tool                 `json:"tools,omitempty"`
-	ToolChoice        ToolChoice             `json:"tool_choice,omitempty"`
-	ParallelToolCalls *bool                  `json:"parallel_tool_calls,omitempty"`
-	Temperature       *float64               `json:"temperature,omitempty"`
-	MaxTokens         int                    `json:"max_tokens,omitempty"`
-	ResponseFormat    *gatewayResponseFormat `json:"response_format,omitempty"`
-	Stream            bool                   `json:"stream"`
+// ToolDefinition holds the schema for a single function tool.
+type ToolDefinition struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+	Parameters  ToolParameters `json:"parameters"`
 }
 
-type gatewayChatResponse struct {
-	ID      string                `json:"id,omitempty"`
-	Model   string                `json:"model,omitempty"`
-	Choices []gatewayChoice       `json:"choices"`
-	Usage   gatewayUsage          `json:"usage,omitempty"`
-	Error   *gatewayErrorResponse `json:"error,omitempty"`
+// Tool wraps a ToolDefinition with its type identifier (always "function").
+type Tool struct {
+	Type     string         `json:"type"`
+	Function ToolDefinition `json:"function"`
 }
 
-type gatewayChoice struct {
-	Index        int            `json:"index,omitempty"`
-	Message      gatewayMessage `json:"message,omitempty"`
-	Delta        gatewayMessage `json:"delta,omitempty"`
-	FinishReason string         `json:"finish_reason,omitempty"`
+// ToolChoice controls whether the provider may choose or must call a tool.
+type ToolChoice string
+
+const (
+	// ToolChoiceRequired requires a tool call. Callers that need one specific
+	// tool must advertise only that tool and disable parallel tool calls.
+	ToolChoiceRequired ToolChoice = "required"
+)
+
+// ChatRequest is the provider-neutral payload for a chat-style LLM request.
+type ChatRequest struct {
+	Model             string        `json:"model"`
+	User              string        `json:"user,omitempty"`
+	Messages          []ChatMessage `json:"messages"`
+	Tools             []Tool        `json:"tools,omitempty"`
+	ToolChoice        ToolChoice    `json:"tool_choice,omitempty"`
+	ParallelToolCalls *bool         `json:"parallel_tool_calls,omitempty"`
+	Temperature       *float64      `json:"temperature,omitempty"`
+	MaxTokens         int           `json:"max_tokens,omitempty"`
+	Format            string        `json:"format,omitempty"`
+	Stream            bool          `json:"stream"`
 }
 
-type gatewayUsage struct {
-	PromptTokens     int `json:"prompt_tokens,omitempty"`
-	CompletionTokens int `json:"completion_tokens,omitempty"`
-	TotalTokens      int `json:"total_tokens,omitempty"`
+// ChatResponse is the standardized reply from a chat LLM call.
+type ChatResponse struct {
+	Model            string
+	Message          ChatMessage
+	PromptTokens     int
+	CompletionTokens int
+	TotalTokens      int
+	DurationMS       int64
+	DoneReason       string
 }
 
-type gatewayErrorResponse struct {
-	Message string `json:"message,omitempty"`
-	Type    string `json:"type,omitempty"`
-	Code    string `json:"code,omitempty"`
-}
-
-type gatewayStreamToolCall struct {
-	ID        string
-	Name      string
-	Arguments string
-}
-
-type gatewayEmbeddingRequest struct {
+// EmbedRequest is the provider-neutral payload for an embedding request.
+type EmbedRequest struct {
 	Model string `json:"model"`
 	Input string `json:"input"`
 }
 
-type gatewayEmbeddingResponse struct {
-	Model string                  `json:"model,omitempty"`
-	Data  []gatewayEmbeddingDatum `json:"data"`
-	Error *gatewayErrorResponse   `json:"error,omitempty"`
+// EmbedResponse contains vectors returned by an embedding endpoint.
+type EmbedResponse struct {
+	Model      string
+	Embeddings [][]float64
 }
 
-type gatewayEmbeddingDatum struct {
-	Embedding []float64 `json:"embedding"`
+// Chatter describes the chat capability the agent depends on.
+type Chatter interface {
+	Chat(ctx context.Context, req ChatRequest, chatStreamCallback func(chunk ChatMessage)) (*ChatResponse, error)
 }
 
-type gatewayAsyncJob struct {
-	ID         string          `json:"id"`
-	Status     string          `json:"status"`
-	StatusCode int             `json:"status_code,omitempty"`
-	Result     json.RawMessage `json:"result,omitempty"`
-	Error      json.RawMessage `json:"error,omitempty"`
+// Embedder describes the embedding capability used for semantic memory retrieval.
+type Embedder interface {
+	Embed(ctx context.Context, req EmbedRequest) (*EmbedResponse, error)
 }

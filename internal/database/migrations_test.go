@@ -10,7 +10,7 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/toolnames"
+	toolnames "github.com/jonahgcarpenter/oswald-ai/internal/tools/names"
 )
 
 func TestPermanentV400SQLIsExecutedDirectly(t *testing.T) {

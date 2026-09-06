@@ -8,13 +8,14 @@ import (
 	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
-	"github.com/jonahgcarpenter/oswald-ai/internal/toolnames"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
+	toolnames "github.com/jonahgcarpenter/oswald-ai/internal/tools/names"
 )
 
 // NewTranscriptSearchHandler returns a Handler for current-session transcript search.
-func NewTranscriptSearchHandler(store *Store, log *config.Logger) func(context.Context, map[string]interface{}) (governance.Result, error) {
+func NewTranscriptSearchHandler(store *memory.Store, log *config.Logger) func(context.Context, map[string]interface{}) (governance.Result, error) {
 	return func(ctx context.Context, args map[string]interface{}) (governance.Result, error) {
 		principal, ok := requestctx.PrincipalFromContext(ctx)
 		if !ok || !principal.Authenticated() {
@@ -28,9 +29,9 @@ func NewTranscriptSearchHandler(store *Store, log *config.Logger) func(context.C
 		if query == "" {
 			return governance.Result{}, fmt.Errorf("%s: query is required", toolnames.SessionTranscriptSearch)
 		}
-		results, err := store.SearchTranscript(ctx, principal.CanonicalUserID, meta.SessionID, meta.SessionGeneration, query, intArg(args, "limit", defaultTranscriptSearchLimit))
+		results, err := store.SearchTranscript(ctx, principal.CanonicalUserID, meta.SessionID, meta.SessionGeneration, query, intArg(args, "limit", 0))
 		if err != nil {
-			if errors.Is(err, ErrTranscriptSearchUnavailable) {
+			if errors.Is(err, memory.ErrTranscriptSearchUnavailable) {
 				return governance.Result{}, fmt.Errorf("%s: transcript search unavailable: %w", toolnames.SessionTranscriptSearch, err)
 			}
 			return governance.Result{}, err

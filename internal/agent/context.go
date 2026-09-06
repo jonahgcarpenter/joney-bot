@@ -1,19 +1,81 @@
 package agent
 
 import (
+	"fmt"
 	"strings"
 
+	tokenbudget "github.com/jonahgcarpenter/oswald-ai/internal/compaction/budget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
-	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
-	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 )
+
+func stripReplyContext(prompt string) (string, bool) {
+	prompt = strings.TrimSpace(prompt)
+	if !strings.HasPrefix(prompt, "[Replying ") {
+		return prompt, false
+	}
+	parts := strings.SplitN(prompt, "\n\n", 2)
+	if len(parts) < 2 {
+		return "", true
+	}
+	return strings.TrimSpace(parts[1]), true
+}
+
+func sessionMemoryUserContent(prompt string, imageCount int) string {
+	content, hadReplyContext := stripReplyContext(prompt)
+	if content == "" && hadReplyContext {
+		content = "[User replied to a prior message]"
+	}
+	if imageCount > 0 {
+		content = strings.TrimSpace(content + fmt.Sprintf("\n\n[Attached %d image(s)]", imageCount))
+	}
+	return strings.TrimSpace(content)
+}
+
+// truncate returns s shortened to at most max runes, appending "..." if cut.
+func truncate(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max]) + "..."
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func providerUserValue(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.TrimPrefix(value, "You are speaking with ")
+	value = strings.TrimSuffix(value, ".")
+	return strings.TrimSpace(value)
+}
+
+func gatewaySystemPrompt(gateway string) string {
+	switch strings.TrimSpace(strings.ToLower(gateway)) {
+	case "imessage":
+		return "# Gateway Instructions\nThe user is reading this in iMessage, which does not render Markdown. Write responses in plain text. Do not use Markdown formatting such as **bold**, headings, tables, fenced code blocks, or inline code ticks. Use simple line breaks and plain bullets when helpful."
+	default:
+		return ""
+	}
+}
+
+func promptPressureVersion(model string, inputLimit int) string {
+	return fmt.Sprintf("%s:%s:%d", sessionPromptPressurePrefix, strings.TrimSpace(model), inputLimit)
+}
 
 // PromptContext is a role-correct model context assembled within an input
 // token limit. SelectedTurns are returned in chronological message order.
 type PromptContext struct {
 	Messages            []llm.ChatMessage
-	SelectedTurns       []usermemory.SessionTurn
+	SelectedTurns       []memory.SessionTurn
 	SelectedToolNames   []string
 	SelectedTurnCount   int
 	OmittedTurnCount    int
@@ -23,7 +85,7 @@ type PromptContext struct {
 	SummaryIncluded     bool
 	SummaryChars        int
 	MinimumTailCount    int
-	SelectedRecall      []usermemory.RecallResult
+	SelectedRecall      []memory.RecallResult
 	RequiredEstimate    int
 	EstimatedBefore     int
 	EstimatedAfter      int
@@ -31,18 +93,18 @@ type PromptContext struct {
 	RequiredOverBudget  bool
 }
 
-// AssemblePromptContextWithSummary reserves a bounded historical summary and a
+// AssemblePromptContext reserves a bounded historical summary and a
 // caller-selected newest verbatim tail before recall and additional history.
-func AssemblePromptContextWithSummary(
+func AssemblePromptContext(
 	deploymentPolicy string,
 	tenantProfile string,
 	currentPrompt string,
 	currentImages []llm.InputImage,
-	summary usermemory.SessionSummary,
+	summary memory.SessionSummary,
 	minimumTail int,
-	recallResults []usermemory.RecallResult,
+	recallResults []memory.RecallResult,
 	recallCharLimit int,
-	recentTurns []usermemory.SessionTurn,
+	recentTurns []memory.SessionTurn,
 	tools []llm.Tool,
 	inputLimit int,
 ) PromptContext {
@@ -61,16 +123,16 @@ func AssemblePromptContextWithSummary(
 
 	result := PromptContext{
 		InputLimit:         inputLimit,
-		RequiredEstimate:   promptbudget.EstimateRequest(required, tools),
+		RequiredEstimate:   tokenbudget.EstimateRequest(required, tools),
 		OmittedRecallCount: len(recallResults),
 	}
-	summaryBlock := usermemory.RenderSessionSummary(summary)
-	allRequired := withRecall(required, usermemory.RenderDurableMemoryRecall(recallResults, recallCharLimit))
+	summaryBlock := memory.RenderSessionSummary(summary)
+	allRequired := withRecall(required, memory.RenderDurableMemoryRecall(recallResults, recallCharLimit))
 	allMessages := messagesWithSummaryAndTurns(allRequired, summaryBlock, recentTurns)
-	result.EstimatedBefore = promptbudget.EstimateRequest(allMessages, tools)
+	result.EstimatedBefore = tokenbudget.EstimateRequest(allMessages, tools)
 	result.RequiredOverBudget = result.RequiredEstimate > inputLimit
 
-	selectedNewestFirst := make([]usermemory.SessionTurn, 0, len(recentTurns))
+	selectedNewestFirst := make([]memory.SessionTurn, 0, len(recentTurns))
 	selectedSummary := ""
 	if !result.RequiredOverBudget {
 		if minimumTail < 0 {
@@ -82,17 +144,17 @@ func AssemblePromptContextWithSummary(
 		for _, turn := range recentTurns[:minimumTail] {
 			candidate := append(selectedNewestFirst, turn)
 			candidateMessages := messagesWithSummaryAndTurns(required, "", candidate)
-			if promptbudget.EstimateRequest(candidateMessages, tools) > inputLimit {
-				compact := compactHistoricalTurn(turn)
+			if tokenbudget.EstimateRequest(candidateMessages, tools) > inputLimit {
+				compact := withoutToolHistory(turn)
 				candidate = append(selectedNewestFirst, compact)
 				candidateMessages = messagesWithSummaryAndTurns(required, "", candidate)
-				if promptbudget.EstimateRequest(candidateMessages, tools) > inputLimit {
+				if tokenbudget.EstimateRequest(candidateMessages, tools) > inputLimit {
 					break
 				}
 			}
 			selectedNewestFirst = candidate
 		}
-		if summaryBlock != "" && promptbudget.EstimateRequest(messagesWithSummaryAndTurns(required, summaryBlock, selectedNewestFirst), tools) <= inputLimit {
+		if summaryBlock != "" && tokenbudget.EstimateRequest(messagesWithSummaryAndTurns(required, summaryBlock, selectedNewestFirst), tools) <= inputLimit {
 			selectedSummary = summaryBlock
 		}
 	}
@@ -100,34 +162,34 @@ func AssemblePromptContextWithSummary(
 	result.SummaryIncluded = selectedSummary != ""
 	result.SummaryChars = len([]rune(selectedSummary))
 
-	selectedRecall := make([]usermemory.RecallResult, 0, len(recallResults))
+	selectedRecall := make([]memory.RecallResult, 0, len(recallResults))
 	if !result.RequiredOverBudget {
 		for _, recall := range recallResults {
 			candidate := append(selectedRecall, recall)
-			block := usermemory.RenderDurableMemoryRecall(candidate, recallCharLimit)
-			if block == "" || len(block) == len(usermemory.RenderDurableMemoryRecall(selectedRecall, recallCharLimit)) {
+			block := memory.RenderDurableMemoryRecall(candidate, recallCharLimit)
+			if block == "" || len(block) == len(memory.RenderDurableMemoryRecall(selectedRecall, recallCharLimit)) {
 				continue
 			}
 			candidateRequired := withRecall(required, block)
-			if promptbudget.EstimateRequest(messagesWithSummaryAndTurns(candidateRequired, selectedSummary, selectedNewestFirst), tools) > inputLimit {
+			if tokenbudget.EstimateRequest(messagesWithSummaryAndTurns(candidateRequired, selectedSummary, selectedNewestFirst), tools) > inputLimit {
 				continue
 			}
 			selectedRecall = candidate
 		}
 	}
-	recallBlock := usermemory.RenderDurableMemoryRecall(selectedRecall, recallCharLimit)
+	recallBlock := memory.RenderDurableMemoryRecall(selectedRecall, recallCharLimit)
 	required = withRecall(required, recallBlock)
 	result.SelectedRecallCount = len(selectedRecall)
-	result.SelectedRecall = append([]usermemory.RecallResult(nil), selectedRecall...)
+	result.SelectedRecall = append([]memory.RecallResult(nil), selectedRecall...)
 	result.OmittedRecallCount = len(recallResults) - len(selectedRecall)
 	result.RecallChars = len([]rune(recallBlock))
 
 	if !result.RequiredOverBudget {
 		for _, turn := range recentTurns[len(selectedNewestFirst):] {
 			candidate := append(selectedNewestFirst, turn)
-			if promptbudget.EstimateRequest(messagesWithSummaryAndTurns(required, selectedSummary, candidate), tools) > inputLimit {
-				candidate = append(selectedNewestFirst, compactHistoricalTurn(turn))
-				if promptbudget.EstimateRequest(messagesWithSummaryAndTurns(required, selectedSummary, candidate), tools) > inputLimit {
+			if tokenbudget.EstimateRequest(messagesWithSummaryAndTurns(required, selectedSummary, candidate), tools) > inputLimit {
+				candidate = append(selectedNewestFirst, withoutToolHistory(turn))
+				if tokenbudget.EstimateRequest(messagesWithSummaryAndTurns(required, selectedSummary, candidate), tools) > inputLimit {
 					break
 				}
 			}
@@ -140,21 +202,21 @@ func AssemblePromptContextWithSummary(
 	result.SelectedToolNames = selectedToolNames(result.SelectedTurns)
 	result.SelectedTurnCount = len(result.SelectedTurns)
 	result.OmittedTurnCount = len(recentTurns) - result.SelectedTurnCount
-	result.EstimatedAfter = promptbudget.EstimateRequest(result.Messages, tools)
+	result.EstimatedAfter = tokenbudget.EstimateRequest(result.Messages, tools)
 	return result
 }
 
-func prepareHistoricalTurns(turns []usermemory.SessionTurn, tools []llm.Tool) []usermemory.SessionTurn {
+func prepareHistoricalTurns(turns []memory.SessionTurn, tools []llm.Tool) []memory.SessionTurn {
 	available := make(map[string]bool, len(tools))
 	for _, tool := range tools {
 		available[tool.Function.Name] = true
 	}
-	prepared := append([]usermemory.SessionTurn(nil), turns...)
+	prepared := append([]memory.SessionTurn(nil), turns...)
 	for i := range prepared {
 		for _, batch := range prepared[i].ToolHistory.Batches {
 			for _, call := range batch.Calls {
 				if !available[call.Name] || call.ArgumentsTruncated || (call.HistoryMode != "" && call.HistoryMode != string(governance.HistoryFull)) {
-					prepared[i] = compactHistoricalTurn(prepared[i])
+					prepared[i] = withoutToolHistory(prepared[i])
 					break
 				}
 			}
@@ -166,29 +228,20 @@ func prepareHistoricalTurns(turns []usermemory.SessionTurn, tools []llm.Tool) []
 	return prepared
 }
 
-func compactHistoricalTurn(turn usermemory.SessionTurn) usermemory.SessionTurn {
-	turn.ToolHistory = usermemory.EmptyToolHistory()
+func withoutToolHistory(turn memory.SessionTurn) memory.SessionTurn {
+	turn.ToolHistory = memory.EmptyToolHistory()
 	return turn
 }
 
-func preservedRecentTailCount(recentTurns []usermemory.SessionTurn, inputLimit int) int {
-	budget := inputLimit / 4
-	if budget < 2000 {
-		budget = 2000
-	}
-	if budget > 8000 {
-		budget = 8000
-	}
-	if budget > inputLimit {
-		budget = inputLimit
-	}
+func preservedRecentTailCount(recentTurns []memory.SessionTurn, inputLimit int) int {
+	budget := tokenbudget.RecentTailLimit(inputLimit)
 	total := 0
 	count := 0
 	for _, turn := range recentTurns {
 		if count == 2 {
 			break
 		}
-		size := promptbudget.EstimateRequest(usermemory.SessionTurnMessages(turn), nil)
+		size := tokenbudget.EstimateRequest(memory.SessionTurnMessages(turn), nil)
 		if total+size > budget {
 			break
 		}
@@ -198,20 +251,11 @@ func preservedRecentTailCount(recentTurns []usermemory.SessionTurn, inputLimit i
 	return count
 }
 
-func completedPromptPressure(prompt PromptContext, storedTurn usermemory.SessionTurn) int {
-	userOnly := promptbudget.EstimateRequest([]llm.ChatMessage{{Role: "user", Content: storedTurn.UserText}}, nil)
-	pressure := prompt.EstimatedBefore + promptbudget.EstimateRequest(usermemory.SessionTurnMessages(storedTurn), nil) - userOnly
-	if pressure < 0 {
-		return 0
-	}
-	return pressure
-}
-
-func messagesWithSummaryAndTurns(required []llm.ChatMessage, summary string, newestFirst []usermemory.SessionTurn) []llm.ChatMessage {
+func messagesWithSummaryAndTurns(required []llm.ChatMessage, summary string, newestFirst []memory.SessionTurn) []llm.ChatMessage {
 	return messagesWithSummaryAndChronologicalTurns(required, summary, reverseTurns(newestFirst))
 }
 
-func messagesWithSummaryAndChronologicalTurns(required []llm.ChatMessage, summary string, chronological []usermemory.SessionTurn) []llm.ChatMessage {
+func messagesWithSummaryAndChronologicalTurns(required []llm.ChatMessage, summary string, chronological []memory.SessionTurn) []llm.ChatMessage {
 	messages := make([]llm.ChatMessage, 0, len(required)+len(chronological)*2+1)
 	last := len(required) - 1
 	messages = append(messages, required[:last]...)
@@ -219,7 +263,7 @@ func messagesWithSummaryAndChronologicalTurns(required []llm.ChatMessage, summar
 		messages = append(messages, llm.ChatMessage{Role: "user", Content: summary})
 	}
 	for _, turn := range chronological {
-		messages = append(messages, usermemory.SessionTurnMessages(turn)...)
+		messages = append(messages, memory.SessionTurnMessages(turn)...)
 	}
 	messages = append(messages, required[last])
 	return messages
@@ -235,15 +279,15 @@ func withRecall(required []llm.ChatMessage, recallBlock string) []llm.ChatMessag
 	return messages
 }
 
-func reverseTurns(turns []usermemory.SessionTurn) []usermemory.SessionTurn {
-	reversed := make([]usermemory.SessionTurn, len(turns))
+func reverseTurns(turns []memory.SessionTurn) []memory.SessionTurn {
+	reversed := make([]memory.SessionTurn, len(turns))
 	for i := range turns {
 		reversed[len(turns)-1-i] = turns[i]
 	}
 	return reversed
 }
 
-func selectedToolNames(turns []usermemory.SessionTurn) []string {
+func selectedToolNames(turns []memory.SessionTurn) []string {
 	seen := make(map[string]struct{})
 	var names []string
 	for _, turn := range turns {

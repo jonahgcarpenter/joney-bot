@@ -21,20 +21,20 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/accounts"
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
-	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
+	"github.com/jonahgcarpenter/oswald-ai/internal/compaction/budget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
-	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
-	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
-	"github.com/jonahgcarpenter/oswald-ai/internal/runtimeinvalidation"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memory/memorytest"
+	"github.com/jonahgcarpenter/oswald-ai/internal/shared/invalidation"
+	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/soul"
-	"github.com/jonahgcarpenter/oswald-ai/internal/testutil"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 )
@@ -149,7 +149,7 @@ func TestDiscordStreamShowsCompactToolProgress(t *testing.T) {
 	r.Stream(agent.StreamChunk{Type: agent.ChunkToolResult, Tool: &agent.ToolStreamPayload{Name: "web.search", ResultText: "private result", DurationMS: 420}})
 	r.Stream(agent.StreamChunk{Type: agent.ChunkThinking, Text: "post tool reasoning"})
 	r.Stream(agent.StreamChunk{Type: agent.ChunkContent, Text: "The final streamed response is now arriving."})
-	if err := r.SendAgentResponse(&agent.AgentResponse{Model: "test-model", Response: "The final answer."}); err != nil {
+	if err := r.SendAgentResponse(&agent.Response{Model: "test-model", Response: "The final answer."}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -184,7 +184,7 @@ func TestDiscordStreamShowsAndReplacesCompactionStatus(t *testing.T) {
 	r.Stream(agent.StreamChunk{Type: agent.ChunkStatus, Text: "Compacting context..."})
 	r.Stream(agent.StreamChunk{Type: agent.ChunkThinking, Text: "continuing with the compacted context"})
 	r.Stream(agent.StreamChunk{Type: agent.ChunkContent, Text: "The answer is arriving."})
-	if err := r.SendAgentResponse(&agent.AgentResponse{Model: "test-model", Response: "The final answer."}); err != nil {
+	if err := r.SendAgentResponse(&agent.Response{Model: "test-model", Response: "The final answer."}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -232,7 +232,7 @@ func TestDiscordStreamFinalizesLongResponseAcrossMessages(t *testing.T) {
 	r := newRuntimeResponder(dg, "req-1", "channel-1", "message-1", "discord:dm:123", "123")
 	responseText := strings.Repeat("long response text ", 260)
 	r.Stream(agent.StreamChunk{Type: agent.ChunkContent, Text: responseText})
-	if err := r.SendAgentResponse(&agent.AgentResponse{Model: "test-model", Response: responseText}); err != nil {
+	if err := r.SendAgentResponse(&agent.Response{Model: "test-model", Response: responseText}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -282,7 +282,7 @@ func TestDiscordStreamStartsMutableContinuationAfterFirstChunkFills(t *testing.T
 	updated := streamed + " continuation"
 	r.Stream(agent.StreamChunk{Type: agent.ChunkContent, Text: " continuation"})
 	waitForDiscordEdit(t, rest, "sent-2", "second continuation"+discordStreamCursor)
-	if err := r.SendAgentResponse(&agent.AgentResponse{Model: "test-model", Response: updated}); err != nil {
+	if err := r.SendAgentResponse(&agent.Response{Model: "test-model", Response: updated}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -312,7 +312,7 @@ func TestDiscordStreamDeletesSurplusContinuationWhenFinalResponseShrinks(t *test
 	waitForDiscordMessages(t, rest, 2)
 
 	const finalText = "Short authoritative response."
-	if err := r.SendAgentResponse(&agent.AgentResponse{Model: "test-model", Response: finalText}); err != nil {
+	if err := r.SendAgentResponse(&agent.Response{Model: "test-model", Response: finalText}); err != nil {
 		t.Fatal(err)
 	}
 	deleted := rest.deletedMessageIDs()
@@ -344,7 +344,7 @@ func TestDiscordStreamRemovesAbandonedContinuationBeforeToolProgress(t *testing.
 	const finalText = "Final answer after the tool call."
 	r.Stream(agent.StreamChunk{Type: agent.ChunkToolResult, Tool: &agent.ToolStreamPayload{Name: "web.search"}})
 	r.Stream(agent.StreamChunk{Type: agent.ChunkContent, Text: finalText})
-	if err := r.SendAgentResponse(&agent.AgentResponse{Model: "test-model", Response: finalText}); err != nil {
+	if err := r.SendAgentResponse(&agent.Response{Model: "test-model", Response: finalText}); err != nil {
 		t.Fatal(err)
 	}
 	deleted := rest.deletedMessageIDs()
@@ -402,7 +402,7 @@ func TestDiscordStreamFallsBackWhenFinalEditFails(t *testing.T) {
 	r := newRuntimeResponder(dg, "req-1", "channel-1", "message-1", "discord:dm:123", "123")
 	r.Stream(agent.StreamChunk{Type: agent.ChunkContent, Text: "A response preview that is long enough to send."})
 
-	if err := r.SendAgentResponse(&agent.AgentResponse{Model: "test-model", Response: "The authoritative final answer."}); err != nil {
+	if err := r.SendAgentResponse(&agent.Response{Model: "test-model", Response: "The authoritative final answer."}); err != nil {
 		t.Fatal(err)
 	}
 	mu.Lock()
@@ -430,7 +430,7 @@ func TestDiscordStreamReportsStaleLifecycleCleanupFailure(t *testing.T) {
 	r := newRuntimeResponder(dg, "req-1", "channel-1", "message-1", "discord:dm:123", "123")
 	r.Stream(agent.StreamChunk{Type: agent.ChunkThinking, Text: "temporary thinking"})
 
-	err := r.SendAgentResponse(&agent.AgentResponse{Model: "test-model", Response: "The authoritative final answer."})
+	err := r.SendAgentResponse(&agent.Response{Model: "test-model", Response: "The authoritative final answer."})
 	if err == nil || postCount != 2 {
 		t.Fatalf("error=%v post_count=%d, want cleanup error and fallback answer", err, postCount)
 	}
@@ -474,7 +474,7 @@ func TestDiscordStreamEditsActualContentThroughToolPhases(t *testing.T) {
 	time.Sleep(20 * time.Millisecond)
 	r.Stream(agent.StreamChunk{Type: agent.ChunkContent, Text: "Authoritative content"})
 	time.Sleep(20 * time.Millisecond)
-	if err := r.SendAgentResponse(&agent.AgentResponse{Model: "test-model", Response: "Authoritative content complete."}); err != nil {
+	if err := r.SendAgentResponse(&agent.Response{Model: "test-model", Response: "Authoritative content complete."}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -528,7 +528,7 @@ func TestDiscordStreamReportsFinalContinuationFailure(t *testing.T) {
 	responseText := strings.Repeat("long response text ", 260)
 	r.Stream(agent.StreamChunk{Type: agent.ChunkContent, Text: responseText})
 
-	if err := r.SendAgentResponse(&agent.AgentResponse{Model: "test-model", Response: responseText}); err == nil {
+	if err := r.SendAgentResponse(&agent.Response{Model: "test-model", Response: responseText}); err == nil {
 		t.Fatal("expected continuation delivery failure")
 	}
 	first, ok := dg.lookupReply("sent-1")
@@ -568,7 +568,7 @@ func TestDiscordStreamRecoversFinalAnswerAfterStatusEditFailure(t *testing.T) {
 	r.Stream(agent.StreamChunk{Type: agent.ChunkToolCall, Tool: &agent.ToolStreamPayload{Name: "web.search"}})
 	r.Stream(agent.StreamChunk{Type: agent.ChunkToolResult, Tool: &agent.ToolStreamPayload{Name: "web.search", DurationMS: 10}})
 	r.Stream(agent.StreamChunk{Type: agent.ChunkContent, Text: "The final response is long enough to preview."})
-	if err := r.SendAgentResponse(&agent.AgentResponse{Model: "test-model", Response: "The final response is long enough to preview."}); err != nil {
+	if err := r.SendAgentResponse(&agent.Response{Model: "test-model", Response: "The final response is long enough to preview."}); err != nil {
 		t.Fatal(err)
 	}
 	if deleteCount != 0 || postCount != 1 || patchCount != 3 {
@@ -582,7 +582,7 @@ func TestRuntimeInvalidationPurgesOnlyMatchingDiscordReplyContext(t *testing.T) 
 		"sender":  {SessionKey: "discord:other:one", SenderID: "one"},
 		"foreign": {SessionKey: "discord:channel:two", SenderID: "two"},
 	}}
-	dg.HandleRuntimeInvalidation(runtimeinvalidation.Event{SessionIDs: []string{"discord:channel:one"}, ExternalIdentities: []string{"discord:one", "imessage:one"}})
+	dg.HandleRuntimeInvalidation(invalidation.Event{SessionIDs: []string{"discord:channel:one"}, ExternalIdentities: []string{"discord:one", "imessage:one"}})
 	if _, ok := dg.replyIndex["session"]; ok {
 		t.Fatal("matching session reply context remained")
 	}
@@ -691,7 +691,7 @@ func TestDiscordAgentResponseDeliversAttachmentBeforeFinalText(t *testing.T) {
 	defer server.Close()
 	dg := &Gateway{Token: "token", APIBaseURL: server.URL, Log: config.NewLogger(config.LevelError), replyIndex: make(map[string]replyContext)}
 	responder := newRuntimeResponder(dg, "request", "channel-1", "source-1", "session", "user")
-	err := responder.SendAgentResponse(&agent.AgentResponse{Response: "generated", Attachments: []media.OutputAttachment{{Filename: "generated.png", MIMEType: "image/png", Data: []byte("image-data")}}})
+	err := responder.SendAgentResponse(&agent.Response{Response: "generated", Attachments: []media.OutputAttachment{{Filename: "generated.png", MIMEType: "image/png", Data: []byte("image-data")}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -752,7 +752,7 @@ func TestDiscordStreamsAttachmentBeforeRequestingFinalText(t *testing.T) {
 	<-streamReturned
 
 	responder.Stream(agent.StreamChunk{Type: agent.ChunkContent, Text: "generated"})
-	if err := responder.SendAgentResponse(&agent.AgentResponse{Response: "generated", Attachments: []media.OutputAttachment{attachment}}); err != nil {
+	if err := responder.SendAgentResponse(&agent.Response{Response: "generated", Attachments: []media.OutputAttachment{attachment}}); err != nil {
 		t.Fatal(err)
 	}
 	mu.Lock()
@@ -787,7 +787,7 @@ func TestDiscordDoesNotRetryFailedStreamAttachmentAtFinalDelivery(t *testing.T) 
 	responder := newRuntimeResponder(dg, "request", "channel-1", "source-1", "session", "user")
 	attachment := media.OutputAttachment{Filename: "generated.png", MIMEType: "image/png", Data: []byte("image-data")}
 	responder.Stream(agent.StreamChunk{Type: agent.ChunkToolResult, Attachments: []media.OutputAttachment{attachment}})
-	if err := responder.SendAgentResponse(&agent.AgentResponse{Response: "generated", Attachments: []media.OutputAttachment{attachment}}); err == nil {
+	if err := responder.SendAgentResponse(&agent.Response{Response: "generated", Attachments: []media.OutputAttachment{attachment}}); err == nil {
 		t.Fatal("streamed attachment failure was not returned at final delivery")
 	}
 	if attachmentCalls != 1 {
@@ -1318,15 +1318,15 @@ func newDiscordTestGateway(t *testing.T, apiBaseURL string) (*Gateway, *broker.B
 	log := config.NewLogger(config.LevelError)
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "oswald.db")
-	memories := testutil.NewMemoryStore(t, dbPath, log)
-	links := accountlinking.NewService(dbPath, memories, nil, log)
+	memories := memorytest.NewStore(t, dbPath, log)
+	links := accounts.NewService(dbPath, memories, nil, log)
 	soulPath := filepath.Join(dir, "soul.md")
 	if err := os.WriteFile(soulPath, []byte("You are Oswald."), 0o600); err != nil {
 		t.Fatalf("write soul fixture: %v", err)
 	}
 	soulStore := soul.NewStore(soulPath)
 	chat := &discordFakeChatter{}
-	ai := agent.NewAgent(chat, registry.New(log), "test-model", soulStore, memories, promptbudget.ContextBudget{PromptLimit: 100000}, governance.GlobalPolicy{MaxExecutions: 12, MaxToolIterations: 8}, log)
+	ai := agent.NewAgent(chat, registry.New(log), "test-model", soulStore, memories, budget.ContextBudget{PromptLimit: 100000}, governance.GlobalPolicy{MaxExecutions: 12, MaxToolIterations: 8}, log)
 	b := broker.NewBroker(ai, 1, log)
 	b.Start()
 	commandService, err := commands.NewServiceWithCommands()

@@ -10,7 +10,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
-	globalstore "github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/globalmemory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memory/global"
 )
 
 type fakeAuthorizer struct {
@@ -63,7 +63,7 @@ func TestCommandsAddListForgetAndDuplicateResponse(t *testing.T) {
 
 func TestCommandsListPagination(t *testing.T) {
 	service, store := newCommandService(t)
-	for i := 1; i <= globalstore.ListPageSize+1; i++ {
+	for i := 1; i <= global.ListPageSize+1; i++ {
 		if _, err := store.Add(context.Background(), fmt.Sprintf("Fact %02d", i)); err != nil {
 			t.Fatal(err)
 		}
@@ -96,10 +96,10 @@ func TestCommandsRejectMalformedIDsAndPages(t *testing.T) {
 	}
 }
 
-func newCommandService(t *testing.T) (*commands.Service, *globalstore.Store) {
+func newCommandService(t *testing.T) (*commands.Service, *global.Store) {
 	t.Helper()
 	log := config.NewLogger(config.LevelError)
-	store, err := globalstore.NewStore(filepath.Join(t.TempDir(), "oswald.db"), nil, "", log)
+	store, err := global.NewStore(filepath.Join(t.TempDir(), "oswald.db"), nil, "", log)
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}

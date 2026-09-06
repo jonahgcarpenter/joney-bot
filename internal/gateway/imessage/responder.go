@@ -51,7 +51,7 @@ func (r *runtimeResponder) SendAgentError(text string) error {
 
 func (r *runtimeResponder) CancelAgentResponse() error { return nil }
 
-func (r *runtimeResponder) SendAgentResponse(response *agent.AgentResponse) error {
+func (r *runtimeResponder) SendAgentResponse(response *agent.Response) error {
 	if response == nil {
 		return nil
 	}

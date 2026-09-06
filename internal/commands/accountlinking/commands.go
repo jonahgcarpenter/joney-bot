@@ -7,18 +7,19 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/accounts"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/database"
-	"github.com/jonahgcarpenter/oswald-ai/internal/runtimeinvalidation"
+	"github.com/jonahgcarpenter/oswald-ai/internal/shared/invalidation"
 )
 
 type handler struct {
 	definition commands.Definition
-	links      *Service
+	links      *accounts.Service
 }
 
 // New creates account-link command handlers backed by the shared account-link service.
-func New(links *Service) []commands.Handler {
+func New(links *accounts.Service) []commands.Handler {
 	return []commands.Handler{
 		&handler{links: links, definition: commands.Definition{Name: "connect", Summary: "Securely connect another authenticated account.", Usage: "/connect [code|cancel]"}},
 		&handler{links: links, definition: commands.Definition{Name: "disconnect", Summary: "Disconnect a linked gateway account.", Usage: "/disconnect [account_number]", UserExclusive: true}},
@@ -90,17 +91,17 @@ func (h *handler) handleConnect(ctx context.Context, req commands.Request) (comm
 
 func linkErrorResult(err error) (commands.Result, error) {
 	switch {
-	case errors.Is(err, ErrChallengeInvalid):
+	case errors.Is(err, accounts.ErrChallengeInvalid):
 		return commands.Result{Text: "That connection code is invalid, expired, or has already been used. Start again with /connect on the account you want to keep."}, nil
-	case errors.Is(err, ErrChallengeSameActor):
+	case errors.Is(err, accounts.ErrChallengeSameActor):
 		return commands.Result{Text: "Enter this code from the other account you want to connect."}, nil
-	case errors.Is(err, ErrGatewayConflict):
+	case errors.Is(err, accounts.ErrGatewayConflict):
 		return commands.Result{Text: "These profiles cannot be connected because both contain different accounts for the same gateway."}, nil
-	case errors.Is(err, ErrMCPConflict):
+	case errors.Is(err, accounts.ErrMCPConflict):
 		return commands.Result{Text: "These profiles have MCP servers with the same name. Rename or remove one of the conflicting servers, then try again."}, nil
-	case errors.Is(err, ErrLinkBanned):
+	case errors.Is(err, accounts.ErrLinkBanned):
 		return commands.Result{Text: "Banned profiles cannot be connected."}, nil
-	case errors.Is(err, ErrPrincipalMismatch):
+	case errors.Is(err, accounts.ErrPrincipalMismatch):
 		return commands.Result{Text: "Your account identity changed. Send the command again."}, nil
 	default:
 		return commands.Result{}, err
@@ -122,18 +123,18 @@ func (h *handler) handleDisconnect(ctx context.Context, req commands.Request) (c
 		return commands.Result{Text: disconnectUsage(h.definition, canonicalUserID, h.links)}, nil
 	}
 
-	accounts, err := h.links.AccountsForUser(canonicalUserID)
+	linkedAccounts, err := h.links.AccountsForUser(canonicalUserID)
 	if err != nil {
 		return commands.Result{}, err
 	}
-	if selection < 1 || selection > len(accounts) {
+	if selection < 1 || selection > len(linkedAccounts) {
 		return commands.Result{Text: disconnectUsage(h.definition, canonicalUserID, h.links)}, nil
 	}
 
-	account := accounts[selection-1]
+	account := linkedAccounts[selection-1]
 	descriptor, err := h.links.DisconnectAccountAs(ctx, req.Principal, account.Gateway, account.Identifier, req.RequestID)
 	if err != nil {
-		if errors.Is(err, ErrPrincipalMismatch) {
+		if errors.Is(err, accounts.ErrPrincipalMismatch) {
 			return commands.Result{Text: "Your account identity changed. Send the command again."}, nil
 		}
 		return commands.Result{Text: fmt.Sprintf("Could not disconnect %s: %v", gatewayLabel(account.Gateway), err)}, nil
@@ -144,7 +145,7 @@ func (h *handler) handleDisconnect(ctx context.Context, req commands.Request) (c
 		return commands.Result{}, err
 	}
 	message := fmt.Sprintf("Disconnected %s: %s.\n\nRemaining linked accounts:\n%s", gatewayLabel(account.Gateway), account.Identifier, renderLinkedAccounts(remaining))
-	return commands.Result{Text: message, Invalidation: &runtimeinvalidation.Event{ExternalIdentities: descriptor.ExternalIdentities, SessionIDs: descriptor.SessionIDs, CloseConnections: true}}, nil
+	return commands.Result{Text: message, Invalidation: &invalidation.Event{ExternalIdentities: descriptor.ExternalIdentities, SessionIDs: descriptor.SessionIDs, CloseConnections: true}}, nil
 }
 
 func (h *handler) startDisconnect(canonicalUserID string) (commands.Result, error) {
@@ -169,7 +170,7 @@ func (h *handler) startDisconnect(canonicalUserID string) (commands.Result, erro
 }
 
 func gatewayLabel(key string) string {
-	if option, ok := GatewayOptionByKey(key); ok {
+	if option, ok := accounts.GatewayOptionByKey(key); ok {
 		return option.Label
 	}
 	return key
@@ -190,7 +191,7 @@ func renderLinkedAccounts(accounts []database.LinkedAccount) string {
 	return strings.Join(lines, "\n")
 }
 
-func disconnectUsage(definition commands.Definition, canonicalUserID string, links *Service) string {
+func disconnectUsage(definition commands.Definition, canonicalUserID string, links *accounts.Service) string {
 	accounts, err := links.AccountsForUser(canonicalUserID)
 	if err != nil || len(accounts) == 0 {
 		return commands.UsageText(definition)
