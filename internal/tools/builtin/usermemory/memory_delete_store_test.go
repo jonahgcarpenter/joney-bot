@@ -14,7 +14,7 @@ func TestHardDeleteMemoryRemovesMemoryGraphAndKeepsTranscript(t *testing.T) {
 	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
 	t.Cleanup(func() { _ = store.Close() })
 	seedAccountUsers(t, store, "user", "other")
-	target, err := store.SaveMemory(ctx, "user", SaveRequest{Scope: ScopeLongTerm, Category: "notes", Statement: "The user likes purple.", Evidence: "I like purple."})
+	target, err := store.SaveMemory(ctx, "user", SaveRequest{Scope: ScopeLongTerm, Category: "durable_preferences", Statement: "The user likes purple.", Evidence: "I like purple.", Confidence: 1, Importance: 5})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -26,12 +26,19 @@ func TestHardDeleteMemoryRemovesMemoryGraphAndKeepsTranscript(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if profile.FactCount != 1 {
+		t.Fatalf("initial profile=%+v", profile)
+	}
 	turn, err := store.AppendSessionTurnForGenerationResult(ctx, "session", "user", profile.Generation, "I like purple.", "Noted.", nil, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := store.HardDeleteMemory(ctx, "user", target.ID, time.Now().UTC()); err != nil {
 		t.Fatal(err)
+	}
+	rebound, err := store.ResolveSessionProfile(ctx, "user", "session", time.Hour)
+	if err != nil || rebound.FactCount != 0 || rebound.Bytes != len(rebound.Content) || rebound.Generation != profile.Generation {
+		t.Fatalf("rebound profile=%+v err=%v", rebound, err)
 	}
 	assertStoreCount(t, store.sql, `SELECT COUNT(*) FROM memory_entries WHERE id = ?`, 0, target.ID)
 	assertStoreCount(t, store.sql, `SELECT COUNT(*) FROM memory_candidates WHERE published_memory_id = ?`, 0, target.ID)

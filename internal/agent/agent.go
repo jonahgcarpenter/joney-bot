@@ -871,7 +871,6 @@ func (a *Agent) Process(ctx context.Context, request Request) (*AgentResponse, e
 
 	var lastResp *llm.ChatResponse
 	var outputAttachments []media.OutputAttachment
-	toolFailureBudgetExhausted := false
 	toolGovernanceStopReason := ""
 	temporaryParserFallback := false
 	imageSizeFallbackUsed := false
@@ -1019,7 +1018,6 @@ func (a *Agent) Process(ctx context.Context, request Request) (*AgentResponse, e
 			config.F("tool_call_count", len(resp.Message.ToolCalls)),
 			config.F("thinking_chars", len(resp.Message.Thinking)),
 			config.F("content_chars", len(resp.Message.Content)),
-			config.F("failure_streak", toolGovernor.ConsecutiveFailures()),
 		)
 
 		// No tool calls — the model is done. Exit the loop.
@@ -1089,8 +1087,6 @@ func (a *Agent) Process(ctx context.Context, request Request) (*AgentResponse, e
 				reqLog.Warn("agent.tool.failure", "tool execution failed",
 					config.F("iteration", iteration),
 					config.F("tool_name", toolName),
-					config.F("failure_streak", toolGovernor.ConsecutiveFailures()),
-					config.F("max_failures", a.toolPolicy.MaxConsecutiveFailures),
 					config.F("duration_ms", time.Since(toolStartedAt).Milliseconds()),
 					config.F("status", "error"),
 					config.ErrorField(execErr),
@@ -1163,10 +1159,8 @@ func (a *Agent) Process(ctx context.Context, request Request) (*AgentResponse, e
 		foregroundCompaction.addToolBatch(foregroundBatch, userPrompt)
 		if reason := toolGovernor.GlobalStopReason(); reason != "" {
 			toolGovernanceStopReason = reason
-			toolFailureBudgetExhausted = reason == governance.ReasonToolFailures
 			reqLog.Warn("agent.tool_budget.exhausted", "tool governance budget exhausted",
 				config.F("reason_code", reason),
-				config.F("failure_streak", toolGovernor.ConsecutiveFailures()),
 				config.F("tool_execution_count", toolGovernor.TotalExecutions()),
 				config.F("tool_iteration_count", toolGovernor.ToolIterations()),
 				config.F("status", "degraded"))
@@ -1216,7 +1210,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (*AgentResponse, e
 				return nil, ctxErr
 			}
 			if err != nil {
-				reqLog.Error("agent.model.error", "model finish failed after tool failures", config.ErrorField(err))
+				reqLog.Error("agent.model.error", "model finish failed after tool budget exhaustion", config.ErrorField(err))
 				if llm.IsContextLengthExceededError(err) {
 					useContextFallback()
 					goto finalize
@@ -1236,7 +1230,6 @@ func (a *Agent) Process(ctx context.Context, request Request) (*AgentResponse, e
 		lastResp = resp
 		reqLog.Debug("agent.loop.complete", "completed agent loop after disabling tools",
 			config.F("iteration_count", toolExecutionCount+1),
-			config.F("failure_streak", toolGovernor.ConsecutiveFailures()),
 			config.F("reason_code", toolGovernanceStopReason),
 			config.F("status", "degraded"),
 		)
@@ -1382,7 +1375,6 @@ finalize:
 		config.F("thinking_chars", len(finalThinking)),
 		config.F("tool_call_count", toolExecutionCount),
 		config.F("duration_ms", time.Since(startedAt).Milliseconds()),
-		config.F("is_tool_failure_budget_exhausted", toolFailureBudgetExhausted),
 		config.F("status", responseStatus),
 	)
 

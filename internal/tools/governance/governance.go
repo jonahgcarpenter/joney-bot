@@ -105,22 +105,22 @@ func (p ToolPolicy) Validate() error {
 
 // GlobalPolicy controls request-wide tool-loop limits.
 type GlobalPolicy struct {
-	MaxExecutions          int
-	MaxToolIterations      int
-	MaxConsecutiveFailures int
+	MaxExecutions     int
+	MaxToolIterations int
 }
 
-// Validate checks the request-wide limits. A zero consecutive-failure limit
-// preserves the existing behavior of disabling that specific guard.
+// DefaultGlobalPolicy returns the fixed request-wide safety ceilings.
+func DefaultGlobalPolicy() GlobalPolicy {
+	return GlobalPolicy{MaxExecutions: 50, MaxToolIterations: 30}
+}
+
+// Validate checks the request-wide limits.
 func (p GlobalPolicy) Validate() error {
 	if p.MaxExecutions <= 0 {
 		return fmt.Errorf("max executions must be positive")
 	}
 	if p.MaxToolIterations <= 0 {
 		return fmt.Errorf("max tool iterations must be positive")
-	}
-	if p.MaxConsecutiveFailures < 0 {
-		return fmt.Errorf("max consecutive failures must not be negative")
 	}
 	return nil
 }
@@ -157,13 +157,12 @@ const (
 // Governor enforces one request's tool policies. It is intentionally not safe
 // for concurrent use because Agent.Process executes one tool batch serially.
 type Governor struct {
-	global              GlobalPolicy
-	stats               map[string]*ToolStats
-	seen                map[string]struct{}
-	toolIterations      int
-	totalExecutions     int
-	consecutiveFailures int
-	globalReason        string
+	global          GlobalPolicy
+	stats           map[string]*ToolStats
+	seen            map[string]struct{}
+	toolIterations  int
+	totalExecutions int
+	globalReason    string
 }
 
 // New creates request-local governance state.
@@ -234,10 +233,6 @@ func (g *Governor) RecordResult(name string, decision Decision, result Result, e
 			delete(g.seen, decision.fingerprint)
 		}
 		stats.Failures++
-		g.consecutiveFailures++
-		if g.global.MaxConsecutiveFailures > 0 && g.consecutiveFailures >= g.global.MaxConsecutiveFailures {
-			g.setGlobalReason(ReasonToolFailures)
-		}
 		return
 	}
 	if result.Outcome != OutcomeProductive {
@@ -245,7 +240,6 @@ func (g *Governor) RecordResult(name string, decision Decision, result Result, e
 		return
 	}
 	stats.Productive++
-	g.consecutiveFailures = 0
 }
 
 // IsToolRetired reports whether one tool has exhausted a per-tool limit.
@@ -274,9 +268,6 @@ func (g *Governor) TotalExecutions() int { return g.totalExecutions }
 
 // ToolIterations returns the number of model responses containing tool calls.
 func (g *Governor) ToolIterations() int { return g.toolIterations }
-
-// ConsecutiveFailures returns the current request-wide execution failure streak.
-func (g *Governor) ConsecutiveFailures() int { return g.consecutiveFailures }
 
 func (g *Governor) toolStats(name string) *ToolStats {
 	stats := g.stats[name]

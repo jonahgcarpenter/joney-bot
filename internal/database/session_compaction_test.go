@@ -153,8 +153,8 @@ INSERT INTO session_summaries (
 	if _, err := db.SQL().Exec(`
 	INSERT INTO durable_jobs (
 	job_kind, idempotency_key, canonical_user_id, session_id, session_generation, covered_from_turn_id, covered_through_turn_id,
-	compaction_target_turn_id, attempt_count, redrive_count, compaction_model, compaction_generator_version, available_at, updated_at
-	) VALUES ('session_compaction', 'too-many-attempts', 'user-a', 'session', 1, ?, ?, ?, 5, 0, 'model', 'v1', '2026-07-18T12:00:00Z', '2026-07-18T12:00:00Z')`, a1, a2, a2); err == nil {
+	compaction_target_turn_id, attempt_count, compaction_model, compaction_generator_version, available_at, updated_at
+	) VALUES ('session_compaction', 'too-many-attempts', 'user-a', 'session', 1, ?, ?, ?, 5, 'model', 'v1', '2026-07-18T12:00:00Z', '2026-07-18T12:00:00Z')`, a1, a2, a2); err == nil {
 		t.Fatal("expected excessive attempt count to fail")
 	}
 	if _, err := db.SQL().Exec(`

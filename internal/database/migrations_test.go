@@ -329,6 +329,14 @@ INSERT INTO durable_jobs(
 	if err := db.SQL().QueryRow(`SELECT corrective_error_code FROM durable_jobs WHERE idempotency_key = 'formation-corrective'`).Scan(&correctiveCode); err != nil || correctiveCode != "invalid_pattern_source" {
 		t.Fatalf("corrective code=%q err=%v", correctiveCode, err)
 	}
+	var artifact string
+	if err := db.SQL().QueryRow(`SELECT artifact_payload FROM durable_jobs WHERE idempotency_key = 'formation-corrective'`).Scan(&artifact); err != nil || artifact != `{"version":1,"turn_ids":[1,2]}` {
+		t.Fatalf("preserved formation artifact=%q err=%v", artifact, err)
+	}
+	var redriveColumns int
+	if err := db.SQL().QueryRow(`SELECT COUNT(*) FROM pragma_table_info('durable_jobs') WHERE name = 'redrive_count'`).Scan(&redriveColumns); err != nil || redriveColumns != 0 {
+		t.Fatalf("v4.0.7 submission reconstruction must survive v4.0.9 counter removal: columns=%d err=%v", redriveColumns, err)
+	}
 	if _, err := db.SQL().Exec(`UPDATE durable_jobs SET model_submission_count = 1 WHERE idempotency_key = 'agent-save'`); err == nil {
 		t.Fatal("agent-save job accepted model submission credit")
 	}

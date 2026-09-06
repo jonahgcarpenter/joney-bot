@@ -76,7 +76,8 @@ func main() {
 		log.Fatal("app.memory_user.init_failed", "failed to initialize user memory store", config.ErrorField(err))
 	}
 	defer userMemStore.Close() // nolint:errcheck
-	userMemStore.SetRetentionPolicy(cfg.RetentionPolicy)
+	retentionPolicy := config.DefaultRetentionPolicy()
+	userMemStore.SetRetentionPolicy(retentionPolicy)
 	log.Debug("app.memory_user.configured", "configured user memory database", config.F("path", config.DefaultAccountLinkPath))
 	globalMemStore, err := globalmemory.NewStore(config.DefaultAccountLinkPath, llmClient, cfg.LLMGatewayEmbeddingModel, rootLog.Server("memory.global"))
 	if err != nil {
@@ -105,7 +106,7 @@ func main() {
 	}
 	indexService := indexruntime.NewService(userMemStore, globalMemStore, llmClient, cfg.LLMGatewayEmbeddingModel, rootLog)
 	indexService.Start(context.Background())
-	maintenanceService := maintenanceruntime.NewService(userMemStore, cfg.RetentionPolicy, rootLog)
+	maintenanceService := maintenanceruntime.NewService(userMemStore, retentionPolicy, rootLog)
 	maintenanceService.Start(context.Background())
 	log.Debug("app.account_link.configured", "configured account link database", config.F("path", config.DefaultAccountLinkPath))
 
@@ -140,11 +141,7 @@ func main() {
 		soulStore,
 		userMemStore,
 		budget,
-		governance.GlobalPolicy{
-			MaxExecutions:          cfg.MaxToolCallsPerRequest,
-			MaxToolIterations:      cfg.MaxToolIterations,
-			MaxConsecutiveFailures: cfg.MaxToolFailureRetries,
-		},
+		governance.DefaultGlobalPolicy(),
 		rootLog,
 		mcpProvider,
 	)

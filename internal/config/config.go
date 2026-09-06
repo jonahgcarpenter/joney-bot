@@ -13,32 +13,28 @@ import (
 
 // Config holds all runtime configuration loaded from environment variables.
 type Config struct {
-	HomeAssistantListenPort         string          // Optional HTTP port for the Home Assistant gateway
-	HomeAssistantAuthToken          string          // Optional shared bearer token; gateway disabled if empty
-	BlueBubblesListenPort           string          // Optional HTTP port for the BlueBubbles webhook listener
-	BlueBubblesURL                  string          // BlueBubbles HTTP(S) base URL
-	BlueBubblesPassword             string          // BlueBubbles server password/token for REST API auth
-	MCPConfigEncryptionKey          string          // Key used to encrypt MCP server URLs and headers at rest
-	LLMGatewayURL                   string          // LLM gateway API base URL (default: "http://localhost:8080")
-	LLMGatewayModel                 string          // LLM gateway model name; required, startup fails if empty
-	LLMGatewayEmbeddingModel        string          // Optional LLM gateway embedding model used for semantic durable-memory retrieval
-	LLMGatewayAPIKey                string          // Optional bearer token for LLM gateway requests
-	LLMGatewayVirtualKey            string          // Optional gateway routing key for LLM gateway requests
-	ModelContextWindow              int             // Optional model context window for prompt budgeting; non-positive uses the package fallback
-	ModelMaxOutputTokens            int             // Optional model output-token reserve for prompt budgeting; non-positive uses the package fallback
-	DiscordToken                    string          // Optional Discord bot token
-	BraveAPIKey                     string          // Optional Brave Search API subscription token
-	SearxngURL                      string          // Optional SearXNG base URL for web search
-	ComfyUIURL                      string          // Optional ComfyUI HTTP(S) base URL; image tools are disabled if empty
-	ComfyUITextToImageWorkflowPath  string          // ComfyUI text-to-image API workflow path
-	ComfyUIImageToImageWorkflowPath string          // ComfyUI image-to-image API workflow path
-	ComfyUIGenerationTimeout        time.Duration   // Maximum duration of one ComfyUI generation
-	MaxToolFailureRetries           int             // Maximum consecutive tool execution failures before the agent stops retrying tools; zero disables the guard
-	MaxToolCallsPerRequest          int             // Emergency maximum tool handler executions in one primary-agent request (default: 50)
-	MaxToolIterations               int             // Emergency maximum model responses containing tool calls in one request (default: 30)
-	WorkerPoolSize                  int             // Number of concurrent broker workers (default: 1)
-	LogLevel                        Level           // Logging verbosity (default: LevelInfo)
-	RetentionPolicy                 RetentionPolicy // Memory retention and maintenance policy
+	HomeAssistantListenPort         string        // Optional HTTP port for the Home Assistant gateway
+	HomeAssistantAuthToken          string        // Optional shared bearer token; gateway disabled if empty
+	BlueBubblesListenPort           string        // Optional HTTP port for the BlueBubbles webhook listener
+	BlueBubblesURL                  string        // BlueBubbles HTTP(S) base URL
+	BlueBubblesPassword             string        // BlueBubbles server password/token for REST API auth
+	MCPConfigEncryptionKey          string        // Key used to encrypt MCP server URLs and headers at rest
+	LLMGatewayURL                   string        // LLM gateway API base URL (default: "http://localhost:8080")
+	LLMGatewayModel                 string        // LLM gateway model name; required, startup fails if empty
+	LLMGatewayEmbeddingModel        string        // Optional LLM gateway embedding model used for semantic durable-memory retrieval
+	LLMGatewayAPIKey                string        // Optional bearer token for LLM gateway requests
+	LLMGatewayVirtualKey            string        // Optional gateway routing key for LLM gateway requests
+	ModelContextWindow              int           // Optional model context window for prompt budgeting; non-positive uses the package fallback
+	ModelMaxOutputTokens            int           // Foreground output capacity reserve and private extraction/compaction max_tokens; non-positive uses the package fallback
+	DiscordToken                    string        // Optional Discord bot token
+	BraveAPIKey                     string        // Optional Brave Search API subscription token
+	SearxngURL                      string        // Optional SearXNG base URL for web search
+	ComfyUIURL                      string        // Optional ComfyUI HTTP(S) base URL; image tools are disabled if empty
+	ComfyUITextToImageWorkflowPath  string        // ComfyUI text-to-image API workflow path
+	ComfyUIImageToImageWorkflowPath string        // ComfyUI image-to-image API workflow path
+	ComfyUIGenerationTimeout        time.Duration // Maximum duration of one ComfyUI generation
+	WorkerPoolSize                  int           // Number of concurrent broker workers (default: 1)
+	LogLevel                        Level         // Logging verbosity (default: LevelInfo)
 }
 
 // RetentionPolicy controls content expiry and periodic memory maintenance.
@@ -54,6 +50,21 @@ type RetentionPolicy struct {
 	BatchSize                int
 }
 
+// DefaultRetentionPolicy returns the code-owned memory retention and maintenance policy.
+func DefaultRetentionPolicy() RetentionPolicy {
+	return RetentionPolicy{
+		RetiredIndexRetention:    168 * time.Hour,
+		SessionInactivity:        24 * time.Hour,
+		PendingDeliveryTimeout:   15 * time.Minute,
+		SuccessfulJobRetention:   168 * time.Hour,
+		DeadJobRetention:         720 * time.Hour,
+		AccountChallengeGrace:    24 * time.Hour,
+		MaintenanceInterval:      time.Hour,
+		DatabaseOptimizeInterval: 24 * time.Hour,
+		BatchSize:                100,
+	}
+}
+
 const (
 	DefaultSoulPath                        = "data/memory/soul/soul.md"
 	DefaultToolsConfigDir                  = "data/tools"
@@ -67,10 +78,6 @@ const (
 func Load() (*Config, error) {
 	// Silently ignore missing .env — production environments use real env vars
 	godotenv.Load() // nolint: errcheck
-	retentionPolicy, err := loadRetentionPolicy()
-	if err != nil {
-		return nil, err
-	}
 	comfyTimeout, err := getEnvPositiveDuration("COMFYUI_GENERATION_TIMEOUT", 2*time.Minute)
 	if err != nil {
 		return nil, err
@@ -96,21 +103,8 @@ func Load() (*Config, error) {
 		ComfyUITextToImageWorkflowPath:  getEnv("COMFYUI_TEXT_TO_IMAGE_WORKFLOW", DefaultComfyUITextToImageWorkflowPath),
 		ComfyUIImageToImageWorkflowPath: getEnv("COMFYUI_IMAGE_TO_IMAGE_WORKFLOW", DefaultComfyUIImageToImageWorkflowPath),
 		ComfyUIGenerationTimeout:        comfyTimeout,
-		MaxToolFailureRetries:           getEnvInt("MAX_TOOL_FAILURE_RETRIES", 0),
-		MaxToolCallsPerRequest:          getEnvInt("MAX_TOOL_CALLS_PER_REQUEST", 50),
-		MaxToolIterations:               getEnvInt("MAX_TOOL_ITERATIONS_PER_REQUEST", 30),
 		WorkerPoolSize:                  getEnvInt("WORKER_POOL_SIZE", 1),
 		LogLevel:                        ParseLevel(getEnv("LOG_LEVEL", "info")),
-		RetentionPolicy:                 retentionPolicy,
-	}
-	if cfg.MaxToolCallsPerRequest <= 0 {
-		return nil, fmt.Errorf("MAX_TOOL_CALLS_PER_REQUEST must be positive")
-	}
-	if cfg.MaxToolIterations <= 0 {
-		return nil, fmt.Errorf("MAX_TOOL_ITERATIONS_PER_REQUEST must be positive")
-	}
-	if cfg.MaxToolFailureRetries < 0 {
-		return nil, fmt.Errorf("MAX_TOOL_FAILURE_RETRIES must not be negative")
 	}
 	if cfg.ComfyUIURL != "" {
 		parsed, err := url.Parse(cfg.ComfyUIURL)
@@ -119,47 +113,6 @@ func Load() (*Config, error) {
 		}
 	}
 	return cfg, nil
-}
-
-func loadRetentionPolicy() (RetentionPolicy, error) {
-	policy := RetentionPolicy{}
-	durationValues := []struct {
-		key          string
-		defaultValue time.Duration
-		destination  *time.Duration
-	}{
-		{key: "MEMORY_RETIRED_INDEX_RETENTION", defaultValue: 168 * time.Hour, destination: &policy.RetiredIndexRetention},
-		{key: "MEMORY_SESSION_INACTIVITY", defaultValue: 24 * time.Hour, destination: &policy.SessionInactivity},
-		{key: "MEMORY_PENDING_DELIVERY_TIMEOUT", defaultValue: 15 * time.Minute, destination: &policy.PendingDeliveryTimeout},
-		{key: "MEMORY_SUCCESSFUL_JOB_RETENTION", defaultValue: 168 * time.Hour, destination: &policy.SuccessfulJobRetention},
-		{key: "MEMORY_DEAD_JOB_RETENTION", defaultValue: 720 * time.Hour, destination: &policy.DeadJobRetention},
-		{key: "MEMORY_ACCOUNT_CHALLENGE_GRACE", defaultValue: 24 * time.Hour, destination: &policy.AccountChallengeGrace},
-		{key: "MEMORY_MAINTENANCE_INTERVAL", defaultValue: time.Hour, destination: &policy.MaintenanceInterval},
-		{key: "MEMORY_DATABASE_OPTIMIZE_INTERVAL", defaultValue: 24 * time.Hour, destination: &policy.DatabaseOptimizeInterval},
-	}
-
-	for i := range durationValues {
-		value, err := getEnvPositiveDuration(durationValues[i].key, durationValues[i].defaultValue)
-		if err != nil {
-			return RetentionPolicy{}, err
-		}
-		*durationValues[i].destination = value
-	}
-
-	batchSize, err := getEnvPositiveInt("MEMORY_MAINTENANCE_BATCH_SIZE", 100)
-	if err != nil {
-		return RetentionPolicy{}, err
-	}
-	policy.BatchSize = batchSize
-
-	if policy.DeadJobRetention < policy.SuccessfulJobRetention {
-		return RetentionPolicy{}, fmt.Errorf("MEMORY_DEAD_JOB_RETENTION must be greater than or equal to MEMORY_SUCCESSFUL_JOB_RETENTION")
-	}
-	if policy.DatabaseOptimizeInterval < policy.MaintenanceInterval {
-		return RetentionPolicy{}, fmt.Errorf("MEMORY_DATABASE_OPTIMIZE_INTERVAL must be greater than or equal to MEMORY_MAINTENANCE_INTERVAL")
-	}
-
-	return policy, nil
 }
 
 // getEnv retrieves an environment variable with a fallback to the default value
@@ -195,16 +148,4 @@ func getEnvPositiveDuration(key string, defaultValue time.Duration) (time.Durati
 		return 0, fmt.Errorf("%s must be a positive Go duration", key)
 	}
 	return d, nil
-}
-
-func getEnvPositiveInt(key string, defaultValue int) (int, error) {
-	value, exists := os.LookupEnv(key)
-	if !exists {
-		return defaultValue, nil
-	}
-	n, err := strconv.Atoi(value)
-	if err != nil || n <= 0 {
-		return 0, fmt.Errorf("%s must be a positive integer", key)
-	}
-	return n, nil
 }

@@ -460,9 +460,12 @@ func TestProcessHidesComfyUIToolsByGatewayAndCurrentImages(t *testing.T) {
 	}
 }
 
-func TestProcessDisablesToolsAfterFailureBudget(t *testing.T) {
+func TestProcessDisablesToolsAfterIterationBudget(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{
-		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "call-1", Function: llm.ToolFunction{Name: "test.fail"}}}}},
+		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", ToolCalls: []llm.ToolCall{
+			{ID: "call-1", Function: llm.ToolFunction{Name: "test.fail"}},
+			{ID: "call-2", Function: llm.ToolFunction{Name: "test.fail"}},
+		}}},
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "finished without tools"}},
 	}}
 	reg := registry.New(config.NewLogger(config.LevelError))
@@ -472,7 +475,7 @@ func TestProcessDisablesToolsAfterFailureBudget(t *testing.T) {
 		t.Fatalf("register tool: %v", err)
 	}
 	agent, _ := newTestAgent(t, chat, nil, reg)
-	agent.toolPolicy.MaxConsecutiveFailures = 1
+	agent.toolPolicy.MaxToolIterations = 1
 
 	resp, err := processAgent(agent, "req-1", "homeassistant", "session-1", "user-1", "Display", "question", nil, nil)
 	if err != nil {
@@ -487,6 +490,11 @@ func TestProcessDisablesToolsAfterFailureBudget(t *testing.T) {
 	}
 	if len(primary[1].Tools) != 0 {
 		t.Fatalf("expected tools disabled, got %+v", primary[1].Tools)
+	}
+	for _, id := range []string{"call-1", "call-2"} {
+		if result := toolResultByID(primary[1].Messages, id); result == nil || !strings.Contains(result.Content, "boom") {
+			t.Fatalf("failed call %s missing correlated result: %+v", id, primary[1].Messages)
+		}
 	}
 }
 
@@ -1468,7 +1476,7 @@ func testToolPolicy() governance.ToolPolicy {
 }
 
 func testGlobalPolicy() governance.GlobalPolicy {
-	return governance.GlobalPolicy{MaxExecutions: 10, MaxToolIterations: 10, MaxConsecutiveFailures: 3}
+	return governance.GlobalPolicy{MaxExecutions: 10, MaxToolIterations: 10}
 }
 
 func productiveResult(content string) governance.Result {

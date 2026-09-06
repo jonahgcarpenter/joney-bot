@@ -244,7 +244,7 @@ func (s *Service) drain(ctx context.Context) {
 				continue
 			}
 			code := compactionErrorCode(err)
-			fields := []config.Field{config.F("job_id", job.ID), config.F("user_id", job.UserID), config.F("session_id", job.SessionID), config.F("session_generation", job.SessionGeneration), config.F("model", job.Model), config.F("generator_version", job.GeneratorVersion), config.F("attempt_count", job.AttemptCount), config.F("invalid_output_retry_count", job.InvalidOutputRetryCount), config.F("model_submission_count", job.ModelSubmissionCount), config.F("redrive_count", job.RedriveCount), config.F("error_code", code)}
+			fields := []config.Field{config.F("job_id", job.ID), config.F("user_id", job.UserID), config.F("session_id", job.SessionID), config.F("session_generation", job.SessionGeneration), config.F("model", job.Model), config.F("generator_version", job.GeneratorVersion), config.F("attempt_count", job.AttemptCount), config.F("invalid_output_retry_count", job.InvalidOutputRetryCount), config.F("model_submission_count", job.ModelSubmissionCount), config.F("error_code", code)}
 			if errors.Is(err, errInvalidCompactionOutput) {
 				if job.InvalidOutputRetryCount < usermemory.SessionCompactionInvalidOutputRetryLimit && job.ModelSubmissionCount < usermemory.SessionCompactionModelSubmissionLimit {
 					if retryErr := s.store.RetryInvalidSessionCompactionJob(context.Background(), job, code); retryErr != nil {
@@ -305,7 +305,7 @@ func (s *Service) process(ctx context.Context, job *usermemory.SessionCompaction
 		return err
 	}
 	if s.log != nil {
-		s.log.Server("session.compaction").Info("session.compaction.complete", "completed session compaction", config.F("job_id", job.ID), config.F("user_id", job.UserID), config.F("session_id", job.SessionID), config.F("covered_turn_count", len(summary.SourceTurnIDs)), config.F("model", job.Model), config.F("generator_version", job.GeneratorVersion), config.F("attempt_count", job.AttemptCount), config.F("invalid_output_retry_count", job.InvalidOutputRetryCount), config.F("redrive_count", job.RedriveCount), config.F("status", "ok"))
+		s.log.Server("session.compaction").Info("session.compaction.complete", "completed session compaction", config.F("job_id", job.ID), config.F("user_id", job.UserID), config.F("session_id", job.SessionID), config.F("covered_turn_count", len(summary.SourceTurnIDs)), config.F("model", job.Model), config.F("generator_version", job.GeneratorVersion), config.F("attempt_count", job.AttemptCount), config.F("invalid_output_retry_count", job.InvalidOutputRetryCount), config.F("model_submission_count", job.ModelSubmissionCount), config.F("status", "ok"))
 	}
 	return nil
 }

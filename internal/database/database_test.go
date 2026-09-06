@@ -190,8 +190,8 @@ func TestSessionsValidateProfileMemorySources(t *testing.T) {
 INSERT INTO sessions (
 	canonical_user_id, session_id, generation, last_seen_at, expires_at,
 	profile_version, profile_version_high_water, renderer_version, source_digest,
-	rendered_content, fact_count, profile_bytes, source_memory_ids
-) VALUES ('user-a', ?, 1, ?, ?, 1, 1, 'v1', 'digest', 'profile', 0, 0, ?)`,
+	rendered_content, source_memory_ids
+) VALUES ('user-a', ?, 1, ?, ?, 1, 1, 'v1', 'digest', 'profile', ?)`,
 			sessionID, formationTestTime, "2026-07-19T12:00:00Z", sources)
 		return err
 	}
