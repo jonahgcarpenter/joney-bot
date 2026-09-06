@@ -9,43 +9,27 @@ import (
 
 // GatewayOption defines how a gateway is presented in the shared account-link flow.
 type GatewayOption struct {
-	Key               string
-	Label             string
-	IdentifierPrompt  string
-	IdentifierExample string
+	Key   string
+	Label string
 }
 
 // SupportedGateways is the shared list of account-link targets exposed by all gateways.
 var SupportedGateways = []GatewayOption{
 	{
-		Key:               "discord",
-		Label:             "Discord",
-		IdentifierPrompt:  "Enter the Discord user ID to link.",
-		IdentifierExample: "123456789012345678",
+		Key:   "discord",
+		Label: "Discord",
 	},
 	{
-		Key:               "homeassistant",
-		Label:             "Home Assistant",
-		IdentifierPrompt:  "Enter the Home Assistant user ID to link.",
-		IdentifierExample: "0123456789abcdef0123456789abcdef",
+		Key:   "homeassistant",
+		Label: "Home Assistant",
 	},
 	{
-		Key:               "imessage",
-		Label:             "iMessage",
-		IdentifierPrompt:  "Enter the iMessage phone number or email to link.",
-		IdentifierExample: "+15551234567",
+		Key:   "imessage",
+		Label: "iMessage",
 	},
 }
 
 var discordMentionRE = regexp.MustCompile(`<@!?(\d+)>`)
-
-// GatewayOptionByIndex returns the 1-based indexed gateway option.
-func GatewayOptionByIndex(index int) (GatewayOption, bool) {
-	if index < 1 || index > len(SupportedGateways) {
-		return GatewayOption{}, false
-	}
-	return SupportedGateways[index-1], true
-}
 
 // GatewayOptionByKey returns the gateway option for key.
 func GatewayOptionByKey(key string) (GatewayOption, bool) {

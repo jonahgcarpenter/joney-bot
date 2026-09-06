@@ -17,7 +17,9 @@ type fakeAuthorizer struct {
 	admins map[string]bool
 }
 
-func (a fakeAuthorizer) IsAdmin(userID string) (bool, error) { return a.admins[userID], nil }
+func (a fakeAuthorizer) IsAdminPrincipal(principal identity.Principal) (bool, error) {
+	return a.admins[principal.CanonicalUserID], nil
+}
 
 func TestCommandsRequireAdmin(t *testing.T) {
 	service, _ := newCommandService(t)

@@ -37,7 +37,7 @@ func commandResponseText(result commands.Result) (string, bool, error) {
 	if err := result.ValidateAttachments(); err != nil {
 		return "", false, err
 	}
-	attachments := result.OrderedAttachments()
+	attachments := result.Attachments
 	if len(attachments) == 0 {
 		return result.Text, true, nil
 	}

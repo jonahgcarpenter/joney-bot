@@ -12,6 +12,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
+	"github.com/jonahgcarpenter/oswald-ai/internal/testutil"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 )
 
@@ -19,7 +20,7 @@ func TestMemoriesListAndForget(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "oswald.db")
 	log := config.NewLogger(config.LevelError)
-	memory := usermemory.NewStore(path, log)
+	memory := testutil.NewMemoryStore(t, path, log)
 	defer memory.Close() // nolint:errcheck
 	accounts := accountlinking.NewService(path, memory, nil, log)
 	defer accounts.Close() // nolint:errcheck
@@ -33,7 +34,7 @@ func TestMemoriesListAndForget(t *testing.T) {
 	}
 	var first usermemory.MemoryEntry
 	for i := 0; i < 30; i++ {
-		entry, err := memory.SaveMemory(ctx, userID, usermemory.SaveRequest{Scope: usermemory.ScopeLongTerm, Category: "notes", Statement: fmt.Sprintf("memory %02d", i)})
+		entry, err := testutil.PublishMemory(ctx, memory, userID, testutil.MemoryFixture{Scope: usermemory.ScopeLongTerm, Category: "notes", Statement: fmt.Sprintf("memory %02d", i)})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -41,7 +42,7 @@ func TestMemoriesListAndForget(t *testing.T) {
 			first = entry
 		}
 	}
-	if _, err := memory.SaveMemory(ctx, otherID, usermemory.SaveRequest{Scope: usermemory.ScopeLongTerm, Category: "identity", Statement: "other tenant secret"}); err != nil {
+	if _, err := testutil.PublishMemory(ctx, memory, otherID, testutil.MemoryFixture{Scope: usermemory.ScopeLongTerm, Category: "identity", Statement: "other tenant secret"}); err != nil {
 		t.Fatal(err)
 	}
 	h := handler{accounts: accounts, memory: memory}
@@ -64,7 +65,7 @@ func TestMemoriesListAndForget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	attachments := result.OrderedAttachments()
+	attachments := result.Attachments
 	if len(attachments) != 1 || attachments[0].MIMEType != "text/plain; charset=utf-8" {
 		t.Fatalf("attachments=%+v", attachments)
 	}
@@ -111,7 +112,7 @@ func TestListResultAlwaysUsesAttachment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Attachment == nil || string(result.Attachment.Data) != "No active memories.\n" || result.Text == "" {
+	if len(result.Attachments) != 1 || string(result.Attachments[0].Data) != "No active memories.\n" || result.Text == "" {
 		t.Fatalf("result=%+v", result)
 	}
 }

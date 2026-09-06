@@ -29,11 +29,11 @@ func (f *fakeCanceler) CancelAllAgentWork() broker.CancelReport {
 
 type fakeAuth struct{ admin bool }
 
-func (f fakeAuth) IsAdmin(string) (bool, error) { return f.admin, nil }
+func (f fakeAuth) IsAdminPrincipal(identity.Principal) (bool, error) { return f.admin, nil }
 
 func TestStopCurrentAndAdminAll(t *testing.T) {
 	canceler := &fakeCanceler{activeReport: broker.CancelReport{ActiveSignaled: 1}, allReport: broker.CancelReport{ActiveSignaled: 2, QueuedCanceled: 3}}
-	service, err := commands.NewService(New(canceler, fakeAuth{admin: true}, nil))
+	service, err := commands.NewServiceWithCommands(commands.Command{Handler: New(canceler, fakeAuth{admin: true}, nil)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +50,7 @@ func TestStopCurrentAndAdminAll(t *testing.T) {
 
 func TestStopAllRequiresAdmin(t *testing.T) {
 	canceler := &fakeCanceler{}
-	service, err := commands.NewService(New(canceler, fakeAuth{}, nil))
+	service, err := commands.NewServiceWithCommands(commands.Command{Handler: New(canceler, fakeAuth{}, nil)})
 	if err != nil {
 		t.Fatal(err)
 	}

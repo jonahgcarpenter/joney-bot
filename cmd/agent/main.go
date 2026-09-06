@@ -62,7 +62,6 @@ func main() {
 		config.F("context_window", budget.ContextWindow),
 		config.F("max_output_tokens", budget.ResponseReserve),
 		config.F("usable_input_limit", budget.UsableInputLimit()),
-		config.F("prompt_budget", budget.PromptBudget()),
 	)
 
 	// The operator-managed soul file is read fresh for every request and used as
@@ -96,7 +95,6 @@ func main() {
 		log.Fatal("app.account_link.init_failed", "failed to initialize account link store", config.ErrorField(err))
 	}
 	defer accountLinkService.Close() // nolint:errcheck
-	userMemStore.SetSpeakerLineResolver(accountLinkService.SpeakerLine)
 	bootstrapCommand, bootstrapCode, err := bootstrapcommands.New(accountLinkService)
 	if err != nil {
 		log.Fatal("app.bootstrap.init_failed", "failed to initialize administrator bootstrap", config.ErrorField(err))

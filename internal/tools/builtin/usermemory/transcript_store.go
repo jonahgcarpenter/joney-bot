@@ -63,7 +63,7 @@ func (s *Store) SearchTranscript(ctx context.Context, userID, sessionID string, 
 		return nil, fmt.Errorf("transcript search query is required")
 	}
 	revision, err := s.LiveIndexRevision(ctx, IndexKindTranscriptFTS)
-	if err != nil || validateRevisionTable(revision.TableName) != nil {
+	if err != nil || validateGeneratedTable(revision.TableName) != nil {
 		return nil, ErrTranscriptSearchUnavailable
 	}
 	table := revision.TableName

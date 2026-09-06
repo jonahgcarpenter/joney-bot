@@ -9,9 +9,9 @@ tmp_dir = "tmp"
   cmd = "go build -tags sqlite_fts5 -o ./tmp/main ./cmd/agent/main.go"
   bin = "./tmp/main"
 
-  exclude_dir = ["assets", "tmp", "vendor", "public", "testdata"]
+  exclude_dir = ["tmp", "vendor", "testdata"]
 
-  include_ext = ["go", "tpl", "tmpl", "html"]
+  include_ext = ["go"]
   exclude_regex = ["_test.go"]
 
   kill_delay = "500ms"

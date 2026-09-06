@@ -209,9 +209,6 @@ func TestGatewayClientAsyncChatHonorsCancellation(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error=%v, want context cancellation", err)
 	}
-	if !WasAsyncJobSubmitted(err) {
-		t.Fatalf("error=%v, want accepted async job marker", err)
-	}
 }
 
 func TestGatewayClientChatReturnsTypedHTTPError(t *testing.T) {
@@ -543,8 +540,8 @@ func TestGatewayClientChatStreamCancellationStopsAcceptedRequest(t *testing.T) {
 	cancel()
 	select {
 	case err := <-result:
-		if !errors.Is(err, context.Canceled) || !WasProviderRequestStarted(err) {
-			t.Fatalf("error=%v started=%t", err, WasProviderRequestStarted(err))
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("error=%v, want context cancellation", err)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("stream cancellation did not return promptly")

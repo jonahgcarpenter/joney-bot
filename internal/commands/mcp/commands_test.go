@@ -20,7 +20,7 @@ func (r staticResolver) LookupHost(context.Context, string) ([]string, error) {
 	return r["example.com"], nil
 }
 
-func (a fakeAuth) IsAdmin(canonicalUserID string) (bool, error) {
+func (a fakeAuth) IsAdminPrincipal(identity.Principal) (bool, error) {
 	return a.admin, nil
 }
 

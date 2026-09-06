@@ -23,8 +23,8 @@ func TestCommandResponseText(t *testing.T) {
 		{
 			name: "single text attachment",
 			result: commands.Result{
-				Text:       "file attached",
-				Attachment: &commands.Attachment{Filename: "export.txt", MIMEType: "text/plain; charset=utf-8", Data: []byte("plain text")},
+				Text:        "file attached",
+				Attachments: []commands.Attachment{{Filename: "export.txt", MIMEType: "text/plain; charset=utf-8", Data: []byte("plain text")}},
 			},
 			want:      "plain text",
 			supported: true,
@@ -43,9 +43,9 @@ func TestCommandResponseText(t *testing.T) {
 		},
 		{
 			name: "non-text attachment",
-			result: commands.Result{Attachment: &commands.Attachment{
+			result: commands.Result{Attachments: []commands.Attachment{{
 				Filename: "export.json", MIMEType: "application/json", Data: []byte(`{"ok":true}`),
-			}},
+			}}},
 			supported: false,
 		},
 		{
@@ -58,9 +58,9 @@ func TestCommandResponseText(t *testing.T) {
 		},
 		{
 			name: "invalid utf8",
-			result: commands.Result{Attachment: &commands.Attachment{
+			result: commands.Result{Attachments: []commands.Attachment{{
 				Filename: "export.txt", MIMEType: "text/plain", Data: []byte{0xff},
-			}},
+			}}},
 			supported: false,
 		},
 	}

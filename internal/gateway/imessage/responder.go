@@ -30,7 +30,7 @@ func (r *runtimeResponder) SendCommandResponse(result commands.Result) error {
 	if err := result.ValidateAttachments(); err != nil {
 		return err
 	}
-	attachments := result.OrderedAttachments()
+	attachments := result.Attachments
 	if len(attachments) == 0 {
 		return r.sendAndRemember(result.Text)
 	}

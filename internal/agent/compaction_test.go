@@ -14,6 +14,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
+	"github.com/jonahgcarpenter/oswald-ai/internal/testutil"
 	"github.com/jonahgcarpenter/oswald-ai/internal/toolnames"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
@@ -108,7 +109,7 @@ func TestProcessCompactsCompletedToolRoundAndContinues(t *testing.T) {
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "finished after compaction"}},
 	}}
 	reg := registry.New(config.NewLogger(config.LevelError))
-	if err := reg.RegisterTool(registry.Spec{Name: "test.large", Description: "Return a large result", Schema: &llm.ToolParameters{Type: "object"}}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
+	if err := registerTestTool(t, reg, registry.Spec{Name: "test.large", Description: "Return a large result", Schema: &llm.ToolParameters{Type: "object"}}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
 		return productiveResult(strings.Repeat("result ", 1000)), nil
 	}); err != nil {
 		t.Fatal(err)
@@ -194,7 +195,7 @@ func TestProcessCompactsDeliveredHistoryAcrossPendingGapAndPages(t *testing.T) {
 	}
 	for i := 0; i <= foregroundDebtPageSize; i++ {
 		if i == 1 {
-			if _, err := store.AppendSessionTurnForGenerationResult(ctx, "session", "user-1", profile.Generation, "pending", "pending answer", nil, time.Hour); err != nil {
+			if _, err := testutil.AppendPendingTurn(ctx, store.Store, "session", "user-1", profile.Generation, "pending", "pending answer", nil, time.Hour); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -248,7 +249,7 @@ func TestProcessRecoversProviderOverflowOnGovernanceFinalCall(t *testing.T) {
 		{response: &llm.ChatResponse{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "final after recovery"}}},
 	}}
 	reg := registry.New(config.NewLogger(config.LevelError))
-	if err := reg.RegisterTool(registry.Spec{Name: "test.lookup", Description: "Look up data", Schema: &llm.ToolParameters{Type: "object"}}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
+	if err := registerTestTool(t, reg, registry.Spec{Name: "test.lookup", Description: "Look up data", Schema: &llm.ToolParameters{Type: "object"}}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
 		return productiveResult("lookup complete"), nil
 	}); err != nil {
 		t.Fatal(err)
@@ -358,13 +359,13 @@ func TestProcessForegroundEvidenceAndFallbackPersistence(t *testing.T) {
 			reg := registry.New(config.NewLogger(config.LevelError))
 			policy := testToolPolicy()
 			policy.History = governance.HistoryPolicy{Mode: governance.HistoryMetadata}
-			if err := reg.RegisterTool(registry.Spec{Name: "test.fetch", Description: "Fetch-like evidence"}, policy, func(context.Context, map[string]interface{}) (governance.Result, error) {
+			if err := registerTestTool(t, reg, registry.Spec{Name: "test.fetch", Description: "Fetch-like evidence"}, policy, func(context.Context, map[string]interface{}) (governance.Result, error) {
 				return governance.Result{Content: liveResult, Outcome: governance.OutcomeProductive, Attachments: []media.OutputAttachment{{Filename: "result.png", MIMEType: "image/png", Data: []byte("private attachment bytes")}}}, nil
 			}); err != nil {
 				t.Fatal(err)
 			}
 			a, store := newTestAgent(t, chat, nil, reg)
-			registerStagingTool(t, reg, store, false)
+			registerStagingTool(t, reg, store.Store, false)
 			a.budget.PromptLimit = 1000
 			if mode == "overflow" {
 				a.budget.PromptLimit = 100000

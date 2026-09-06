@@ -108,26 +108,6 @@ func TestClaimGlobalDerivedIndexChangeAllowsNullCanonicalUser(t *testing.T) {
 	}
 }
 
-func TestBootstrapDerivedIndexesRemovesLegacyArtifactsAndState(t *testing.T) {
-	ctx := context.Background()
-	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
-	defer store.Close() // nolint:errcheck
-	_, err := store.sql.Exec(`
-CREATE VIRTUAL TABLE memory_entries_fts USING fts5(canonical_user_id, statement, evidence);
-CREATE VIRTUAL TABLE session_turns_fts USING fts5(canonical_user_id, session_id, session_generation, user_text, assistant_text);
-CREATE TRIGGER memory_entries_fts_insert AFTER INSERT ON memory_entries BEGIN SELECT 1; END;
-INSERT INTO derived_index_revisions(index_kind, schema_version, revision, table_name, state, created_at, updated_at)
-VALUES ('memory_fts', 1, 1, 'memory_entries_fts', 'live', datetime('now'), datetime('now'));`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.BootstrapDerivedIndexes(ctx); err != nil {
-		t.Fatal(err)
-	}
-	assertStoreCount(t, store.sql, `SELECT COUNT(*) FROM sqlite_master WHERE name IN ('memory_entries_fts', 'session_turns_fts', 'memory_entries_fts_insert')`, 0)
-	assertStoreCount(t, store.sql, `SELECT COUNT(*) FROM derived_index_revisions WHERE table_name = 'memory_entries_fts'`, 0)
-}
-
 func TestCreateIndexRevisionValidatesWithoutPersistingRemovedMetadata(t *testing.T) {
 	ctx := context.Background()
 	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))

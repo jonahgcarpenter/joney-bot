@@ -7,7 +7,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
-	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/testutil"
 )
 
 const testHomeAssistantToken = "0123456789abcdef0123456789abcdef"
@@ -16,7 +16,7 @@ func TestNewServicesFromConfigEnablesConfiguredGateways(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "oswald.db")
-	links := accountlinking.NewService(dbPath, usermemory.NewStore(dbPath, log), nil, log)
+	links := accountlinking.NewService(dbPath, testutil.NewMemoryStore(t, dbPath, log), nil, log)
 
 	runtimeDeps := gatewayruntime.Dependencies{Log: log}
 	services, err := NewServicesFromConfig(&config.Config{HomeAssistantListenPort: "8000", HomeAssistantAuthToken: testHomeAssistantToken}, links, runtimeDeps, log)
@@ -40,7 +40,7 @@ func TestNewServicesFromConfigSkipsInvalidHomeAssistantConfiguration(t *testing.
 	log := config.NewLogger(config.LevelError)
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "oswald.db")
-	links := accountlinking.NewService(dbPath, usermemory.NewStore(dbPath, log), nil, log)
+	links := accountlinking.NewService(dbPath, testutil.NewMemoryStore(t, dbPath, log), nil, log)
 
 	for _, test := range []struct {
 		name   string
@@ -66,7 +66,7 @@ func TestNewServicesFromConfigSkipsInvalidHomeAssistantConfiguration(t *testing.
 func TestNewServicesFromConfigValidatesBlueBubblesConfiguration(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
 	dbPath := filepath.Join(t.TempDir(), "oswald.db")
-	links := accountlinking.NewService(dbPath, usermemory.NewStore(dbPath, log), nil, log)
+	links := accountlinking.NewService(dbPath, testutil.NewMemoryStore(t, dbPath, log), nil, log)
 	runtimeDeps := gatewayruntime.Dependencies{Log: log}
 
 	services, err := NewServicesFromConfig(&config.Config{BlueBubblesListenPort: "8090", BlueBubblesURL: "http://bluebubbles.local", BlueBubblesPassword: "password"}, links, runtimeDeps, log)
@@ -97,7 +97,7 @@ func TestNewServicesFromConfigValidatesBlueBubblesConfiguration(t *testing.T) {
 func TestNewServicesFromConfigFailsWithoutValidGateway(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
 	dbPath := filepath.Join(t.TempDir(), "oswald.db")
-	links := accountlinking.NewService(dbPath, usermemory.NewStore(dbPath, log), nil, log)
+	links := accountlinking.NewService(dbPath, testutil.NewMemoryStore(t, dbPath, log), nil, log)
 	for _, cfg := range []config.Config{
 		{},
 		{DiscordToken: "   "},

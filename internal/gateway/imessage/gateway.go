@@ -1103,28 +1103,7 @@ func (m webhookMessage) replyTargetGUID() string {
 	return ""
 }
 
-func attachmentFormats(attachments []attachment) string {
-	formats := make([]string, 0, len(attachments))
-	for _, attachment := range attachments {
-		format := strings.TrimSpace(attachment.MimeType)
-		if format == "" {
-			format = "unknown"
-		}
-		formats = append(formats, format)
-	}
-	return strings.Join(formats, ",")
-}
-
 // newTempGUID returns a temporary GUID for outbound BlueBubbles send requests.
 func newTempGUID() string {
 	return fmt.Sprintf("oswald-%d", time.Now().UnixNano())
-}
-
-// truncate returns s shortened to at most max runes, appending "..." if cut.
-func truncate(s string, max int) string {
-	r := []rune(s)
-	if len(r) <= max {
-		return s
-	}
-	return string(r[:max]) + "..."
 }

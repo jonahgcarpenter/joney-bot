@@ -10,7 +10,7 @@ import (
 
 func TestResetUsesCanonicalUserAndCurrentSession(t *testing.T) {
 	resetter := &fakeResetter{}
-	service, err := commands.NewService(New(resetter))
+	service, err := commands.NewServiceWithCommands(commands.Command{Handler: New(resetter)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -29,7 +29,7 @@ func TestResetUsesCanonicalUserAndCurrentSession(t *testing.T) {
 
 func TestResetRejectsUnauthenticatedPrincipal(t *testing.T) {
 	resetter := &fakeResetter{}
-	service, err := commands.NewService(New(resetter))
+	service, err := commands.NewServiceWithCommands(commands.Command{Handler: New(resetter)})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -92,7 +92,7 @@ func (r *runtimeResponder) SendCommandResponse(result commands.Result) error {
 	if err := result.ValidateAttachments(); err != nil {
 		return err
 	}
-	attachments := result.OrderedAttachments()
+	attachments := result.Attachments
 	if len(attachments) == 0 {
 		_, err := r.gateway.sendMessage(r.channelID, result.Text, r.replyToID)
 		return err
@@ -102,7 +102,7 @@ func (r *runtimeResponder) SendCommandResponse(result commands.Result) error {
 		if i == 0 {
 			replyToID = r.replyToID
 		}
-		attachmentResult := commands.Result{Attachment: &attachments[i]}
+		attachmentResult := commands.Result{Attachments: attachments[i : i+1]}
 		if _, err := r.gateway.sendCommandAttachment(r.channelID, attachmentResult, replyToID); err != nil {
 			return err
 		}

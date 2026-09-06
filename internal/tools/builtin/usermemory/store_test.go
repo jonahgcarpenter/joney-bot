@@ -94,7 +94,7 @@ func TestStoreSaveSearchAndHardDeleteMemory(t *testing.T) {
 	}
 }
 
-func TestSaveMemoryCreatesNewObservationAfterHardDelete(t *testing.T) {
+func TestPublicationCreatesNewObservationAfterHardDelete(t *testing.T) {
 	ctx := context.Background()
 	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
 	defer store.Close() // nolint:errcheck
@@ -121,7 +121,7 @@ func TestSaveMemoryCreatesNewObservationAfterHardDelete(t *testing.T) {
 	}
 }
 
-func TestSaveMemoryDoesNotReuseHardDeletedMemory(t *testing.T) {
+func TestPublicationDoesNotReuseHardDeletedMemory(t *testing.T) {
 	ctx := context.Background()
 	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
 	defer store.Close() // nolint:errcheck
@@ -149,25 +149,25 @@ func TestSaveMemoryDoesNotReuseHardDeletedMemory(t *testing.T) {
 	}
 }
 
-func TestSaveMemoryDeduplicatesBackgroundFallbackIdentity(t *testing.T) {
+func TestPublicationDeduplicatesBackgroundFallbackIdentity(t *testing.T) {
 	store := newFormationTestStore(t)
 	output := evaluatedFormationCandidate(t, "I build Atlas.", "I build Atlas.", "The user builds Atlas.", memoryformation.CategoryProjects)
 	background, _, err := store.ProposeCandidate(context.Background(), "user", CandidateProposal{Output: output, IdempotencyKey: "background-fallback"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	compatibility, err := store.SaveMemory(context.Background(), "user", SaveRequest{Scope: ScopeLongTerm, Category: "projects", Statement: output.Statement, Evidence: "compatibility evidence"})
+	observation, err := store.SaveMemory(context.Background(), "user", SaveRequest{Scope: ScopeLongTerm, Category: "projects", Statement: output.Statement, Evidence: "additional evidence"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if compatibility.ID != background.PublishedMemoryID {
-		t.Fatalf("compatibility memory=%d background memory=%d", compatibility.ID, background.PublishedMemoryID)
+	if observation.ID != background.PublishedMemoryID {
+		t.Fatalf("reinforced memory=%d background memory=%d", observation.ID, background.PublishedMemoryID)
 	}
 	var memoryCount, candidateCount int
 	if err := store.sql.QueryRow(`SELECT COUNT(*) FROM memory_entries WHERE canonical_user_id = 'user' AND status = 'active'`).Scan(&memoryCount); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.sql.QueryRow(`SELECT COUNT(*) FROM memory_candidates WHERE canonical_user_id = 'user' AND published_memory_id = ?`, compatibility.ID).Scan(&candidateCount); err != nil {
+	if err := store.sql.QueryRow(`SELECT COUNT(*) FROM memory_candidates WHERE canonical_user_id = 'user' AND published_memory_id = ?`, observation.ID).Scan(&candidateCount); err != nil {
 		t.Fatal(err)
 	}
 	if memoryCount != 1 || candidateCount != 2 {
@@ -175,7 +175,7 @@ func TestSaveMemoryDeduplicatesBackgroundFallbackIdentity(t *testing.T) {
 	}
 }
 
-func TestSaveMemorySupersedesBackgroundFallbackByNormalizedStatement(t *testing.T) {
+func TestPublicationSupersedesBackgroundFallbackByNormalizedStatement(t *testing.T) {
 	store := newFormationTestStore(t)
 	oldOutput := evaluatedFormationCandidate(t, "I prefer tea.", "I prefer tea.", "The user prefers tea.", memoryformation.CategoryDurablePreferences)
 	oldCandidate, _, err := store.ProposeCandidate(context.Background(), "user", CandidateProposal{Output: oldOutput, IdempotencyKey: "background-tea"})
@@ -184,7 +184,7 @@ func TestSaveMemorySupersedesBackgroundFallbackByNormalizedStatement(t *testing.
 	}
 	replacement, err := store.SaveMemory(context.Background(), "user", SaveRequest{
 		Scope: ScopeLongTerm, Category: "durable_preferences", Statement: "The user prefers coffee.",
-		Evidence: "I prefer coffee.", Supersedes: "  THE user prefers tea  ",
+		Evidence: "I prefer coffee.", Confidence: 1, Supersedes: "  THE user prefers tea  ",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -193,12 +193,12 @@ func TestSaveMemorySupersedesBackgroundFallbackByNormalizedStatement(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if old.Status != StatusSuperseded || replacement.SupersedesID != old.ID {
+	if old.Status != "superseded" || replacement.SupersedesID != old.ID {
 		t.Fatalf("old=%+v replacement=%+v", old, replacement)
 	}
 }
 
-func TestSaveMemoryUpsertKeepsTenantScopedIDAndVector(t *testing.T) {
+func TestPublicationReinforcementKeepsTenantScopedIDAndOutbox(t *testing.T) {
 	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
 	defer store.Close() // nolint:errcheck
 	seedAccountUsers(t, store, "user-1", "user-2")
@@ -216,7 +216,7 @@ func TestSaveMemoryUpsertKeepsTenantScopedIDAndVector(t *testing.T) {
 		t.Fatal(err)
 	}
 	if updated.ID != first.ID || updated.UserID != "user-1" || updated.Statement != "User one fact." {
-		t.Fatalf("upsert returned wrong tenant memory: %+v", updated)
+		t.Fatalf("reinforcement returned wrong tenant memory: %+v", updated)
 	}
 	var secondChanges int
 	if err := store.sql.QueryRow(`SELECT count(*) FROM durable_jobs WHERE job_kind = 'derived_index' AND entity_kind = 'memory' AND entity_id = ?`, second.ID).Scan(&secondChanges); err != nil {
@@ -278,7 +278,7 @@ func TestRecallAndListFilterExpiryWithoutMutatingRetentionState(t *testing.T) {
 	assertStoreCount(t, store.sql, `SELECT COUNT(*) FROM memory_candidates WHERE published_memory_id = ?`, 1, memory.ID)
 }
 
-func TestStoreSessionContextIncludesSummaryAndRecentTurn(t *testing.T) {
+func TestStoreRecentExchangesKeepExactRoles(t *testing.T) {
 	store, err := NewSQLiteStore(filepath.Join(t.TempDir(), "oswald.db"), fakeMemoryEmbedder{}, "fake-embed", config.NewLogger(config.LevelError))
 	if err != nil {
 		t.Fatal(err)
@@ -294,12 +294,16 @@ func TestStoreSessionContextIncludesSummaryAndRecentTurn(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ctx, err := store.BuildContext(context.Background(), "usr_test", "session-1", "purple memory", ContextOptions{RecentTurns: 2, ContextBudgetChars: 4000})
+	turns, err := store.RecentCompletedExchanges(context.Background(), "usr_test", "session-1", 1, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(ctx.Block, "Stable User Profile") || strings.Contains(ctx.Block, "Current Session Summary") || !strings.Contains(ctx.Block, "Recent Exchanges") {
-		t.Fatalf("unexpected context block:\n%s", ctx.Block)
+	if len(turns) != 1 {
+		t.Fatalf("unexpected exchanges: %+v", turns)
+	}
+	messages := SessionTurnMessages(turns[0])
+	if len(messages) != 2 || messages[0].Role != "user" || messages[0].Content != "I like purple" || messages[1].Role != "assistant" || messages[1].Content != "Noted." {
+		t.Fatalf("unexpected messages: %+v", messages)
 	}
 }
 
@@ -316,21 +320,18 @@ func TestStoreSessionContextKeepsToolMetadataOutOfProseAndScopesUser(t *testing.
 		t.Fatal(err)
 	}
 
-	retrieved, err := store.BuildContext(ctx, "user-1", "shared-session", "follow up", ContextOptions{RecentTurns: 4, ContextBudgetChars: 4000})
+	retrieved, err := store.RecentCompletedExchanges(ctx, "user-1", "shared-session", 1, 4)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(retrieved.Block, "Assistant: first answer") || strings.Contains(retrieved.Block, "Tools used:") {
-		t.Fatalf("internal tool metadata leaked into context prose:\n%s", retrieved.Block)
+	if len(retrieved) != 1 || retrieved[0].UserText != "first question" || SessionTurnMessages(retrieved[0])[1].Content != "first answer" {
+		t.Fatalf("unexpected tenant exchange: %+v", retrieved)
 	}
-	if strings.Contains(retrieved.Block, "private") || strings.Contains(retrieved.Block, "other.secret") {
-		t.Fatalf("context included another user's turn:\n%s", retrieved.Block)
-	}
-	if strings.Join(retrieved.RecentToolNames, ",") != "github.get_issue,web.search" {
-		t.Fatalf("recent tool names = %+v", retrieved.RecentToolNames)
+	if strings.Join(retrieved[0].ToolNames, ",") != "github.get_issue,web.search" {
+		t.Fatalf("recent tool names = %+v", retrieved[0].ToolNames)
 	}
 
-	turns, err := store.RecentSessionTurns("user-2", "shared-session", 1, 4)
+	turns, err := store.RecentCompletedExchanges(ctx, "user-2", "shared-session", 1, 4)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -339,7 +340,7 @@ func TestStoreSessionContextKeepsToolMetadataOutOfProseAndScopesUser(t *testing.
 	}
 }
 
-func TestBuildContextDoesNotEmbedQuery(t *testing.T) {
+func TestRecentCompletedExchangesDoNotEmbed(t *testing.T) {
 	embedder := &countingMemoryEmbedder{}
 	store, err := NewSQLiteStore(filepath.Join(t.TempDir(), "oswald.db"), embedder, "fake-embed", config.NewLogger(config.LevelError))
 	if err != nil {
@@ -357,7 +358,7 @@ func TestBuildContextDoesNotEmbedQuery(t *testing.T) {
 	}
 	seedEmbeddingCount := len(embedder.inputs)
 
-	_, err = store.BuildContext(context.Background(), "usr_test", "session-1", "purple memory", ContextOptions{RecentTurns: 1, ContextBudgetChars: 4000})
+	_, err = store.RecentCompletedExchanges(context.Background(), "usr_test", "session-1", 1, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -746,9 +747,9 @@ func TestMergeUsersTxPreservesProfilesAndCompactedSessionCollision(t *testing.T)
 	if err != nil || resolved.VersionID != activeProfileID {
 		t.Fatalf("frozen merged profile=%+v err=%v", resolved, err)
 	}
-	contextResult, err := store.BuildContext(ctx, "winner", "shared", "Beacon", ContextOptions{Generation: activeGeneration, RecentTurns: 10, ContextBudgetChars: 8000})
-	if err != nil || !strings.Contains(contextResult.Block, "loser two") {
-		t.Fatalf("merged prompt context=%q err=%v", contextResult.Block, err)
+	contextResult, err := store.RecentCompletedExchanges(ctx, "winner", "shared", activeGeneration, 10)
+	if err != nil || len(contextResult) == 0 || !strings.Contains(contextResult[0].UserText, "loser two") {
+		t.Fatalf("merged prompt exchanges=%+v err=%v", contextResult, err)
 	}
 	rebuildTestIndexes(t, store)
 	transcript, err := store.SearchTranscript(ctx, "winner", "shared", activeGeneration, "loser two", 5)
@@ -767,7 +768,7 @@ func TestMergeUsersTxPreservesProfilesAndCompactedSessionCollision(t *testing.T)
 
 func publishMergeTestSummary(t *testing.T, store *Store, userID, sessionID string, generation int, fromID, throughID int64, narrative string) (SessionSummary, int64) {
 	t.Helper()
-	jobID, err := store.EnqueueSessionCompactionJob(context.Background(), userID, sessionID, generation, fromID, throughID, compactionTestModel, compactionTestGeneratorVersion)
+	jobID, err := store.EnqueueSessionCompactionCampaignJob(context.Background(), userID, sessionID, generation, fromID, throughID, throughID, compactionTestModel, compactionTestGeneratorVersion)
 	if err != nil {
 		t.Fatal(err)
 	}

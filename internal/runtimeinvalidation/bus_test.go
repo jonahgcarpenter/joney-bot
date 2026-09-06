@@ -1,7 +1,6 @@
 package runtimeinvalidation
 
 import (
-	"errors"
 	"sync"
 	"testing"
 )
@@ -29,18 +28,32 @@ func TestBusSubscribePublishAndUnsubscribe(t *testing.T) {
 	}
 }
 
-func TestBusPublishesAllSubscribersAndReturnsErrors(t *testing.T) {
+func TestBusPublishesAllSubscribers(t *testing.T) {
 	bus := NewBus()
 	called := 0
-	bus.SubscribeError(func(Event) error {
-		called++
-		return errors.New("subscriber failed")
-	})
 	bus.Subscribe(func(Event) { called++ })
-	if err := bus.Publish(Event{}); err == nil {
-		t.Fatal("publish succeeded despite subscriber failure")
-	}
+	bus.Subscribe(func(Event) { called++ })
+	bus.Publish(Event{})
 	if called != 2 {
 		t.Fatalf("subscriber calls=%d want 2", called)
+	}
+}
+
+func TestBusSubscriberCanChangeSubscriptions(t *testing.T) {
+	bus := NewBus()
+	first, second := 0, 0
+	var unsubscribe func()
+	unsubscribe = bus.Subscribe(func(Event) {
+		first++
+		unsubscribe()
+		bus.Subscribe(func(Event) { second++ })
+	})
+	bus.Publish(Event{})
+	if first != 1 || second != 0 {
+		t.Fatalf("publication did not use subscriber snapshot: first=%d second=%d", first, second)
+	}
+	bus.Publish(Event{})
+	if first != 1 || second != 1 {
+		t.Fatalf("subscription changes were not applied: first=%d second=%d", first, second)
 	}
 }

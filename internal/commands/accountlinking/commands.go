@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
+	"github.com/jonahgcarpenter/oswald-ai/internal/database"
 	"github.com/jonahgcarpenter/oswald-ai/internal/runtimeinvalidation"
 )
 
@@ -174,7 +175,7 @@ func gatewayLabel(key string) string {
 	return key
 }
 
-func renderLinkedAccounts(accounts []LinkedAccount) string {
+func renderLinkedAccounts(accounts []database.LinkedAccount) string {
 	if len(accounts) == 0 {
 		return "- none"
 	}

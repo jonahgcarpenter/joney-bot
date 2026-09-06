@@ -17,7 +17,6 @@ type LinkedAccount struct {
 
 // AccountLinkData is the complete account-link dataset persisted in SQLite.
 type AccountLinkData struct {
-	Version      int                    `json:"version"`
 	Users        map[string]AccountUser `json:"users"`
 	AccountIndex map[string]string      `json:"account_index"`
 }
@@ -25,7 +24,6 @@ type AccountLinkData struct {
 // LoadAccountLinks reads all canonical users and linked accounts.
 func (d *DB) LoadAccountLinks() (AccountLinkData, error) {
 	data := AccountLinkData{
-		Version:      1,
 		Users:        make(map[string]AccountUser),
 		AccountIndex: make(map[string]string),
 	}

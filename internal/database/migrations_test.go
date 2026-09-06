@@ -544,7 +544,7 @@ func TestPermanentV400CanonicalTableInventory(t *testing.T) {
 		"memory_entries", "schema_migration_versions", "session_summaries",
 		"session_turns", "sessions",
 	}
-	rows, err := db.SQL().Query(`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT GLOB 'memory_entries_fts*' AND name NOT GLOB 'session_turns_fts*' ORDER BY name`)
+	rows, err := db.SQL().Query(`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -574,13 +574,45 @@ func TestPermanentV400CanonicalObjectInventory(t *testing.T) {
 		if err := db.SQL().QueryRow(`
 SELECT COUNT(*) FROM sqlite_master
 WHERE type = ? AND name NOT LIKE 'sqlite_%'
-	AND name != 'schema_migration_versions'
-	AND name NOT GLOB 'memory_entries_fts*'
-	AND name NOT GLOB 'session_turns_fts*'`, objectType).Scan(&got); err != nil {
+	AND name != 'schema_migration_versions'`, objectType).Scan(&got); err != nil {
 			t.Fatal(err)
 		}
 		if got != want {
 			t.Fatalf("canonical %s count=%d, want %d", objectType, got, want)
+		}
+	}
+}
+
+func TestPermanentMigrationsRejectNonemptyLedgerlessSchemaWithoutMutation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "unsupported.db")
+	raw, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	if _, err := raw.Exec(`CREATE TABLE existing (id INTEGER PRIMARY KEY, value TEXT NOT NULL); INSERT INTO existing VALUES (1, 'preserve me'); CREATE VIEW existing_view AS SELECT value FROM existing;`); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if db, err := Open(path, nil); err == nil {
+			db.Close()
+			t.Fatal("expected nonempty ledgerless database rejection")
+		} else if !strings.Contains(err.Error(), "unsupported nonempty database without a permanent migration ledger") {
+			t.Fatalf("unexpected rejection: %v", err)
+		}
+		var count int
+		if err := raw.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'`).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 2 {
+			t.Fatalf("rejected database schema changed: %d objects", count)
+		}
+		var value string
+		if err := raw.QueryRow(`SELECT value FROM existing_view`).Scan(&value); err != nil {
+			t.Fatal(err)
+		}
+		if value != "preserve me" {
+			t.Fatalf("rejected database data changed: %q", value)
 		}
 	}
 }

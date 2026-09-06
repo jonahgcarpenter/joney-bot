@@ -21,6 +21,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/testutil"
 	globalmemory "github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/globalmemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 )
@@ -93,7 +94,7 @@ func evaluateIssue80Formation(t *testing.T) {
 	item := issue80Memory("The user prefers tea.", "I prefer tea.", "durable_preferences", "preference.drink", "tea", "user_statement", 0.2)
 	extractor.memories = []usermemory.MemorySaveItem{item}
 	ordinaryTurn := issue80DeliverAndDrain(t, store, worker, "ordinary", "ordinary", "I prefer tea.")
-	ordinary := issue80CandidateForTurn(t, store, path, "ordinary", ordinaryTurn)
+	ordinary := issue80CandidateForTurn(t, path, "ordinary", ordinaryTurn)
 	if ordinary.State != "proposed" || ordinary.FormationMode != "automatic_extraction" || ordinary.Confidence != item.Confidence || ordinary.PublishedMemoryID != 0 {
 		t.Fatalf("ordinary candidate=%+v", ordinary)
 	}
@@ -101,7 +102,7 @@ func evaluateIssue80Formation(t *testing.T) {
 
 	extractor.memories = []usermemory.MemorySaveItem{item}
 	explicitTurn := issue80DeliverAndDrain(t, store, worker, "explicit", "explicit", "Please remember that I prefer tea.")
-	explicit := issue80CandidateForTurn(t, store, path, "explicit", explicitTurn)
+	explicit := issue80CandidateForTurn(t, path, "explicit", explicitTurn)
 	if explicit.State != "approved" || explicit.FormationMode != "explicit_remember" || explicit.Confidence != 0.9 || explicit.PublishedMemoryID == 0 {
 		t.Fatalf("explicit candidate=%+v", explicit)
 	}
@@ -152,11 +153,11 @@ func evaluateIssue80TenantRetrieval(t *testing.T) {
 	embedder := &issue80Embedder{vector: []float64{1, 0}}
 	store, path := issue80Store(t, embedder, "issue80-vector", "alpha", "beta")
 	ctx := context.Background()
-	alpha, err := store.SaveMemory(ctx, "alpha", usermemory.SaveRequest{Scope: usermemory.ScopeLongTerm, Category: "projects", Statement: "Alpha's similar marker is ORBIT-ALPHA.", Evidence: "alpha", Confidence: 1, Importance: 5})
+	alpha, err := testutil.PublishMemory(ctx, store, "alpha", testutil.MemoryFixture{Scope: usermemory.ScopeLongTerm, Category: "projects", Statement: "Alpha's similar marker is ORBIT-ALPHA.", Evidence: "alpha", Confidence: 1, Importance: 5})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.SaveMemory(ctx, "beta", usermemory.SaveRequest{Scope: usermemory.ScopeLongTerm, Category: "projects", Statement: "Beta's similar marker is ORBIT-BETA.", Evidence: "beta", Confidence: 1, Importance: 5}); err != nil {
+	if _, err := testutil.PublishMemory(ctx, store, "beta", testutil.MemoryFixture{Scope: usermemory.ScopeLongTerm, Category: "projects", Statement: "Beta's similar marker is ORBIT-BETA.", Evidence: "beta", Confidence: 1, Importance: 5}); err != nil {
 		t.Fatal(err)
 	}
 	issue80BuildMemoryIndexes(t, store)
@@ -243,7 +244,7 @@ func evaluateIssue80UnsafeInputs(t *testing.T) {
 		t.Run(scenario.name, func(t *testing.T) {
 			extractor.memories = []usermemory.MemorySaveItem{scenario.memory}
 			turnID := issue80DeliverAndDrain(t, store, worker, "user", fmt.Sprintf("unsafe-%d", i), scenario.text)
-			candidate := issue80CandidateForTurn(t, store, path, "user", turnID)
+			candidate := issue80CandidateForTurn(t, path, "user", turnID)
 			if candidate.State != "rejected" || candidate.FormationMode != "automatic_extraction" || candidate.PublishedMemoryID != 0 || !strings.Contains(candidate.DecisionReason, scenario.wantReason) {
 				t.Fatalf("unsafe candidate=%+v want_reason=%q", candidate, scenario.wantReason)
 			}
@@ -276,7 +277,7 @@ func evaluateIssue80UnsafeInputs(t *testing.T) {
 func evaluateIssue80GlobalMemory(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "oswald.db")
 	log := config.NewLogger(config.LevelError)
-	memory := usermemory.NewStore(path, log)
+	memory := testutil.NewMemoryStore(t, path, log)
 	defer memory.Close() // nolint:errcheck
 	accounts := accountlinking.NewService(path, memory, nil, log)
 	defer accounts.Close() // nolint:errcheck
@@ -329,7 +330,7 @@ func evaluateIssue80GlobalMemory(t *testing.T) {
 	extractor := &issue80Extractor{memories: []usermemory.MemorySaveItem{issue80Memory("The user's private marker is ERASURE-PRIVATE.", "My private marker is ERASURE-PRIVATE.", "identity", "identity.private_marker", "ERASURE-PRIVATE", "user_statement", 1)}}
 	worker := NewService(memory, extractor, "issue80-model", log)
 	turnID := issue80DeliverAndDrain(t, memory, worker, targetID, "erasure-source", "My private marker is ERASURE-PRIVATE.")
-	candidate := issue80CandidateForTurn(t, memory, path, targetID, turnID)
+	candidate := issue80CandidateForTurn(t, path, targetID, turnID)
 	if candidate.State != "approved" || candidate.SourceTurnID != turnID || candidate.SourceRequestID != "erasure-source" || candidate.SourceSessionID != "session" || candidate.PublishedMemoryID == 0 || candidate.Provenance != "user_statement" {
 		t.Fatalf("source-linked erasure candidate=%+v", candidate)
 	}
@@ -395,7 +396,7 @@ func evaluateIssue80SessionContinuity(t *testing.T) {
 	}
 	var turnIDs []int64
 	for i, text := range []string{"Atlas decision uses Go", "Ship Atlas on Friday", "Newest tail remains verbatim"} {
-		turn, err := store.AppendSessionTurnForGenerationResult(ctx, "session", "user", profile.Generation, text, fmt.Sprintf("answer-%d", i), nil, time.Hour)
+		turn, err := testutil.AppendPendingTurn(ctx, store, "session", "user", profile.Generation, text, fmt.Sprintf("answer-%d", i), nil, time.Hour)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -404,7 +405,7 @@ func evaluateIssue80SessionContinuity(t *testing.T) {
 		}
 		turnIDs = append(turnIDs, turn.ID)
 	}
-	jobID, err := store.EnqueueSessionCompactionJob(ctx, "user", "session", profile.Generation, turnIDs[0], turnIDs[1], "issue80-model", "issue80-v1")
+	jobID, err := store.EnqueueSessionCompactionCampaignJob(ctx, "user", "session", profile.Generation, turnIDs[0], turnIDs[1], turnIDs[1], "issue80-model", "issue80-v1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -441,7 +442,7 @@ func evaluateIssue80SessionContinuity(t *testing.T) {
 func evaluateIssue80ForgetLifecycle(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "oswald.db")
 	log := config.NewLogger(config.LevelError)
-	store := usermemory.NewStore(path, log)
+	store := testutil.NewMemoryStore(t, path, log)
 	defer store.Close() // nolint:errcheck
 	accounts := accountlinking.NewService(path, store, nil, log)
 	defer accounts.Close() // nolint:errcheck
@@ -452,7 +453,7 @@ func evaluateIssue80ForgetLifecycle(t *testing.T) {
 	extractor := &issue80Extractor{memories: []usermemory.MemorySaveItem{issue80Memory("The user's private marker is GRACE-SCRUB.", "My private marker is GRACE-SCRUB.", "identity", "identity.private_marker", "GRACE-SCRUB", "user_statement", 1)}}
 	worker := NewService(store, extractor, "issue80-model", log)
 	turnID := issue80DeliverAndDrain(t, store, worker, userID, "forget-source", "My private marker is GRACE-SCRUB.")
-	candidate := issue80CandidateForTurn(t, store, path, userID, turnID)
+	candidate := issue80CandidateForTurn(t, path, userID, turnID)
 	if candidate.State != "approved" || candidate.SourceTurnID != turnID || candidate.SourceRequestID != "forget-source" || candidate.PublishedMemoryID == 0 {
 		t.Fatalf("source-linked forget candidate=%+v", candidate)
 	}
@@ -540,7 +541,7 @@ func issue80DeliverAndDrain(t *testing.T, store *usermemory.Store, worker *Servi
 		t.Fatal(err)
 	}
 	ctx := requestctx.WithMetadata(context.Background(), requestctx.Metadata{RequestID: requestID})
-	turn, err := store.AppendSessionTurnForGenerationResult(ctx, "session", userID, profile.Generation, text, "ack", nil, time.Hour)
+	turn, err := testutil.AppendPendingTurn(ctx, store, "session", userID, profile.Generation, text, "ack", nil, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -563,19 +564,23 @@ func issue80Memories(t *testing.T, store *usermemory.Store, userID string) []use
 	return memories
 }
 
-func issue80CandidateForTurn(t *testing.T, store *usermemory.Store, path, userID string, turnID int64) usermemory.FormationCandidate {
+func issue80CandidateForTurn(t *testing.T, path, userID string, turnID int64) usermemory.FormationCandidate {
 	t.Helper()
 	db, err := database.Open(path, config.NewLogger(config.LevelError))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close() // nolint:errcheck
-	var candidateID int64
-	if err := db.SQL().QueryRow(`SELECT id FROM memory_candidates WHERE canonical_user_id = ? AND source_turn_id = ? ORDER BY id DESC LIMIT 1`, userID, turnID).Scan(&candidateID); err != nil {
-		t.Fatal(err)
-	}
-	candidate, err := store.LoadCandidate(context.Background(), userID, candidateID)
-	if err != nil {
+	var candidate usermemory.FormationCandidate
+	if err := db.SQL().QueryRow(`SELECT candidate.id, candidate.state, candidate.formation_mode,
+		candidate.confidence, candidate.decision_reason, COALESCE(candidate.published_memory_id, 0),
+		candidate.provenance_type, source.id, source.source_request_id, source.session_id, source.session_generation
+		FROM memory_candidates candidate JOIN session_turns source
+		ON source.id = candidate.source_turn_id AND source.canonical_user_id = candidate.canonical_user_id
+		WHERE candidate.canonical_user_id = ? AND candidate.source_turn_id = ? ORDER BY candidate.id DESC LIMIT 1`, userID, turnID).Scan(
+		&candidate.ID, &candidate.State, &candidate.FormationMode, &candidate.Confidence, &candidate.DecisionReason,
+		&candidate.PublishedMemoryID, &candidate.Provenance, &candidate.SourceTurnID,
+		&candidate.SourceRequestID, &candidate.SourceSessionID, &candidate.SourceGeneration); err != nil {
 		t.Fatal(err)
 	}
 	return candidate
@@ -715,7 +720,7 @@ func (p *issue80Processor) Process(_ context.Context, req agent.Request) (*agent
 	if err != nil {
 		return nil, err
 	}
-	turn, err := p.store.AppendSessionTurnForGenerationResult(context.Background(), req.SessionKey, req.Principal.CanonicalUserID, profile.Generation, req.Prompt, "deterministic model response", nil, time.Hour)
+	turn, err := testutil.AppendPendingTurn(context.Background(), p.store, req.SessionKey, req.Principal.CanonicalUserID, profile.Generation, req.Prompt, "deterministic model response", nil, time.Hour)
 	if err != nil {
 		return nil, err
 	}
@@ -774,18 +779,4 @@ func issue80MessagesContain(messages []llm.ChatMessage, value string) bool {
 		}
 	}
 	return false
-}
-
-func issue80RetentionPolicy(grace time.Duration) config.RetentionPolicy {
-	return config.RetentionPolicy{
-		RetiredIndexRetention:    grace,
-		SessionInactivity:        24 * time.Hour,
-		PendingDeliveryTimeout:   time.Hour,
-		SuccessfulJobRetention:   grace,
-		DeadJobRetention:         2 * grace,
-		AccountChallengeGrace:    grace,
-		MaintenanceInterval:      time.Hour,
-		DatabaseOptimizeInterval: 2 * time.Hour,
-		BatchSize:                100,
-	}
 }

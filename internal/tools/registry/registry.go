@@ -28,21 +28,14 @@ type ParamSpec struct {
 	Enum        []string
 }
 
-const (
-	// ToolSourceBuiltin identifies tools defined locally in data/tools.
-	ToolSourceBuiltin = "builtin"
-
-	// ToolSourceMCP identifies tools discovered from connected MCP servers.
-	ToolSourceMCP = "mcp"
-)
+// ToolSourceMCP identifies tools discovered from connected MCP servers.
+const ToolSourceMCP = "mcp"
 
 // Spec holds the fully parsed definition from a single tool markdown file.
 // Name and Description are sent to the model via the LLM tool schema.
 type Spec struct {
 	Name        string
 	Description string
-	Source      string
-	Server      string
 	Parameters  []ParamSpec
 	Schema      *llm.ToolParameters
 }
@@ -56,10 +49,9 @@ type CatalogEntry struct {
 	Parameters  []ParamSpec
 }
 
-// ToolVisibility controls which non-default tools are sent to the model.
+// ToolVisibility controls which builtin tools are hidden for the active request.
 type ToolVisibility struct {
-	ExposedMCPTools map[string]bool
-	HiddenBuiltins  map[string]bool
+	HiddenBuiltins map[string]bool
 }
 
 // Registry maps tool names to their parsed Spec and registered Handler.
@@ -87,12 +79,9 @@ func New(log *config.Logger) *Registry {
 
 // DisableBuiltin keeps a builtin name reserved while removing it from model-visible catalogs.
 func (r *Registry) DisableBuiltin(name string) error {
-	spec, ok := r.specs[name]
+	_, ok := r.specs[name]
 	if !ok {
 		return fmt.Errorf("cannot disable builtin %q: no tool spec loaded with that name", name)
-	}
-	if spec.Source != ToolSourceBuiltin {
-		return fmt.Errorf("cannot disable builtin %q: tool source is %q", name, spec.Source)
 	}
 	if _, ok := r.handlers[name]; ok {
 		return fmt.Errorf("cannot disable builtin %q after registering its handler", name)
@@ -139,8 +128,6 @@ func (r *Registry) LoadFromDirectory(dir string) error {
 			continue
 		}
 
-		spec.Source = ToolSourceBuiltin
-
 		r.specs[spec.Name] = spec
 		r.log.Debug("tool.registry.definition_loaded", "loaded tool definition", config.F("tool_name", spec.Name), config.F("file", entry.Name()))
 		loaded++
@@ -169,61 +156,17 @@ func (r *Registry) RegisterHandler(name string, policy governance.ToolPolicy, ha
 	return nil
 }
 
-// RegisterSpec adds a tool spec that was discovered programmatically rather than
-// loaded from markdown.
-func (r *Registry) RegisterSpec(spec Spec) error {
-	if spec.Name == "" {
-		return fmt.Errorf("cannot register tool spec with empty name")
-	}
-	if spec.Source == "" {
-		spec.Source = ToolSourceBuiltin
-	}
-	if _, ok := r.specs[spec.Name]; ok {
-		return fmt.Errorf("tool spec %q is already registered", spec.Name)
-	}
-	r.specs[spec.Name] = spec
-	r.log.Debug("tool.registry.definition_registered", "registered tool definition", config.F("tool_name", spec.Name), config.F("source", spec.Source), config.F("server", spec.Server))
-	return nil
-}
-
-// RegisterTool registers a programmatically discovered tool and its handler in a
-// single step.
-func (r *Registry) RegisterTool(spec Spec, policy governance.ToolPolicy, handler Handler) error {
-	if err := r.RegisterSpec(spec); err != nil {
-		return err
-	}
-	return r.RegisterHandler(spec.Name, policy, handler)
-}
-
-// LLMTools converts builtin Specs into the []llm.Tool slice passed to
-// ChatRequest.Tools. MCP specs are hidden until request-local discovery exposes them.
+// LLMTools converts builtin Specs into the []llm.Tool slice passed to ChatRequest.Tools.
 func (r *Registry) LLMTools() []llm.Tool {
 	return r.LLMToolsForVisibility(ToolVisibility{})
 }
 
-// LLMTool returns one model-facing tool definition by name.
-func (r *Registry) LLMTool(name string) (llm.Tool, bool) {
-	for _, tool := range r.LLMToolsForVisibility(ToolVisibility{}) {
-		if tool.Function.Name == name {
-			return tool, true
-		}
-	}
-	return llm.Tool{}, false
-}
-
 // LLMToolsForVisibility converts loaded Specs into the []llm.Tool slice passed to
-// ChatRequest.Tools. Builtin tools are always included. MCP tools are included
-// only when explicitly named by the active request's visibility state.
+// ChatRequest.Tools, excluding disabled and request-hidden builtins.
 func (r *Registry) LLMToolsForVisibility(visibility ToolVisibility) []llm.Tool {
 	tools := make([]llm.Tool, 0, len(r.specs))
 	for _, spec := range r.orderedSpecs() {
-		if spec.Source == ToolSourceBuiltin && r.disabled[spec.Name] {
-			continue
-		}
-		if spec.Source == ToolSourceBuiltin && visibility.HiddenBuiltins[spec.Name] {
-			continue
-		}
-		if spec.Source == ToolSourceMCP && !visibility.ExposedMCPTools[spec.Name] {
+		if r.disabled[spec.Name] || visibility.HiddenBuiltins[spec.Name] {
 			continue
 		}
 		parameters := llm.ToolParameters{}
@@ -248,7 +191,7 @@ func (r *Registry) LLMToolsForVisibility(visibility ToolVisibility) []llm.Tool {
 			Type: "function",
 			Function: llm.ToolDefinition{
 				Name:        spec.Name,
-				Description: toolDescription(spec),
+				Description: strings.TrimSpace(spec.Description),
 				Parameters:  parameters,
 			},
 		})
@@ -256,41 +199,16 @@ func (r *Registry) LLMToolsForVisibility(visibility ToolVisibility) []llm.Tool {
 	return tools
 }
 
-// BuiltinCatalog returns builtin tool definitions in stable order.
-func (r *Registry) BuiltinCatalog() []CatalogEntry {
-	entries := make([]CatalogEntry, 0)
-	for _, spec := range r.orderedSpecs() {
-		if spec.Source != ToolSourceBuiltin || r.disabled[spec.Name] {
-			continue
-		}
-		entries = append(entries, catalogEntry(spec))
-	}
-	return entries
-}
-
 // EnabledBuiltinNames returns executable, model-visible builtin names in stable order.
 func (r *Registry) EnabledBuiltinNames() []string {
 	names := make([]string, 0, len(r.handlers))
 	for name := range r.handlers {
-		spec, ok := r.specs[name]
-		if ok && spec.Source == ToolSourceBuiltin && !r.disabled[name] {
+		if !r.disabled[name] {
 			names = append(names, name)
 		}
 	}
 	sort.Strings(names)
 	return names
-}
-
-// CatalogBySource returns tool definitions for source in stable order.
-func (r *Registry) CatalogBySource(source string) []CatalogEntry {
-	entries := make([]CatalogEntry, 0)
-	for _, spec := range r.orderedSpecs() {
-		if spec.Source != source {
-			continue
-		}
-		entries = append(entries, catalogEntry(spec))
-	}
-	return entries
 }
 
 // Execute calls the registered handler for the named tool with the given arguments.
@@ -378,71 +296,9 @@ func (r *Registry) orderedSpecs() []Spec {
 		specs = append(specs, spec)
 	}
 	sort.Slice(specs, func(i, j int) bool {
-		left := specSortKey(specs[i])
-		right := specSortKey(specs[j])
-		if left != right {
-			return left < right
-		}
-		if specs[i].Server != specs[j].Server {
-			return specs[i].Server < specs[j].Server
-		}
 		return specs[i].Name < specs[j].Name
 	})
 	return specs
-}
-
-func specSortKey(spec Spec) int {
-	switch spec.Source {
-	case ToolSourceBuiltin:
-		return 0
-	case ToolSourceMCP:
-		return 1
-	default:
-		return 2
-	}
-}
-
-func toolDescription(spec Spec) string {
-	description := strings.TrimSpace(spec.Description)
-	if spec.Source != ToolSourceMCP {
-		return description
-	}
-	serverLabel := displayServerName(spec.Server)
-	prefix := serverLabel + " MCP tool:"
-	if description == "" {
-		return prefix
-	}
-	if strings.HasPrefix(strings.ToLower(description), strings.ToLower(prefix)) {
-		return description
-	}
-	return prefix + " " + description
-}
-
-func catalogEntry(spec Spec) CatalogEntry {
-	return CatalogEntry{
-		Name:        spec.Name,
-		Description: spec.Description,
-		Source:      spec.Source,
-		Server:      spec.Server,
-		Parameters:  append([]ParamSpec(nil), spec.Parameters...),
-	}
-}
-
-func displayServerName(server string) string {
-	server = strings.TrimSpace(server)
-	if server == "" {
-		return "Unknown"
-	}
-	parts := strings.FieldsFunc(server, func(r rune) bool {
-		return r == '-' || r == '_' || r == ' ' || r == '.'
-	})
-	for i, part := range parts {
-		if part == "" {
-			continue
-		}
-		parts[i] = strings.ToUpper(part[:1]) + strings.ToLower(part[1:])
-	}
-	return strings.Join(parts, " ")
 }
 
 // parseToolMarkdown parses a tool definition from a markdown string.

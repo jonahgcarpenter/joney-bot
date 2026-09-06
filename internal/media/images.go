@@ -9,9 +9,7 @@ import (
 	imagedraw "image/draw"
 	"image/gif"
 	"image/jpeg"
-	_ "image/jpeg"
 	"image/png"
-	_ "image/png"
 	"math"
 	"net/http"
 	"sort"
@@ -34,11 +32,6 @@ const (
 	MaxNormalizedImageBytes = 280 << 10
 	jpegQuality             = 90
 )
-
-var normalizedImageMIMETypes = map[string]struct{}{
-	"image/jpeg": {},
-	"image/png":  {},
-}
 
 var decodableImageMIMETypes = map[string]struct{}{
 	"image/jpeg":          {},
@@ -67,46 +60,10 @@ type NormalizationResult struct {
 	UsedDeclaredMIME bool
 }
 
-// SupportsMIMEType reports whether mimeType is allowed for multimodal requests.
-func SupportsMIMEType(mimeType string) bool {
-	_, ok := normalizedImageMIMETypes[normalizeMIMEType(mimeType)]
-	return ok
-}
-
 // LooksLikeImageMIME reports whether mimeType looks like an image attachment.
 func LooksLikeImageMIME(mimeType string) bool {
 	mimeType = normalizeMIMEType(mimeType)
 	return strings.HasPrefix(mimeType, "image/")
-}
-
-// BuildInputImage validates and normalizes a base64 image payload for the LLM provider.
-func BuildInputImage(mimeType, encodedData, source string) (llm.InputImage, error) {
-	payload := base64Payload(encodedData)
-	if payload == "" {
-		return llm.InputImage{}, fmt.Errorf("image payload is empty")
-	}
-	decoded, err := base64.StdEncoding.DecodeString(payload)
-	if err != nil {
-		return llm.InputImage{}, fmt.Errorf("image payload is not valid base64")
-	}
-	if len(decoded) > MaxImageBytes {
-		return llm.InputImage{}, fmt.Errorf("image payload exceeds %d bytes", MaxImageBytes)
-	}
-
-	result, err := NormalizeInputImageFromBytes(nil, mimeType, decoded, source)
-	if err != nil {
-		return llm.InputImage{}, err
-	}
-	return result.Image, nil
-}
-
-// BuildInputImageFromBytes validates and normalizes raw image bytes for the LLM provider.
-func BuildInputImageFromBytes(mimeType string, data []byte, source string) (llm.InputImage, error) {
-	result, err := NormalizeInputImageFromBytes(nil, mimeType, data, source)
-	if err != nil {
-		return llm.InputImage{}, err
-	}
-	return result.Image, nil
 }
 
 // NormalizeInputImageFromBytes decodes a raw image, preserves alpha with PNG,
@@ -300,11 +257,6 @@ func cloneNRGBA(source *image.NRGBA) *image.NRGBA {
 	return clone
 }
 
-// ResizeInputImages scales normalized LLM images from their current dimensions.
-func ResizeInputImages(images []llm.InputImage, scale float64) ([]llm.InputImage, error) {
-	return resizeInputImages(images, func(image.Image) float64 { return scale })
-}
-
 // ResizeInputImagesForAttempt skips the initial resize for images already at or below maxLongEdge.
 func ResizeInputImagesForAttempt(images []llm.InputImage, attempt int, retryScale float64, maxLongEdge int) ([]llm.InputImage, error) {
 	return resizeInputImages(images, func(decoded image.Image) float64 {
@@ -392,12 +344,6 @@ func sqrtRatio(target, actual int) float64 {
 		return 1
 	}
 	return math.Sqrt(float64(target) / float64(actual))
-}
-
-// DetectMIMEType returns a supported image MIME type derived from the payload.
-func DetectMIMEType(header http.Header, data []byte) string {
-	detected, _ := DetectSourceMIMEType(header, "", data)
-	return detected
 }
 
 // DetectSourceMIMEType returns a decodable image MIME type derived from bytes,

@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -17,6 +18,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/memoryextractor"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memoryformation"
 	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/testutil"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 )
 
@@ -179,7 +181,7 @@ func TestServiceProcessesAndReplaysTurnIdempotently(t *testing.T) {
 }
 
 func TestServicePatternArtifactIsStableAndSpoofedSourceRejectsWholePattern(t *testing.T) {
-	store := formationTestStore(t)
+	store, db := formationTestStoreWithDB(t)
 	var output bytes.Buffer
 	logger := config.NewLogger(config.LevelDebug)
 	logger.SetOutput(&output)
@@ -220,8 +222,9 @@ func TestServicePatternArtifactIsStableAndSpoofedSourceRejectsWholePattern(t *te
 	if err != nil || len(memories) != 0 {
 		t.Fatalf("memories=%+v err=%v", memories, err)
 	}
-	if candidate, err := store.LoadCandidate(context.Background(), "user-1", 1); err == nil {
-		t.Fatalf("spoofed pattern left candidate fragment: %+v", candidate)
+	var candidates int
+	if err := db.SQL().QueryRow(`SELECT COUNT(*) FROM memory_candidates WHERE canonical_user_id = 'user-1'`).Scan(&candidates); err != nil || candidates != 0 {
+		t.Fatalf("spoofed pattern left candidate fragments: count=%d err=%v", candidates, err)
 	}
 	if !strings.Contains(output.String(), `"event":"user_memory.formation.pattern.rejected"`) || !strings.Contains(output.String(), `"reason_code":"invalid_source_turn"`) || strings.Contains(output.String(), "spoofed") {
 		t.Fatalf("pattern rejection observability=%q", output.String())
@@ -261,7 +264,7 @@ func TestServicePatternAggregatesNormalizedClaimIdentity(t *testing.T) {
 }
 
 func TestServicePatternRequiresNewAnchorEvidence(t *testing.T) {
-	store := formationTestStore(t)
+	store, db := formationTestStoreWithDB(t)
 	first := formationTestTurn(t, store, "Pancakes sound good.", "pattern-1")
 	second := formationTestTurn(t, store, "I could eat pancakes today.", "pattern-2")
 	third := formationTestTurn(t, store, "What time is it?", "pattern-3")
@@ -286,8 +289,9 @@ func TestServicePatternRequiresNewAnchorEvidence(t *testing.T) {
 	if err != nil || len(memories) != 0 {
 		t.Fatalf("stale pattern reassessment created memory: %+v err=%v", memories, err)
 	}
-	if candidate, err := store.LoadCandidate(context.Background(), "user-1", 1); err == nil {
-		t.Fatalf("stale pattern reassessment left evidence: %+v", candidate)
+	var candidates int
+	if err := db.SQL().QueryRow(`SELECT COUNT(*) FROM memory_candidates WHERE canonical_user_id = 'user-1'`).Scan(&candidates); err != nil || candidates != 0 {
+		t.Fatalf("stale pattern reassessment left evidence: count=%d err=%v", candidates, err)
 	}
 }
 
@@ -397,7 +401,7 @@ func TestAgentSaveReconciliationIsIdempotentAcrossRestart(t *testing.T) {
 	if _, err := db.SQL().Exec(`INSERT INTO account_users(canonical_user_id) VALUES ('user-1')`); err != nil {
 		t.Fatal(err)
 	}
-	store := usermemory.NewStore(path, log)
+	store := testutil.NewMemoryStore(t, path, log)
 	turnID := formationTestForegroundTurn(t, store, "I prefer concise replies.", "restart-agent-save")
 	if err := store.MarkFormationEligible(context.Background(), "user-1", turnID); err != nil {
 		t.Fatal(err)
@@ -409,7 +413,7 @@ func TestAgentSaveReconciliationIsIdempotentAcrossRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	reopened := usermemory.NewStore(path, log)
+	reopened := testutil.NewMemoryStore(t, path, log)
 	t.Cleanup(func() { reopened.Close() })
 	count, err := reopened.ReconcileAgentSaveFormationJobs(context.Background(), "model")
 	if err != nil || count != 1 {
@@ -655,7 +659,7 @@ func TestServiceForegroundPreemptionNeverConsumesFormationBudget(t *testing.T) {
 	store, db := formationTestStoreWithDB(t)
 	turnID := formationTestTurn(t, store, "I use Go", "started-preempt")
 	gate := &preemptibleLowPriorityGate{}
-	extractor := &fakeExtractor{preempt: func() { gate.cancel() }, err: &llm.ProviderRequestStartedError{Cause: context.Canceled}}
+	extractor := &fakeExtractor{preempt: func() { gate.cancel() }, err: fmt.Errorf("provider stream canceled: %w", context.Canceled)}
 	service := NewService(store, extractor, "model", config.NewLogger(config.LevelError))
 	service.SetLowPriorityGate(gate)
 	jobID, err := store.EnqueueFormationJob(context.Background(), usermemory.FormationSource{RequestID: "started-preempt", SessionID: "session", SessionGeneration: 1, TurnID: turnID, Model: "model", ExtractorVersion: usermemory.FormationExtractorVersion}, "user-1")
@@ -682,7 +686,7 @@ func TestServiceForegroundPreemptionRefundsPatternSubmission(t *testing.T) {
 	_ = formationTestTurn(t, store, "I keep reviews concise.", "pattern-preempt-1")
 	anchorID := formationTestTurn(t, store, "I still keep reviews concise.", "pattern-preempt-2")
 	gate := &preemptibleLowPriorityGate{}
-	extractor := &fakePatternExtractor{patternErr: &llm.ProviderRequestStartedError{Cause: context.Canceled}}
+	extractor := &fakePatternExtractor{patternErr: fmt.Errorf("provider stream canceled: %w", context.Canceled)}
 	extractor.preempt = func() { gate.cancel() }
 	service := NewService(store, extractor, "model", config.NewLogger(config.LevelError))
 	service.SetLowPriorityGate(gate)
@@ -1012,7 +1016,7 @@ func formationTestStoreWithDB(t *testing.T) (*usermemory.Store, *database.DB) {
 	if _, err := db.SQL().Exec(`INSERT INTO account_users(canonical_user_id) VALUES ('user-1')`); err != nil {
 		t.Fatal(err)
 	}
-	store := usermemory.NewStore(path, log)
+	store := testutil.NewMemoryStore(t, path, log)
 	t.Cleanup(func() {
 		store.Close() // nolint:errcheck
 		db.Close()    // nolint:errcheck
@@ -1034,7 +1038,7 @@ func formationTestTurn(t *testing.T, store *usermemory.Store, text, requestID st
 		t.Fatal(err)
 	}
 	ctx := requestctx.WithMetadata(context.Background(), requestctx.Metadata{RequestID: requestID})
-	turn, err := store.AppendSessionTurnForGenerationResult(ctx, "session", "user-1", profile.Generation, text, "answer", nil, time.Hour)
+	turn, err := testutil.AppendPendingTurn(ctx, store, "session", "user-1", profile.Generation, text, "answer", nil, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}

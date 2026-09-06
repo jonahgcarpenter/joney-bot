@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/database"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 )
 
@@ -486,9 +487,9 @@ func speakerLineTx(ctx context.Context, tx *sql.Tx, userID string) (string, erro
 		return "", fmt.Errorf("read merged linked accounts: %w", err)
 	}
 	defer rows.Close()
-	var accounts []LinkedAccount
+	var accounts []database.LinkedAccount
 	for rows.Next() {
-		var account LinkedAccount
+		var account database.LinkedAccount
 		var verified int
 		if err := rows.Scan(&account.Gateway, &account.Identifier, &account.DisplayName, &verified); err != nil {
 			return "", err

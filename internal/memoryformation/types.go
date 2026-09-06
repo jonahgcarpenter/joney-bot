@@ -118,7 +118,8 @@ type CandidateInput struct {
 	ClaimValue       string
 }
 
-// CandidateOutput contains normalized content and the conservative policy result.
+// CandidateOutput contains normalized content and the policy result. Current
+// model-assessed workflows validate structure; formation-v4 retains its original policy.
 type CandidateOutput struct {
 	Statement       string
 	Evidence        string

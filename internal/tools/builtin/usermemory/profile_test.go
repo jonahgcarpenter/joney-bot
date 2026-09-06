@@ -67,7 +67,7 @@ func TestCompileProfileEligibilityThresholdsAndExpiry(t *testing.T) {
 	candidates[8].ExpiresAt = now
 	candidates[9].Approved = false
 	candidates[10].Scope = ScopeShortTerm
-	candidates[11].Status = StatusSuperseded
+	candidates[11].Status = "superseded"
 
 	compiled := CompileProfile("speaker", candidates, now)
 	if compiled.SelectedCount != 5 || compiled.ExcludedCount != 7 {
@@ -123,7 +123,7 @@ func TestCompileProfileInferenceEligibilityUsesCategoryConfidenceThresholds(t *t
 }
 
 func TestProfileRendererVersionV3(t *testing.T) {
-	if ProfileRendererVersion != "tenant-profile-v3" || TenantProfileRendererVersion != ProfileRendererVersion {
+	if ProfileRendererVersion != "tenant-profile-v3" {
 		t.Fatalf("unexpected renderer version: %q", ProfileRendererVersion)
 	}
 	compiled := CompileProfile("speaker", nil, time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC))
@@ -255,16 +255,17 @@ func TestSessionProfileIsTenantScopedAndResetClearsHistory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	turns, err := store.RecentSessionTurnsForGeneration("user-a", "shared", reset.Generation, 1, 4)
+	turns, err := store.RecentCompletedExchanges(context.Background(), "user-a", "shared", reset.Generation, 4)
 	if err != nil || len(turns) != 0 || reset.Generation <= a.Generation {
 		t.Fatalf("reset generation=%d old=%d turns=%+v err=%v", reset.Generation, a.Generation, turns, err)
 	}
 	if err := store.AppendSessionTurnForGeneration(context.Background(), "shared", "user-a", a.Generation, "stale", "stale answer", nil, time.Hour); err != nil {
 		t.Fatal(err)
 	}
-	allTurns, err := store.RecentSessionTurns("user-a", "shared", 1, 10)
-	if err != nil || len(allTurns) != 0 {
-		t.Fatalf("stale in-flight turn survived reset: turns=%+v err=%v", allTurns, err)
+	var allTurns int
+	err = store.sql.QueryRow(`SELECT COUNT(*) FROM session_turns WHERE canonical_user_id = 'user-a' AND session_id = 'shared'`).Scan(&allTurns)
+	if err != nil || allTurns != 0 {
+		t.Fatalf("stale in-flight turn survived reset: count=%d err=%v", allTurns, err)
 	}
 }
 
@@ -292,7 +293,7 @@ func TestExpiredSessionAdvancesGenerationAndUsesLatestProfile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	turns, err := store.RecentSessionTurnsForGeneration("user", "session", latest.Generation, 1, 4)
+	turns, err := store.RecentCompletedExchanges(context.Background(), "user", "session", latest.Generation, 4)
 	if err != nil || latest.Generation <= first.Generation || latest.Version <= first.Version || len(turns) != 0 {
 		t.Fatalf("expired session first=%+v latest=%+v turns=%+v err=%v", first, latest, turns, err)
 	}
@@ -373,7 +374,7 @@ func TestMergePreservesFrozenSessionAndPublishesMergedProfile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	turns, err := store.RecentSessionTurnsForGeneration("winner", "shared", merged.Generation, 1, 4)
+	turns, err := store.RecentCompletedExchanges(context.Background(), "winner", "shared", merged.Generation, 4)
 	if err != nil || merged.Generation <= winnerSession.Generation || len(turns) != 1 || turns[0].UserText != "loser old" || !strings.Contains(merged.Content, "concise replies") || merged.LatestVersion <= merged.Version {
 		t.Fatalf("merged profile=%+v turns=%+v err=%v", merged, turns, err)
 	}
@@ -445,19 +446,6 @@ func (e *blockingProfileEmbedder) Embed(context.Context, llm.EmbedRequest) (*llm
 	return &llm.EmbedResponse{Embeddings: [][]float64{{0.1, 0.2}}}, nil
 }
 
-func TestLegacySystemRulesNormalizeToCommunicationPreferences(t *testing.T) {
-	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
-	defer store.Close() // nolint:errcheck
-	seedAccountUsers(t, store, "user")
-	entry, err := store.SaveMemory(context.Background(), "user", SaveRequest{Scope: ScopeLongTerm, Category: "system_rules", Statement: "The user prefers terse replies.", Confidence: 0.9, Importance: 4})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if entry.Category != "communication_preferences" {
-		t.Fatalf("legacy category persisted as %q", entry.Category)
-	}
-}
-
 func profileTestCandidate(id int64, category, statement string, confidence float64, importance int) ProfileCandidate {
 	return ProfileCandidate{
 		MemoryID:   id,
@@ -468,5 +456,20 @@ func profileTestCandidate(id int64, category, statement string, confidence float
 		Approved:   true,
 		Confidence: confidence,
 		Importance: importance,
+	}
+}
+
+func TestCategoryNormalizationUsesOnlyCanonicalCategories(t *testing.T) {
+	for _, tc := range []struct{ input, want string }{
+		{" Identity ", "identity"},
+		{"communication-preferences", "communication_preferences"},
+		{"durable preferences", "durable_preferences"},
+		{"unknown", "notes"},
+		{"system_rules", "notes"},
+		{"preferences", "notes"},
+	} {
+		if got := normalizeCategory(tc.input); got != tc.want {
+			t.Errorf("normalizeCategory(%q) = %q, want %q", tc.input, got, tc.want)
+		}
 	}
 }

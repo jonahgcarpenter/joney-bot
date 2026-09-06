@@ -31,37 +31,6 @@ type PromptContext struct {
 	RequiredOverBudget  bool
 }
 
-// AssemblePromptContext builds model messages from required request content
-// and a newest-first list of completed session turns. Historical exchanges are
-// included only as whole user/assistant pairs and are emitted chronologically.
-func AssemblePromptContext(
-	deploymentPolicy string,
-	tenantProfile string,
-	currentPrompt string,
-	currentImages []llm.InputImage,
-	recentTurns []usermemory.SessionTurn,
-	tools []llm.Tool,
-	inputLimit int,
-) PromptContext {
-	return AssemblePromptContextWithSummary(deploymentPolicy, tenantProfile, currentPrompt, currentImages, usermemory.SessionSummary{}, 0, nil, 0, recentTurns, tools, inputLimit)
-}
-
-// AssemblePromptContextWithRecall adds bounded durable recall to the current
-// user message before selecting the newest complete session exchanges.
-func AssemblePromptContextWithRecall(
-	deploymentPolicy string,
-	tenantProfile string,
-	currentPrompt string,
-	currentImages []llm.InputImage,
-	recallResults []usermemory.RecallResult,
-	recallCharLimit int,
-	recentTurns []usermemory.SessionTurn,
-	tools []llm.Tool,
-	inputLimit int,
-) PromptContext {
-	return AssemblePromptContextWithSummary(deploymentPolicy, tenantProfile, currentPrompt, currentImages, usermemory.SessionSummary{}, 0, recallResults, recallCharLimit, recentTurns, tools, inputLimit)
-}
-
 // AssemblePromptContextWithSummary reserves a bounded historical summary and a
 // caller-selected newest verbatim tail before recall and additional history.
 func AssemblePromptContextWithSummary(
@@ -263,21 +232,6 @@ func withRecall(required []llm.ChatMessage, recallBlock string) []llm.ChatMessag
 	}
 	last := len(messages) - 1
 	messages[last].Content = strings.TrimSpace(messages[last].Content + "\n\n" + recallBlock)
-	return messages
-}
-
-func messagesWithTurns(required []llm.ChatMessage, newestFirst []usermemory.SessionTurn) []llm.ChatMessage {
-	return messagesWithChronologicalTurns(required, reverseTurns(newestFirst))
-}
-
-func messagesWithChronologicalTurns(required []llm.ChatMessage, chronological []usermemory.SessionTurn) []llm.ChatMessage {
-	messages := make([]llm.ChatMessage, 0, len(required)+len(chronological)*2)
-	last := len(required) - 1
-	messages = append(messages, required[:last]...)
-	for _, turn := range chronological {
-		messages = append(messages, usermemory.SessionTurnMessages(turn)...)
-	}
-	messages = append(messages, required[last])
 	return messages
 }
 

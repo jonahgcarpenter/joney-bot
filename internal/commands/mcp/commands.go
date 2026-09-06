@@ -12,14 +12,14 @@ import (
 )
 
 // New returns the /mcp command handler.
-func New(store *mcpmanager.Store, manager *mcpmanager.Manager, auth commands.Authorizer) commands.Handler {
+func New(store *mcpmanager.Store, manager *mcpmanager.Manager, auth commands.PrincipalAuthorizer) commands.Handler {
 	return handler{store: store, manager: manager, auth: auth}
 }
 
 type handler struct {
 	store   *mcpmanager.Store
 	manager *mcpmanager.Manager
-	auth    commands.Authorizer
+	auth    commands.PrincipalAuthorizer
 }
 
 func (h handler) Definition() commands.Definition {

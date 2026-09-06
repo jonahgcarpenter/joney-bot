@@ -40,7 +40,7 @@ func TestServiceExecutesKnownUnknownAndAdminCommands(t *testing.T) {
 }
 
 func TestServiceRejectsInvalidPrincipal(t *testing.T) {
-	service, err := NewService(fakeCommand{name: "ping"})
+	service, err := NewServiceWithCommands(Command{Handler: fakeCommand{name: "ping"}})
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -70,7 +70,7 @@ func TestRequireAdminRejectsUnauthenticatedPrincipalBeforeLookup(t *testing.T) {
 	}
 }
 
-func TestRequireAdminUsesPrincipalAuthorizerWhenAvailable(t *testing.T) {
+func TestRequireAdminUsesPrincipalAuthorizer(t *testing.T) {
 	auth := &principalAuthorizer{admin: true}
 	service, err := NewServiceWithCommands(Command{Handler: fakeCommand{name: "secret"}, Middleware: []Middleware{RequireAdmin(auth)}})
 	if err != nil {
@@ -78,7 +78,7 @@ func TestRequireAdminUsesPrincipalAuthorizerWhenAvailable(t *testing.T) {
 	}
 	principal := testPrincipal("stale")
 	result, err := service.Execute(context.Background(), Request{Principal: principal, Raw: "/secret"})
-	if err != nil || result.Text != "ran secret:" || auth.principal != principal || auth.legacyCalls != 0 {
+	if err != nil || result.Text != "ran secret:" || auth.principal != principal {
 		t.Fatalf("result=%+v err=%v auth=%+v", result, err, auth)
 	}
 }
@@ -91,13 +91,13 @@ func TestServicePropagatesPrincipalToHandler(t *testing.T) {
 		Assurance:       identity.AssuranceDiscordGateway,
 	}
 	var got identity.Principal
-	service, err := NewService(HandlerFunc{
+	service, err := NewServiceWithCommands(Command{Handler: HandlerFunc{
 		DefinitionValue: Definition{Name: "principal"},
 		ExecuteFunc: func(_ context.Context, req Request) (Result, error) {
 			got = req.Principal
 			return Result{Text: "ok"}, nil
 		},
-	})
+	}})
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -111,19 +111,19 @@ func TestServicePropagatesPrincipalToHandler(t *testing.T) {
 }
 
 func TestServiceRejectsDuplicateNamesAndAliases(t *testing.T) {
-	_, err := NewService(fakeCommand{name: "ping"}, fakeCommand{name: "ping"})
+	_, err := NewServiceWithCommands(Command{Handler: fakeCommand{name: "ping"}}, Command{Handler: fakeCommand{name: "ping"}})
 	if !errors.Is(err, ErrDuplicateCommand) {
 		t.Fatalf("expected duplicate command error, got %v", err)
 	}
 
-	_, err = NewService(fakeCommand{name: "ping", aliases: []string{"p"}}, fakeCommand{name: "pong", aliases: []string{"p"}})
+	_, err = NewServiceWithCommands(Command{Handler: fakeCommand{name: "ping", aliases: []string{"p"}}}, Command{Handler: fakeCommand{name: "pong", aliases: []string{"p"}}})
 	if !errors.Is(err, ErrDuplicateAlias) {
 		t.Fatalf("expected duplicate alias error, got %v", err)
 	}
 }
 
 func TestServiceDefinitionResolvesAliasesAndExclusivity(t *testing.T) {
-	service, err := NewService(HandlerFunc{DefinitionValue: Definition{Name: "memories", Aliases: []string{"memory"}, UserExclusive: true}})
+	service, err := NewServiceWithCommands(Command{Handler: HandlerFunc{DefinitionValue: Definition{Name: "memories", Aliases: []string{"memory"}, UserExclusive: true}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,27 +183,21 @@ type countingAuthorizer struct {
 }
 
 type principalAuthorizer struct {
-	admin       bool
-	principal   identity.Principal
-	legacyCalls int
+	admin     bool
+	principal identity.Principal
 }
 
 func testPrincipal(userID string) identity.Principal {
 	return identity.Principal{CanonicalUserID: userID, Gateway: "discord", ExternalID: "external-" + userID, Assurance: identity.AssuranceDiscordGateway}
 }
 
-func (a fakeAuthorizer) IsAdmin(userID string) (bool, error) {
-	return a.admins[userID], nil
+func (a fakeAuthorizer) IsAdminPrincipal(principal identity.Principal) (bool, error) {
+	return a.admins[principal.CanonicalUserID], nil
 }
 
-func (a *countingAuthorizer) IsAdmin(string) (bool, error) {
+func (a *countingAuthorizer) IsAdminPrincipal(identity.Principal) (bool, error) {
 	a.calls++
 	return a.isAdmin, nil
-}
-
-func (a *principalAuthorizer) IsAdmin(string) (bool, error) {
-	a.legacyCalls++
-	return false, nil
 }
 
 func (a *principalAuthorizer) IsAdminPrincipal(principal identity.Principal) (bool, error) {

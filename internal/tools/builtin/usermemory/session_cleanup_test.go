@@ -2,9 +2,7 @@ package usermemory
 
 import (
 	"context"
-	"errors"
 	"path/filepath"
-	"sync"
 	"testing"
 	"time"
 
@@ -55,7 +53,7 @@ func TestCleanupExpiredSessionsIndependentSweep(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	counts, err := store.CleanupExpiredSessions(ctx, now)
+	counts, err := store.cleanupExpiredSessions(ctx, now, normalizedMaintenancePolicy(config.RetentionPolicy{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +90,7 @@ func TestCleanupExpiredSessionsDeletesPatternJobsBeforeSourceTurns(t *testing.T)
 	if _, err := store.sql.Exec(`UPDATE sessions SET expires_at = ? WHERE canonical_user_id = 'user' AND session_id = 'expired-pattern'; UPDATE session_turns SET expires_at = ? WHERE canonical_user_id = 'user' AND session_id = 'expired-pattern'`, formatTime(now.Add(-time.Second)), formatTime(now.Add(-time.Second))); err != nil {
 		t.Fatal(err)
 	}
-	counts, err := store.CleanupExpiredSessions(ctx, now)
+	counts, err := store.cleanupExpiredSessions(ctx, now, normalizedMaintenancePolicy(config.RetentionPolicy{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +129,7 @@ func TestCleanupExpiresDurableMemoryAndErasesFormationRetention(t *testing.T) {
 		t.Fatal(err)
 	}
 	time.Sleep(time.Millisecond)
-	counts, err := store.CleanupExpiredSessions(ctx, now)
+	counts, err := store.cleanupExpiredSessions(ctx, now, normalizedMaintenancePolicy(config.RetentionPolicy{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +176,7 @@ func TestCleanupExpiredSessionsRollsBackOnFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := store.CleanupExpiredSessions(context.Background(), now); err == nil {
+	if _, err := store.cleanupExpiredSessions(context.Background(), now, normalizedMaintenancePolicy(config.RetentionPolicy{})); err == nil {
 		t.Fatal("cleanup unexpectedly succeeded")
 	}
 	assertCleanupRowCount(t, store, `SELECT COUNT(*) FROM session_turns WHERE canonical_user_id = 'user'`, 1)
@@ -203,7 +201,7 @@ func TestCleanupRetainsTranscriptAndSummaryForActiveSessionLifetime(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.EnqueueSessionCompactionJob(ctx, "user", "session", profile.Generation, turns.Turns[0].ID, turns.Turns[1].ID, compactionTestModel, compactionTestGeneratorVersion); err != nil {
+	if _, err := store.EnqueueSessionCompactionCampaignJob(ctx, "user", "session", profile.Generation, turns.Turns[0].ID, turns.Turns[1].ID, turns.Turns[1].ID, compactionTestModel, compactionTestGeneratorVersion); err != nil {
 		t.Fatal(err)
 	}
 	job, err := store.ClaimSessionCompactionJob(ctx, "test", time.Minute, compactionTestModel, compactionTestGeneratorVersion)
@@ -223,7 +221,7 @@ func TestCleanupRetainsTranscriptAndSummaryForActiveSessionLifetime(t *testing.T
 	if _, err := store.sql.Exec(`UPDATE session_turns SET expires_at = ? WHERE canonical_user_id = 'user' AND session_id = 'session'`, formatTime(now.Add(-time.Minute))); err != nil {
 		t.Fatal(err)
 	}
-	counts, err := store.CleanupExpiredSessions(ctx, now)
+	counts, err := store.cleanupExpiredSessions(ctx, now, normalizedMaintenancePolicy(config.RetentionPolicy{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -236,81 +234,18 @@ func TestCleanupRetainsTranscriptAndSummaryForActiveSessionLifetime(t *testing.T
 	if _, err := store.sql.Exec(`UPDATE sessions SET expires_at = ? WHERE canonical_user_id = 'user' AND session_id = 'session'`, formatTime(now.Add(-time.Minute))); err != nil {
 		t.Fatal(err)
 	}
-	counts, err = store.CleanupExpiredSessions(ctx, now)
+	counts, err = store.cleanupExpiredSessions(ctx, now, normalizedMaintenancePolicy(config.RetentionPolicy{}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if counts.SessionTurnsDeleted != 2 || counts.SessionSummariesDeleted != 1 || counts.CompactionJobsDeleted != 1 || counts.TenantSessionsDeleted != 1 {
 		t.Fatalf("inactive session history cleanup counts: %+v", counts)
 	}
-}
-
-func TestRunSessionCleanupImmediateRepeatsAndContinuesAfterError(t *testing.T) {
-	cleaner := &recordingSessionCleaner{failFirst: true, delay: 5 * time.Millisecond, called: make(chan struct{}, 8)}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		RunSessionCleanup(ctx, cleaner, 2*time.Millisecond, nil)
-		close(done)
-	}()
-
-	for i := 0; i < 3; i++ {
-		select {
-		case <-cleaner.called:
-		case <-time.After(time.Second):
-			t.Fatalf("timed out waiting for cleanup call %d", i+1)
-		}
+	assertCleanupRowCount(t, store, `SELECT COUNT(*) FROM durable_jobs WHERE id = ? AND state = 'succeeded' AND artifact_summary_id IS NULL`, 1, job.ID)
+	if _, err := store.MaintenanceSweep(ctx, now.Add(8*24*time.Hour), config.RetentionPolicy{}); err != nil {
+		t.Fatal(err)
 	}
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("cleanup runner did not stop after cancellation")
-	}
-
-	cleaner.mu.Lock()
-	defer cleaner.mu.Unlock()
-	if cleaner.calls < 3 {
-		t.Fatalf("cleanup calls = %d, want at least 3", cleaner.calls)
-	}
-	if cleaner.maxActive != 1 {
-		t.Fatalf("overlapping cleanups = %d", cleaner.maxActive)
-	}
-}
-
-type recordingSessionCleaner struct {
-	mu        sync.Mutex
-	calls     int
-	active    int
-	maxActive int
-	failFirst bool
-	delay     time.Duration
-	called    chan struct{}
-}
-
-func (c *recordingSessionCleaner) CleanupExpiredSessions(context.Context, time.Time) (SessionCleanupCounts, error) {
-	c.mu.Lock()
-	c.calls++
-	call := c.calls
-	c.active++
-	if c.active > c.maxActive {
-		c.maxActive = c.active
-	}
-	c.mu.Unlock()
-
-	select {
-	case c.called <- struct{}{}:
-	default:
-	}
-	time.Sleep(c.delay)
-
-	c.mu.Lock()
-	c.active--
-	c.mu.Unlock()
-	if c.failFirst && call == 1 {
-		return SessionCleanupCounts{}, errors.New("transient cleanup failure")
-	}
-	return SessionCleanupCounts{SessionTurnsDeleted: 1}, nil
+	assertCleanupRowCount(t, store, `SELECT COUNT(*) FROM durable_jobs WHERE id = ?`, 0, job.ID)
 }
 
 func assertCleanupRowCount(t *testing.T, store *Store, query string, want int, args ...any) {

@@ -66,6 +66,21 @@ func TestDecideFallsBackForEmptyPromptWithoutImages(t *testing.T) {
 	}
 }
 
+func TestBuildPromptCompactsUnsupportedAttachments(t *testing.T) {
+	for _, test := range []struct {
+		prompt string
+		labels []string
+		want   string
+	}{
+		{prompt: " describe this ", labels: []string{" file.pdf ", "", "file.pdf", "archive.zip"}, want: "describe this\n\n[User sent unsupported attachments: file.pdf, archive.zip]"},
+		{prompt: " ", labels: []string{"notes.txt"}, want: "[User sent an unsupported attachment: notes.txt]"},
+	} {
+		if got := BuildPrompt(test.prompt, nil, test.labels, nil); got != test.want {
+			t.Fatalf("prompt=%q want=%q", got, test.want)
+		}
+	}
+}
+
 func TestBuildPromptIncludesReplyImagesAndUnsupportedAttachments(t *testing.T) {
 	current := []llm.InputImage{{MimeType: "image/jpeg", Data: "current"}}
 	reply := &ReplyContext{
@@ -138,19 +153,5 @@ func TestBuildPromptDescribesGIFContactSheetInReply(t *testing.T) {
 	}
 	if got := BuildPrompt("what happens?", nil, nil, reply); got != "[Replying to Alice's GIF contact sheet showing its contents over time]\n\nwhat happens?" {
 		t.Fatalf("unexpected prompt %q", got)
-	}
-}
-
-func TestMessagePreviewCollapsesWhitespaceAndLimitsRunes(t *testing.T) {
-	got := MessagePreview("  one\n two\tthree four  ", 13)
-	if got != "one two three" {
-		t.Fatalf("unexpected preview %q", got)
-	}
-}
-
-func TestMessagePreviewRedactsConnectionCodes(t *testing.T) {
-	got := MessagePreview("/connect OSW-0123-4567-89AB-CDEF-GHJK", 100)
-	if got != "/connect OSW-[redacted]" {
-		t.Fatalf("unexpected redacted preview %q", got)
 	}
 }

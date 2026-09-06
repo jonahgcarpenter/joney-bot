@@ -139,15 +139,8 @@ func (d *DB) runSchemaMigrations(ctx context.Context, registry []schemaMigration
 		return fmt.Errorf("inspect existing database schema: %w", err)
 	}
 
-	legacyMigrated := false
 	if ledgerExists == 0 && schemaObjectCount != 0 {
-		legacyMigrated, err = migrateLegacyV320(ctx, conn, registry[0])
-		if err != nil {
-			return err
-		}
-		if !legacyMigrated {
-			return fmt.Errorf("database has no recognized permanent migration ledger or exact v3.2.0 schema")
-		}
+		return fmt.Errorf("unsupported nonempty database without a permanent migration ledger")
 	}
 
 	if _, err := conn.ExecContext(ctx, `
@@ -158,12 +151,6 @@ CREATE TABLE IF NOT EXISTS schema_migration_versions (
 	applied_at TEXT NOT NULL
 )`); err != nil {
 		return fmt.Errorf("initialize ordered schema migration ledger: %w", err)
-	}
-	if legacyMigrated {
-		migration := registry[0]
-		if _, err := conn.ExecContext(ctx, `INSERT INTO schema_migration_versions (version, name, checksum, applied_at) VALUES (1, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`, migration.name, migrationChecksum(migration)); err != nil {
-			return fmt.Errorf("record v4.0.0 after legacy migration: %w", err)
-		}
 	}
 
 	appliedCount, err := validateAppliedMigrationPrefix(ctx, conn, registry)

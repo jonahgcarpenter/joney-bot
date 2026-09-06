@@ -52,8 +52,34 @@ func TestRecallFTSFindsExactTermsAndScopesTenant(t *testing.T) {
 	if len(results) != 1 || results[0].Entry.UserID != "user-1" || strings.Contains(results[0].Entry.Statement, "Private") {
 		t.Fatalf("tenant-scoped FTS results = %+v", results)
 	}
+	if results[0].Authority != RecallAuthorityUserStated || len(results[0].Provenance) == 0 || results[0].Provenance[0].Authority != RecallAuthorityUserStated {
+		t.Fatalf("published statement authority was not preserved: %+v", results[0])
+	}
+}
+
+func TestRecallPreservesUnknownPersistedAuthority(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
+	defer store.Close() // nolint:errcheck
+	seedAccountUsers(t, store, "user-1")
+	ctx := context.Background()
+	memory, err := store.SaveMemory(ctx, "user-1", SaveRequest{Scope: ScopeLongTerm, Category: "projects", Statement: "The deployment identifier is ZXQ-741.", Confidence: 0.9})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Existing v4 memories can carry unknown provenance even though new saves do not.
+	if _, err := store.sql.Exec(`UPDATE memory_entries SET provenance_type = 'legacy_import' WHERE id = ?`, memory.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.sql.Exec(`UPDATE memory_candidates SET provenance_type = 'legacy_import' WHERE published_memory_id = ?`, memory.ID); err != nil {
+		t.Fatal(err)
+	}
+	rebuildTestIndexes(t, store)
+	results, stats := store.Recall(ctx, "user-1", "ZXQ-741", RecallRequest{TopK: 2})
+	if stats.LexicalError != nil || len(results) != 1 {
+		t.Fatalf("unknown provenance recall results=%+v stats=%+v", results, stats)
+	}
 	if results[0].Authority != RecallAuthorityUnknown || len(results[0].Provenance) == 0 || results[0].Provenance[0].Authority != RecallAuthorityUnknown {
-		t.Fatalf("legacy save authority should remain unknown: %+v", results[0])
+		t.Fatalf("unknown persisted provenance was promoted: %+v", results[0])
 	}
 }
 
@@ -317,7 +343,15 @@ func TestMergeMovesTenantVectorOwnership(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.MergeUsers("winner", "loser"); err != nil {
+	tx, err := store.sql.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback() // nolint:errcheck
+	if err := store.MergeUsersTx(context.Background(), tx, "winner", "loser", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
 	rebuildTestIndexes(t, store)

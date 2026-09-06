@@ -48,12 +48,3 @@ func TestResultValidateAttachments(t *testing.T) {
 		t.Fatal("response over aggregate limits was accepted")
 	}
 }
-
-func TestResultOrderedAttachmentsLegacyCompatibility(t *testing.T) {
-	legacy := Attachment{Filename: "legacy.json", MIMEType: "application/json", Data: []byte("x")}
-	result := Result{Attachment: &legacy}
-	ordered := result.OrderedAttachments()
-	if len(ordered) != 1 || ordered[0].Filename != legacy.Filename {
-		t.Fatalf("ordered legacy attachments=%+v", ordered)
-	}
-}

@@ -74,48 +74,6 @@ type TranscriptIndexRecord struct {
 	Version                                              string
 }
 
-// DerivedIndexHealth returns revision lifecycle status without tenant content.
-func (s *Store) DerivedIndexHealth(ctx context.Context) ([]DerivedIndexRevision, error) {
-	rows, err := s.sql.QueryContext(ctx, `SELECT id, revision, index_kind, model, dimension, schema_version, table_name, state, expected_count, indexed_count, created_at, updated_at FROM derived_index_revisions ORDER BY index_kind, revision`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var revisions []DerivedIndexRevision
-	for rows.Next() {
-		revision, err := scanIndexRevision(rows)
-		if err != nil {
-			return nil, err
-		}
-		revisions = append(revisions, revision)
-	}
-	return revisions, rows.Err()
-}
-
-// BootstrapDerivedIndexes removes obsolete fixed indexes and synchronization
-// triggers. The lifecycle worker creates generated revisions after bootstrap.
-func (s *Store) BootstrapDerivedIndexes(ctx context.Context) error {
-	tx, err := s.sql.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback() // nolint:errcheck
-	if _, err := tx.ExecContext(ctx, `
-DROP TRIGGER IF EXISTS memory_entries_fts_insert;
-DROP TRIGGER IF EXISTS memory_entries_fts_delete;
-DROP TRIGGER IF EXISTS memory_entries_fts_update;
-DROP TRIGGER IF EXISTS session_turns_fts_insert;
-DROP TRIGGER IF EXISTS session_turns_fts_delete;
-DROP TRIGGER IF EXISTS session_turns_fts_update;
-DELETE FROM derived_index_revisions WHERE table_name IN ('memory_entries_fts', 'session_turns_fts', 'memory_entry_vectors_v2');
-DROP TABLE IF EXISTS memory_entries_fts;
-DROP TABLE IF EXISTS session_turns_fts;
-DROP TABLE IF EXISTS memory_entry_vectors_v2;`); err != nil {
-		return fmt.Errorf("clean up legacy derived indexes: %w", err)
-	}
-	return tx.Commit()
-}
-
 func providerForKind(kind string) string {
 	if kind == IndexKindMemoryVector || kind == IndexKindGlobalMemoryVector {
 		return "llm_gateway"
@@ -208,10 +166,6 @@ func validateGeneratedTable(table string) error {
 		return fmt.Errorf("invalid generated derived-index table name")
 	}
 	return nil
-}
-
-func validateRevisionTable(table string) error {
-	return validateGeneratedTable(table)
 }
 
 func validateRevisionTableIdentity(revision DerivedIndexRevision) error {
@@ -312,7 +266,7 @@ func (s *Store) TranscriptIndexRecordByID(ctx context.Context, id int64, userID 
 
 // WriteMemoryIndexRecord idempotently updates one memory revision row.
 func (s *Store) WriteMemoryIndexRecord(ctx context.Context, revision DerivedIndexRevision, record MemoryIndexRecord, vector []float64) error {
-	if err := validateRevisionTable(revision.TableName); err != nil {
+	if err := validateGeneratedTable(revision.TableName); err != nil {
 		return err
 	}
 	if revision.Kind != IndexKindMemoryFTS && (revision.Kind != IndexKindMemoryVector || len(vector) != revision.Dimension) {
@@ -370,7 +324,7 @@ func (s *Store) WriteTranscriptIndexRecord(ctx context.Context, revision Derived
 	if revision.Kind != IndexKindTranscriptFTS {
 		return fmt.Errorf("invalid transcript index write")
 	}
-	if err := validateRevisionTable(revision.TableName); err != nil {
+	if err := validateGeneratedTable(revision.TableName); err != nil {
 		return err
 	}
 	if s.indexWriteHook != nil {
@@ -409,7 +363,7 @@ func (s *Store) WriteTranscriptIndexRecord(ctx context.Context, revision Derived
 
 // WriteGlobalMemoryIndexRecord idempotently updates one shared-memory revision row.
 func (s *Store) WriteGlobalMemoryIndexRecord(ctx context.Context, revision DerivedIndexRevision, record GlobalMemoryIndexRecord, vector []float64) error {
-	if err := validateRevisionTable(revision.TableName); err != nil {
+	if err := validateGeneratedTable(revision.TableName); err != nil {
 		return err
 	}
 	if revision.Kind != IndexKindGlobalMemoryFTS && (revision.Kind != IndexKindGlobalMemoryVector || len(vector) != revision.Dimension) {
@@ -468,7 +422,7 @@ func (s *Store) IndexRevisionNeedsRebuild(ctx context.Context, kind string) (boo
 	if code != "" || exists == 0 || (kind == IndexKindTranscriptFTS && schemaVersion != 2) {
 		return true, nil
 	}
-	if err := validateRevisionTable(table); err != nil {
+	if err := validateGeneratedTable(table); err != nil {
 		return true, err
 	}
 	var rows int64
@@ -480,7 +434,7 @@ func (s *Store) IndexRevisionNeedsRebuild(ctx context.Context, kind string) (boo
 
 // DeleteIndexRecord removes one tenant-owned row from a revision.
 func (s *Store) DeleteIndexRecord(ctx context.Context, revision DerivedIndexRevision, id int64, userID string) error {
-	if err := validateRevisionTable(revision.TableName); err != nil {
+	if err := validateGeneratedTable(revision.TableName); err != nil {
 		return err
 	}
 	_, err := s.sql.ExecContext(ctx, `DELETE FROM `+revision.TableName+` WHERE rowid = ? AND canonical_user_id = ?`, id, userID)
@@ -489,7 +443,7 @@ func (s *Store) DeleteIndexRecord(ctx context.Context, revision DerivedIndexRevi
 
 // DeleteGlobalMemoryIndexRecord removes one shared row from a revision.
 func (s *Store) DeleteGlobalMemoryIndexRecord(ctx context.Context, revision DerivedIndexRevision, id int64) error {
-	if err := validateRevisionTable(revision.TableName); err != nil {
+	if err := validateGeneratedTable(revision.TableName); err != nil {
 		return err
 	}
 	_, err := s.sql.ExecContext(ctx, `DELETE FROM `+revision.TableName+` WHERE rowid = ?`, id)
@@ -758,7 +712,7 @@ func (s *Store) MaintainDerivedIndexes(ctx context.Context, now time.Time, retir
 		return counts, err
 	}
 	for _, revision := range revisions {
-		if err := validateRevisionTable(revision.TableName); err != nil {
+		if err := validateGeneratedTable(revision.TableName); err != nil {
 			return counts, err
 		}
 		nowText := formatTime(now)
@@ -901,5 +855,3 @@ func enqueueDerivedChangeTx(ctx context.Context, tx *sql.Tx, userID, entityKind 
 	}
 	return nil
 }
-
-func isNoRows(err error) bool { return errors.Is(err, sql.ErrNoRows) }

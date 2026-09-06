@@ -735,7 +735,7 @@ func (s *discordStreamState) deliverAttachments(attachments []media.OutputAttach
 		if !s.replyUsed {
 			replyToID = s.stream.responder.replyToID
 		}
-		if _, err := s.stream.responder.gateway.sendCommandAttachment(s.stream.responder.channelID, commands.Result{Attachment: &attachments[i]}, replyToID); err != nil {
+		if _, err := s.stream.responder.gateway.sendCommandAttachment(s.stream.responder.channelID, commands.Result{Attachments: attachments[i : i+1]}, replyToID); err != nil {
 			s.attachmentErr = err
 			return err
 		}

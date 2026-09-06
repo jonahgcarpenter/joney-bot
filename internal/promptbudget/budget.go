@@ -9,7 +9,6 @@ import (
 const (
 	defaultContextWindow   = 32768
 	defaultResponseReserve = 8192
-	defaultToolReserve     = 768
 	defaultSafetyMargin    = 256
 	messageTokenOverhead   = 12
 	imageTokenEstimate     = 768
@@ -20,7 +19,6 @@ const (
 type ContextBudget struct {
 	ContextWindow   int
 	ResponseReserve int
-	ToolReserve     int
 	SafetyMargin    int
 	PromptLimit     int
 }
@@ -45,24 +43,12 @@ func (b ContextBudget) UsableInputLimit() int {
 	return limit
 }
 
-// PromptBudget returns the legacy input budget, including its fixed tool
-// reserve. New request assembly should estimate the actual tool schemas with
-// EstimateRequest and use UsableInputLimit.
-func (b ContextBudget) PromptBudget() int {
-	limit := b.UsableInputLimit() - b.ToolReserve
-	if limit < 0 {
-		return 0
-	}
-	return limit
-}
-
 // NewContextBudget derives prompt-budget settings from configured model limits.
 // Non-positive limits use conservative package defaults.
 func NewContextBudget(contextWindow, maxOutputTokens int) ContextBudget {
 	budget := ContextBudget{
 		ContextWindow:   defaultContextWindow,
 		ResponseReserve: defaultResponseReserve,
-		ToolReserve:     defaultToolReserve,
 		SafetyMargin:    defaultSafetyMargin,
 	}
 	if contextWindow > 0 {
@@ -78,15 +64,6 @@ func NewContextBudget(contextWindow, maxOutputTokens int) ContextBudget {
 type Result struct {
 	EstimatedBefore int
 	EstimatedAfter  int
-}
-
-// EstimateTokens provides the shared token estimate used by the agent.
-func EstimateTokens(systemPrompt string, history []llm.ChatMessage, userPrompt string, userImageCount int, tools []llm.Tool) int {
-	messages := make([]llm.ChatMessage, 0, len(history)+2)
-	messages = append(messages, llm.ChatMessage{Role: "system", Content: systemPrompt})
-	messages = append(messages, history...)
-	messages = append(messages, llm.ChatMessage{Role: "user", Content: userPrompt, Images: make([]llm.InputImage, userImageCount)})
-	return EstimateRequest(messages, tools)
 }
 
 // EstimateRequest estimates the input tokens consumed by messages and tool

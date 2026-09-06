@@ -229,7 +229,7 @@ ORDER BY 2, 1`)
 			rows.Close()
 			return err
 		}
-		if err := validateRevisionTable(item.table); err != nil {
+		if err := validateGeneratedTable(item.table); err != nil {
 			rows.Close()
 			return err
 		}

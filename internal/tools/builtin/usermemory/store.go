@@ -22,11 +22,7 @@ const (
 	ScopeShortTerm = "short_term"
 	ScopeLongTerm  = "long_term"
 
-	StatusActive     = "active"
-	StatusExpired    = "expired"
-	StatusSuperseded = "superseded"
-
-	DefaultShortTermTTL = 30 * 24 * time.Hour
+	StatusActive = "active"
 )
 
 // ValidCategories lists supported memory categories in display order.
@@ -71,11 +67,6 @@ type SessionTurn struct {
 	Score         float64
 }
 
-// SessionTurnAssistantContent renders the exact final assistant response.
-func SessionTurnAssistantContent(turn SessionTurn) string {
-	return turn.AssistantText
-}
-
 // SessionTurnMessages renders one complete role-correct exchange, including
 // native historical tool calls and exactly correlated result messages.
 func SessionTurnMessages(turn SessionTurn) []llm.ChatMessage {
@@ -93,46 +84,12 @@ func SessionTurnMessages(turn SessionTurn) []llm.ChatMessage {
 			messages = append(messages, llm.ChatMessage{Role: "tool", ToolName: call.Name, ToolCallID: callID, Content: content})
 		}
 	}
-	messages = append(messages, llm.ChatMessage{Role: "assistant", Content: SessionTurnAssistantContent(turn)})
+	messages = append(messages, llm.ChatMessage{Role: "assistant", Content: turn.AssistantText})
 	return messages
-}
-
-// CompactSessionTurnMessages renders history without its native tool trace.
-func CompactSessionTurnMessages(turn SessionTurn) []llm.ChatMessage {
-	return []llm.ChatMessage{{Role: "user", Content: turn.UserText}, {Role: "assistant", Content: SessionTurnAssistantContent(turn)}}
-}
-
-// ContextOptions controls request-time memory retrieval.
-type ContextOptions struct {
-	RecentTurns int
-	Generation  int
-
-	ContextBudgetChars int
-}
-
-// RetrievedContext contains the memory block selected for a request.
-type RetrievedContext struct {
-	Block           string
-	RecentTurnCount int
-	RecentToolNames []string
-}
-
-// SaveRequest describes a user memory write.
-type SaveRequest struct {
-	Scope           string
-	Category        string
-	Statement       string
-	Evidence        string
-	Confidence      float64
-	Importance      int
-	SourceSessionID string
-	TTL             time.Duration
-	Supersedes      string
 }
 
 // Store manages speaker profiles, user memories, and session memory in SQLite.
 type Store struct {
-	dbPath         string
 	db             *database.DB
 	sql            *sql.DB
 	log            *config.Logger
@@ -146,17 +103,6 @@ type Store struct {
 
 	formationFailpoint func(string) error
 	indexWriteHook     func(string)
-
-	speakerLineResolver func(string) (string, error)
-}
-
-// NewStore creates a SQLite-backed Store. The argument is treated as a database path.
-func NewStore(dbPath string, log *config.Logger) *Store {
-	store, err := NewSQLiteStore(dbPath, nil, "", log)
-	if err != nil {
-		panic(err)
-	}
-	return store
 }
 
 // NewSQLiteStore creates a fresh-schema SQLite-backed Store.
@@ -166,7 +112,6 @@ func NewSQLiteStore(dbPath string, embedder llm.Embedder, embeddingModel string,
 		return nil, err
 	}
 	return &Store{
-		dbPath:     dbPath,
 		db:         db,
 		sql:        db.SQL(),
 		log:        log,
@@ -181,11 +126,6 @@ func (s *Store) Close() error {
 		return nil
 	}
 	return s.db.Close()
-}
-
-// SetSpeakerLineResolver configures how speaker intro lines are derived.
-func (s *Store) SetSpeakerLineResolver(resolver func(string) (string, error)) {
-	s.speakerLineResolver = resolver
 }
 
 // SetDerivedIndexNotifier installs a nonblocking wake-up callback for the
@@ -243,41 +183,6 @@ func (s *Store) ReadIntro(userID string) (string, error) {
 		return "", nil
 	}
 	return intro, nil
-}
-
-// MergeUsers moves memory/session ownership from loserUserID into winnerUserID.
-func (s *Store) MergeUsers(winnerUserID, loserUserID string) error {
-	if winnerUserID == "" || loserUserID == "" || winnerUserID == loserUserID {
-		return nil
-	}
-	unlock := s.lockUsers(winnerUserID, loserUserID)
-	defer unlock()
-	if err := s.ensureAccountUser(winnerUserID); err != nil {
-		return err
-	}
-	intro, err := s.ReadIntro(winnerUserID)
-	if err != nil {
-		return err
-	}
-	if s.speakerLineResolver != nil {
-		intro, err = s.speakerLineResolver(winnerUserID)
-		if err != nil {
-			return fmt.Errorf("failed to resolve merged user intro: %w", err)
-		}
-	}
-	tx, err := s.sql.Begin()
-	if err != nil {
-		return fmt.Errorf("failed to begin memory merge: %w", err)
-	}
-	defer tx.Rollback() // nolint:errcheck
-	if err := MergeUsersTx(context.Background(), tx, winnerUserID, loserUserID, intro); err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
-		return err
-	}
-	s.signalDerivedIndex()
-	return nil
 }
 
 // MergeUsersTx moves loser-owned memory data to the winner using the supplied transaction.
@@ -634,111 +539,6 @@ func (s *Store) MergeUsersTx(ctx context.Context, tx *sql.Tx, winnerID, loserID,
 	return MergeUsersTx(ctx, tx, winnerID, loserID, intro)
 }
 
-// SaveMemory creates or updates a scoped memory entry.
-func (s *Store) SaveMemory(ctx context.Context, userID string, req SaveRequest) (MemoryEntry, error) {
-	if err := s.ensureAccountUser(userID); err != nil {
-		return MemoryEntry{}, err
-	}
-	unlock := s.lockUsers(userID)
-	defer unlock()
-	statement := strings.TrimSpace(req.Statement)
-	if statement == "" {
-		return MemoryEntry{}, fmt.Errorf("memory statement is required")
-	}
-	evidence := strings.TrimSpace(req.Evidence)
-	if evidence == "" {
-		evidence = "Stored from user interaction"
-	}
-	scope := normalizeScope(req.Scope)
-	category := normalizeCategory(req.Category)
-	importance := clampInt(req.Importance, 1, 5, 3)
-	confidence := req.Confidence
-	if confidence <= 0 || confidence > 1 {
-		confidence = 0.8
-	}
-	now := time.Now().UTC()
-	claimSlot, claimValue := memoryformation.NormalizeClaimIdentity(memoryformation.Category(category), "", "", statement)
-	var expiresAt *time.Time
-	if scope == ScopeShortTerm {
-		ttl := req.TTL
-		if ttl <= 0 {
-			ttl = DefaultShortTermTTL
-		}
-		exp := now.Add(ttl).UTC()
-		expiresAt = &exp
-	}
-	tx, err := s.sql.BeginTx(ctx, nil)
-	if err != nil {
-		return MemoryEntry{}, fmt.Errorf("begin legacy memory publication: %w", err)
-	}
-	defer tx.Rollback() // nolint:errcheck
-	var supersedesID int64
-	if strings.TrimSpace(req.Supersedes) != "" {
-		supersedesID, err = resolveActiveMemoryByStatementTx(ctx, tx, userID, scope, req.Supersedes)
-		if err != nil {
-			return MemoryEntry{}, fmt.Errorf("resolve superseded memory: %w", err)
-		}
-	}
-	var id int64
-	err = tx.QueryRowContext(ctx, `SELECT id FROM memory_entries WHERE canonical_user_id = ? AND scope = ? AND claim_slot = ? AND claim_value = ? AND status IN ('active', 'expired', 'superseded') ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END, id LIMIT 1`, userID, scope, claimSlot, claimValue).Scan(&id)
-	if err != nil && err != sql.ErrNoRows {
-		return MemoryEntry{}, fmt.Errorf("resolve legacy memory identity: %w", err)
-	}
-	if err == nil {
-		_, err = tx.ExecContext(ctx, `UPDATE memory_entries SET category = ?, statement = ?, confidence = ?, importance = ?, status = 'active', updated_at = ?, expires_at = ?, supersedes_id = ?, provenance_type = 'legacy_import', sensitivity = 'unknown', claim_slot = ?, claim_value = ? WHERE id = ? AND canonical_user_id = ?`, category, statement, confidence, importance, formatTime(now), nullableTime(expiresAt), nullableID(supersedesID), claimSlot, claimValue, id, userID)
-	} else {
-		err = tx.QueryRowContext(ctx, `INSERT INTO memory_entries (canonical_user_id, scope, category, statement, confidence, importance, status, created_at, updated_at, expires_at, supersedes_id, provenance_type, sensitivity, claim_slot, claim_value) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, 'legacy_import', 'unknown', ?, ?) RETURNING id`, userID, scope, category, statement, confidence, importance, formatTime(now), formatTime(now), nullableTime(expiresAt), nullableID(supersedesID), claimSlot, claimValue).Scan(&id)
-	}
-	if err != nil {
-		return MemoryEntry{}, fmt.Errorf("failed to save memory for %q: %w", userID, err)
-	}
-	legacyCandidateKeyPrefix := fmt.Sprintf("legacy-save:%d:%s", id, formatTime(now))
-	if _, err := tx.ExecContext(ctx, `INSERT INTO memory_candidates (
-		canonical_user_id, idempotency_key, state, scope, category,
-		statement, evidence, confidence, importance, provenance_type,
-		extractor_version, formation_mode, sensitivity, published_memory_id, created_at, updated_at,
-		decision_reason, claim_slot, claim_value
-	) VALUES (?, ? || ':' || lower(hex(randomblob(16))), 'approved', ?, ?, ?, ?, ?, ?, 'legacy_import', ?, 'legacy_direct_save', 'unknown', ?, ?, ?, 'compatibility save', ?, ?)`,
-		userID, legacyCandidateKeyPrefix, scope, category, statement, evidence, confidence, importance,
-		FormationExtractorVersion, id, formatTime(now), formatTime(now), claimSlot, claimValue); err != nil {
-		return MemoryEntry{}, fmt.Errorf("record legacy memory observation: %w", err)
-	}
-	if supersedesID == id && supersedesID > 0 {
-		return MemoryEntry{}, fmt.Errorf("memory cannot supersede itself")
-	}
-	if err := enqueueDerivedChangeTx(ctx, tx, userID, "memory", id, "upsert", "save:"+formatTime(now)); err != nil {
-		return MemoryEntry{}, err
-	}
-	if supersedesID > 0 {
-		result, err := tx.ExecContext(ctx, `UPDATE memory_entries SET status = 'superseded', updated_at = ? WHERE id = ? AND canonical_user_id = ? AND status = 'active'`, formatTime(now), supersedesID, userID)
-		if err != nil {
-			return MemoryEntry{}, fmt.Errorf("supersede legacy memory: %w", err)
-		}
-		count, _ := result.RowsAffected()
-		if count != 1 {
-			return MemoryEntry{}, fmt.Errorf("superseded legacy memory is no longer active")
-		}
-		if err := enqueueDerivedChangeTx(ctx, tx, userID, "memory", supersedesID, "delete", "supersede:"+formatTime(now)); err != nil {
-			return MemoryEntry{}, err
-		}
-	}
-	if _, _, err := refreshProfileTx(ctx, tx, userID, now); err != nil {
-		return MemoryEntry{}, fmt.Errorf("advance profile after legacy save: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return MemoryEntry{}, fmt.Errorf("commit legacy memory publication: %w", err)
-	}
-	s.signalDerivedIndex()
-	entry, err := s.EntryByID(id)
-	if err != nil {
-		return MemoryEntry{}, err
-	}
-	if entry.UserID != userID {
-		return MemoryEntry{}, fmt.Errorf("saved memory ownership mismatch")
-	}
-	return entry, nil
-}
-
 func resolveActiveMemoryByStatementTx(ctx context.Context, tx *sql.Tx, userID, scope, statement string) (int64, error) {
 	_, target := memoryformation.NormalizeClaimIdentity(memoryformation.CategoryNotes, "", "", statement)
 	rows, err := tx.QueryContext(ctx, `SELECT id, statement FROM memory_entries WHERE canonical_user_id = ? AND scope = ? AND status = 'active' ORDER BY id`, userID, scope)
@@ -861,41 +661,6 @@ func (s *Store) lockUsers(userIDs ...string) func() {
 	}
 }
 
-// AppendSessionTurn stores a completed session exchange without requiring an
-// active generation row. It remains useful to tests that exercise raw history.
-func (s *Store) AppendSessionTurn(ctx context.Context, sessionID, userID, userText, assistantText string, toolNames []string, ttl time.Duration) error {
-	_, err := s.appendSessionTurn(ctx, sessionID, userID, 1, userText, assistantText, toolNames, EmptyToolHistory(), ttl, false, true, nil)
-	return err
-}
-
-// AppendSessionTurnForGeneration stores a completed exchange in one frozen session generation.
-func (s *Store) AppendSessionTurnForGeneration(ctx context.Context, sessionID, userID string, generation int, userText, assistantText string, toolNames []string, ttl time.Duration) error {
-	_, err := s.appendSessionTurn(ctx, sessionID, userID, generation, userText, assistantText, toolNames, EmptyToolHistory(), ttl, true, true, nil)
-	return err
-}
-
-// AppendSessionTurnForGenerationResult stores a completed exchange and returns
-// the authoritative inserted turn for post-response formation work.
-func (s *Store) AppendSessionTurnForGenerationResult(ctx context.Context, sessionID, userID string, generation int, userText, assistantText string, toolNames []string, ttl time.Duration) (StoredSessionTurn, error) {
-	return s.appendSessionTurn(ctx, sessionID, userID, generation, userText, assistantText, toolNames, EmptyToolHistory(), ttl, true, false, nil)
-}
-
-// AppendSessionTurnForGenerationResultWithPressure stores a pending completed
-// exchange together with the deterministic pressure of the completed request.
-func (s *Store) AppendSessionTurnForGenerationResultWithPressure(ctx context.Context, sessionID, userID string, generation int, userText, assistantText string, toolNames []string, ttl time.Duration, pressure SessionPromptPressure) (StoredSessionTurn, error) {
-	if pressure.Tokens < 0 || pressure.Limit <= 0 || strings.TrimSpace(pressure.Version) == "" {
-		return StoredSessionTurn{}, fmt.Errorf("append session turn: invalid compaction pressure")
-	}
-	pressure.Version = strings.TrimSpace(pressure.Version)
-	return s.AppendSessionTurnForGenerationResultWithPressureAndHistory(ctx, sessionID, userID, generation, userText, assistantText, toolNames, EmptyToolHistory(), ttl, pressure)
-}
-
-// AppendSessionTurnForGenerationResultWithPressureAndHistory atomically stores
-// one pending exchange and its immutable native tool history.
-func (s *Store) AppendSessionTurnForGenerationResultWithPressureAndHistory(ctx context.Context, sessionID, userID string, generation int, userText, assistantText string, toolNames []string, history ToolHistory, ttl time.Duration, pressure SessionPromptPressure) (StoredSessionTurn, error) {
-	return s.AppendSessionTurnForGenerationResultWithPressureHistoryAndForegroundMemory(ctx, sessionID, userID, generation, userText, assistantText, toolNames, history, nil, ttl, pressure)
-}
-
 // AppendSessionTurnForGenerationResultWithPressureHistoryAndForegroundMemory
 // atomically stores one pending exchange, native tool history, and staged memory inputs.
 func (s *Store) AppendSessionTurnForGenerationResultWithPressureHistoryAndForegroundMemory(ctx context.Context, sessionID, userID string, generation int, userText, assistantText string, toolNames []string, history ToolHistory, staged []requestctx.StagedMemoryCandidate, ttl time.Duration, pressure SessionPromptPressure) (StoredSessionTurn, error) {
@@ -903,14 +668,10 @@ func (s *Store) AppendSessionTurnForGenerationResultWithPressureHistoryAndForegr
 		return StoredSessionTurn{}, fmt.Errorf("append session turn: invalid compaction pressure")
 	}
 	pressure.Version = strings.TrimSpace(pressure.Version)
-	return s.appendSessionTurnWithForegroundMemory(ctx, sessionID, userID, generation, userText, assistantText, toolNames, history, staged, ttl, true, false, &pressure)
+	return s.appendSessionTurnWithForegroundMemory(ctx, sessionID, userID, generation, userText, assistantText, toolNames, history, staged, ttl, &pressure)
 }
 
-func (s *Store) appendSessionTurn(ctx context.Context, sessionID, userID string, generation int, userText, assistantText string, toolNames []string, history ToolHistory, ttl time.Duration, validateGeneration, markDelivered bool, pressure *SessionPromptPressure) (StoredSessionTurn, error) {
-	return s.appendSessionTurnWithForegroundMemory(ctx, sessionID, userID, generation, userText, assistantText, toolNames, history, nil, ttl, validateGeneration, markDelivered, pressure)
-}
-
-func (s *Store) appendSessionTurnWithForegroundMemory(ctx context.Context, sessionID, userID string, generation int, userText, assistantText string, toolNames []string, history ToolHistory, staged []requestctx.StagedMemoryCandidate, ttl time.Duration, validateGeneration, markDelivered bool, pressure *SessionPromptPressure) (StoredSessionTurn, error) {
+func (s *Store) appendSessionTurnWithForegroundMemory(ctx context.Context, sessionID, userID string, generation int, userText, assistantText string, toolNames []string, history ToolHistory, staged []requestctx.StagedMemoryCandidate, ttl time.Duration, pressure *SessionPromptPressure) (StoredSessionTurn, error) {
 	if strings.TrimSpace(sessionID) == "" || strings.TrimSpace(userID) == "" || strings.TrimSpace(assistantText) == "" {
 		return StoredSessionTurn{}, nil
 	}
@@ -923,10 +684,6 @@ func (s *Store) appendSessionTurnWithForegroundMemory(ctx context.Context, sessi
 	}
 	now := time.Now().UTC()
 	requestID := requestctx.MetadataFromContext(ctx).RequestID
-	var deliveredAt any
-	if markDelivered {
-		deliveredAt = formatTime(now)
-	}
 	var expires *time.Time
 	if ttl > 0 {
 		exp := now.Add(ttl).UTC()
@@ -948,20 +705,13 @@ func (s *Store) appendSessionTurnWithForegroundMemory(ctx context.Context, sessi
 		toolNames = successfulToolHistoryNames(history)
 	}
 	query := `
-INSERT INTO session_turns (session_id, canonical_user_id, session_generation, user_text, assistant_text, tool_names, tool_trace, tool_search_text, foreground_memory, created_at, expires_at, source_request_id, delivered_at, compaction_pressure_tokens, compaction_pressure_limit, compaction_pressure_version)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	RETURNING id`
-	args := []any{sessionID, userID, generation, strings.TrimSpace(userText), strings.TrimSpace(assistantText), strings.Join(uniqueStrings(toolNames), ","), toolTrace, toolSearchText, foregroundMemory, formatTime(now), nullableTime(expires), requestID, deliveredAt, pressureTokens, pressureLimit, pressureVersion}
-	if validateGeneration {
-		query = `
-INSERT INTO session_turns (session_id, canonical_user_id, session_generation, user_text, assistant_text, tool_names, tool_trace, tool_search_text, foreground_memory, created_at, expires_at, source_request_id, delivered_at, compaction_pressure_tokens, compaction_pressure_limit, compaction_pressure_version)
-SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+INSERT INTO session_turns (session_id, canonical_user_id, session_generation, user_text, assistant_text, tool_names, tool_trace, tool_search_text, foreground_memory, created_at, expires_at, source_request_id, compaction_pressure_tokens, compaction_pressure_limit, compaction_pressure_version)
+SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 WHERE EXISTS (
 	SELECT 1 FROM sessions WHERE canonical_user_id = ? AND session_id = ? AND generation = ? AND is_active = 1
 	)
 	RETURNING id`
-		args = append(args, userID, sessionID, generation)
-	}
+	args := []any{sessionID, userID, generation, strings.TrimSpace(userText), strings.TrimSpace(assistantText), strings.Join(uniqueStrings(toolNames), ","), toolTrace, toolSearchText, foregroundMemory, formatTime(now), nullableTime(expires), requestID, pressureTokens, pressureLimit, pressureVersion, userID, sessionID, generation}
 	tx, err := s.sql.BeginTx(ctx, nil)
 	if err != nil {
 		return StoredSessionTurn{}, fmt.Errorf("begin session turn write: %w", err)
@@ -969,7 +719,7 @@ WHERE EXISTS (
 	defer tx.Rollback() // nolint:errcheck
 	var id int64
 	if err := tx.QueryRowContext(ctx, query, args...).Scan(&id); err != nil {
-		if validateGeneration && err == sql.ErrNoRows {
+		if err == sql.ErrNoRows {
 			return StoredSessionTurn{}, nil
 		}
 		return StoredSessionTurn{}, fmt.Errorf("failed to append session turn: %w", err)
@@ -984,46 +734,17 @@ WHERE EXISTS (
 	return StoredSessionTurn{ID: id, UserID: userID, SessionID: sessionID, Generation: generation, UserText: strings.TrimSpace(userText)}, nil
 }
 
-// RecentSessionTurns returns a user's newest completed session exchanges, newest first.
-func (s *Store) RecentSessionTurns(userID, sessionID string, offset int, count int) ([]SessionTurn, error) {
-	return s.recentSessionTurns(context.Background(), userID, sessionID, 0, offset, count, false)
-}
-
-// RecentSessionTurnsForGeneration returns turns from exactly one session generation.
-func (s *Store) RecentSessionTurnsForGeneration(userID, sessionID string, generation, offset, count int) ([]SessionTurn, error) {
-	return s.recentSessionTurns(context.Background(), userID, sessionID, generation, offset, count, false)
-}
-
 // RecentCompletedExchanges returns complete newest-first exchanges for one tenant session generation.
 func (s *Store) RecentCompletedExchanges(ctx context.Context, userID, sessionID string, generation, limit int) ([]SessionTurn, error) {
 	if strings.TrimSpace(userID) == "" || strings.TrimSpace(sessionID) == "" || generation <= 0 {
 		return nil, fmt.Errorf("recent session exchanges require user, session, and generation")
 	}
-	return s.recentSessionTurns(ctx, userID, sessionID, generation, 1, limit, true)
-}
-
-func (s *Store) recentSessionTurns(ctx context.Context, userID, sessionID string, generation, offset int, count int, deliveredOnly bool) ([]SessionTurn, error) {
-	if offset < 1 {
-		offset = 1
-	}
-	if count < 1 {
-		count = 1
-	}
-	if count > 100 {
-		count = 100
-	}
-	query := `SELECT id, session_id, canonical_user_id, session_generation, user_text, assistant_text, tool_names, tool_trace, created_at, expires_at FROM session_turns WHERE canonical_user_id = ? AND session_id = ? AND (expires_at IS NULL OR julianday(expires_at) > julianday(?))`
-	args := []any{userID, sessionID, formatTime(time.Now())}
-	if generation > 0 {
-		query += ` AND session_generation = ?`
-		args = append(args, generation)
-	}
-	if deliveredOnly {
-		query += ` AND delivered_at IS NOT NULL AND delivery_failed_at IS NULL`
-	}
-	query += ` ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`
-	args = append(args, count, offset-1)
-	rows, err := s.sql.QueryContext(ctx, query, args...)
+	limit = max(1, min(100, limit))
+	rows, err := s.sql.QueryContext(ctx, `SELECT id, session_id, canonical_user_id, session_generation, user_text, assistant_text, tool_names, tool_trace, created_at, expires_at
+FROM session_turns WHERE canonical_user_id = ? AND session_id = ? AND session_generation = ?
+AND (expires_at IS NULL OR julianday(expires_at) > julianday(?))
+AND delivered_at IS NOT NULL AND delivery_failed_at IS NULL
+ORDER BY created_at DESC, id DESC LIMIT ?`, userID, sessionID, generation, formatTime(time.Now()), limit)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read session turns: %w", err)
 	}
@@ -1037,72 +758,6 @@ func (s *Store) recentSessionTurns(ctx context.Context, userID, sessionID string
 		turns = append(turns, turn)
 	}
 	return turns, rows.Err()
-}
-
-// BuildContext retrieves and formats the legacy automatic session context block.
-// Production prompt assembly retrieves session turns and durable recall separately.
-func (s *Store) BuildContext(ctx context.Context, userID, sessionID, query string, opts ContextOptions) (RetrievedContext, error) {
-	if strings.TrimSpace(userID) == "" {
-		return RetrievedContext{}, nil
-	}
-	if opts.RecentTurns <= 0 {
-		opts.RecentTurns = 4
-	}
-	if opts.ContextBudgetChars <= 0 {
-		opts.ContextBudgetChars = 12000
-	}
-
-	var recent []SessionTurn
-	var err error
-	if opts.Generation > 0 {
-		recent, err = s.RecentSessionTurnsForGeneration(userID, sessionID, opts.Generation, 1, opts.RecentTurns)
-	} else {
-		recent, err = s.RecentSessionTurns(userID, sessionID, 1, opts.RecentTurns)
-	}
-	if err != nil {
-		return RetrievedContext{}, err
-	}
-
-	block := s.renderContextBlock(recent, opts.ContextBudgetChars)
-	var toolNames []string
-	for _, turn := range recent {
-		toolNames = append(toolNames, turn.ToolNames...)
-	}
-	return RetrievedContext{Block: block, RecentTurnCount: len(recent), RecentToolNames: uniqueStrings(toolNames)}, nil
-}
-
-func (s *Store) renderContextBlock(recent []SessionTurn, maxChars int) string {
-	var b strings.Builder
-	b.WriteString("# Retrieved Memory\n")
-	if len(recent) > 0 {
-		b.WriteString("\n## Recent Exchanges\n")
-		writeTurns(&b, recent)
-	}
-	text := strings.TrimSpace(b.String())
-	if text == "# Retrieved Memory" {
-		return ""
-	}
-	if len(text) > maxChars {
-		text = text[:maxChars] + "..."
-	}
-	return text
-}
-
-func writeEntries(b *strings.Builder, entries []MemoryEntry) {
-	for _, entry := range entries {
-		fmt.Fprintf(b, "- [%s/%s, importance %d] %s\n", entry.Scope, entry.Category, entry.Importance, strings.TrimSpace(entry.Statement))
-		if strings.TrimSpace(entry.Evidence) != "" {
-			fmt.Fprintf(b, "  Evidence: %s\n", strings.TrimSpace(entry.Evidence))
-		}
-	}
-}
-
-func writeTurns(b *strings.Builder, turns []SessionTurn) {
-	for i := len(turns) - 1; i >= 0; i-- {
-		turn := turns[i]
-		fmt.Fprintf(b, "User: %s\nAssistant: %s\n", strings.TrimSpace(turn.UserText), strings.TrimSpace(turn.AssistantText))
-		b.WriteString("\n")
-	}
 }
 
 func (s *Store) activeEntries(userID, scope, category string) ([]MemoryEntry, error) {
@@ -1193,20 +848,6 @@ func scanMemoryEntryWithDistance(rows interface{ Scan(...any) error }) (MemoryEn
 	return entry, distance, nil
 }
 
-func (s *Store) vectorTableExists(name string) bool {
-	_, ok := s.vectorTableDimension(name)
-	return ok
-}
-
-func (s *Store) vectorTableDimension(name string) (int, bool) {
-	var sqlText string
-	err := s.sql.QueryRow(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?`, name).Scan(&sqlText)
-	if err != nil {
-		return 0, false
-	}
-	return vectorDimensionFromSQL(sqlText)
-}
-
 func vectorDimensionFromSQL(sqlText string) (int, bool) {
 	if !strings.Contains(sqlText, "float[") {
 		return 0, false
@@ -1257,15 +898,6 @@ func (s *Store) ensureAccountUser(userID string) error {
 	return nil
 }
 
-func (s *Store) embedBestEffort(ctx context.Context, text string) []float64 {
-	vector, _ := s.embed(ctx, text)
-	return vector
-}
-
-func (s *Store) embed(ctx context.Context, text string) ([]float64, error) {
-	return s.embedWithModel(ctx, s.embedModel, text)
-}
-
 func (s *Store) embedWithModel(ctx context.Context, model, text string) ([]float64, error) {
 	if s == nil || s.embedder == nil || strings.TrimSpace(model) == "" || strings.TrimSpace(text) == "" {
 		return nil, nil
@@ -1278,10 +910,6 @@ func (s *Store) embedWithModel(ctx context.Context, model, text string) ([]float
 		return nil, fmt.Errorf("embed durable memory query: provider returned no vector")
 	}
 	return append([]float64(nil), resp.Embeddings[0]...), nil
-}
-
-func memoryEmbeddingText(scope, category, statement, evidence string) string {
-	return strings.TrimSpace(scope + "\n" + category + "\n" + statement + "\nEvidence: " + evidence)
 }
 
 func normalizeScope(scope string) string {
@@ -1305,12 +933,6 @@ func normalizeCategory(cat string) string {
 	cat = strings.TrimSpace(strings.ToLower(cat))
 	cat = strings.ReplaceAll(cat, "-", "_")
 	cat = strings.ReplaceAll(cat, " ", "_")
-	if cat == "preferences" {
-		cat = "durable_preferences"
-	}
-	if cat == "system_rules" {
-		cat = "communication_preferences"
-	}
 	for _, valid := range ValidCategories {
 		if cat == valid {
 			return cat
@@ -1324,19 +946,6 @@ func normalizeOptionalCategory(cat string) string {
 		return ""
 	}
 	return normalizeCategory(cat)
-}
-
-func clampInt(value, minValue, maxValue, fallback int) int {
-	if value == 0 {
-		return fallback
-	}
-	if value < minValue {
-		return minValue
-	}
-	if value > maxValue {
-		return maxValue
-	}
-	return value
 }
 
 func nullableTime(t *time.Time) any {
@@ -1365,17 +974,6 @@ func parseTime(value string) time.Time {
 	return t
 }
 
-func recencyScore(t time.Time) float64 {
-	if t.IsZero() {
-		return 0
-	}
-	age := time.Since(t)
-	if age <= 0 {
-		return 1
-	}
-	return 1 / (1 + age.Hours()/168)
-}
-
 func splitCSV(value string) []string {
 	if strings.TrimSpace(value) == "" {
 		return nil
@@ -1385,20 +983,6 @@ func splitCSV(value string) []string {
 	for _, part := range parts {
 		if part = strings.TrimSpace(part); part != "" {
 			out = append(out, part)
-		}
-	}
-	return out
-}
-
-func splitList(value string) []string {
-	if strings.TrimSpace(value) == "" {
-		return nil
-	}
-	lines := strings.Split(value, "\n")
-	out := make([]string, 0, len(lines))
-	for _, line := range lines {
-		if line = strings.TrimSpace(strings.TrimPrefix(line, "-")); line != "" {
-			out = append(out, line)
 		}
 	}
 	return out

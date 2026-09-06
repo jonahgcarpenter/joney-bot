@@ -21,6 +21,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/routing"
 	"github.com/jonahgcarpenter/oswald-ai/internal/runtimeinvalidation"
 	"github.com/jonahgcarpenter/oswald-ai/internal/soul"
+	"github.com/jonahgcarpenter/oswald-ai/internal/testutil"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
@@ -109,20 +110,20 @@ func TestExecuteUsesPrincipalCanonicalUserForAccess(t *testing.T) {
 
 func TestExecuteValidatesCommandAttachmentBeforeDelivery(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
-	commandService, err := commands.NewService(commands.HandlerFunc{
+	commandService, err := commands.NewServiceWithCommands(commands.Command{Handler: commands.HandlerFunc{
 		DefinitionValue: commands.Definition{Name: "export"},
 		ExecuteFunc: func(context.Context, commands.Request) (commands.Result, error) {
-			return commands.Result{Text: "export", Attachment: &commands.Attachment{
+			return commands.Result{Text: "export", Attachments: []commands.Attachment{{
 				Filename: "../private.json", MIMEType: "application/json", Data: []byte("private-content"),
-			}}, nil
+			}}}, nil
 		},
-	})
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	responder := &fakeResponder{}
 	outcome := Execute(Request{RequestID: "req", Principal: testPrincipal("user"), Text: "/export"}, Dependencies{Commands: commandService, Log: log}, responder)
-	if outcome.Action != routing.ActionCommand || responder.command.Attachment != nil {
+	if outcome.Action != routing.ActionCommand || len(responder.command.Attachments) != 0 {
 		t.Fatalf("invalid attachment reached responder: outcome=%+v result=%+v", outcome, responder.command)
 	}
 	if !strings.Contains(responder.command.Text, "filename must be a base name") {
@@ -131,7 +132,7 @@ func TestExecuteValidatesCommandAttachmentBeforeDelivery(t *testing.T) {
 }
 
 func TestExecuteRejectsDuplicateCommandAttachmentNames(t *testing.T) {
-	commandService, err := commands.NewService(commands.HandlerFunc{
+	commandService, err := commands.NewServiceWithCommands(commands.Command{Handler: commands.HandlerFunc{
 		DefinitionValue: commands.Definition{Name: "export"},
 		ExecuteFunc: func(context.Context, commands.Request) (commands.Result, error) {
 			return commands.Result{Attachments: []commands.Attachment{
@@ -139,13 +140,13 @@ func TestExecuteRejectsDuplicateCommandAttachmentNames(t *testing.T) {
 				{Filename: "same.json", MIMEType: "application/json", Data: []byte("two")},
 			}}, nil
 		},
-	})
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	responder := &fakeResponder{}
 	Execute(Request{RequestID: "req", Principal: testPrincipal("user"), Text: "/export"}, Dependencies{Commands: commandService, Log: config.NewLogger(config.LevelError)}, responder)
-	if len(responder.command.OrderedAttachments()) != 0 || !strings.Contains(responder.command.Text, "duplicate filename") {
+	if len(responder.command.Attachments) != 0 || !strings.Contains(responder.command.Text, "duplicate filename") {
 		t.Fatalf("duplicate attachments reached responder: %+v", responder.command)
 	}
 }
@@ -160,12 +161,12 @@ func TestExecuteAttachmentLogsExcludeContent(t *testing.T) {
 	defer func() { os.Stderr = oldStderr }()
 	log := config.NewLogger(config.LevelDebug)
 	const privateContent = "attachment-private-marker"
-	commandService, err := commands.NewService(commands.HandlerFunc{
+	commandService, err := commands.NewServiceWithCommands(commands.Command{Handler: commands.HandlerFunc{
 		DefinitionValue: commands.Definition{Name: "export"},
 		ExecuteFunc: func(context.Context, commands.Request) (commands.Result, error) {
 			return commands.Result{Attachments: []commands.Attachment{{Filename: "alice-private-export.json", MIMEType: "application/json", Data: []byte(privateContent)}}}, nil
 		},
-	})
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,12 +184,12 @@ func TestExecuteAttachmentLogsExcludeContent(t *testing.T) {
 
 func TestExecutePublishesCommandInvalidationAfterEveryDeliveryAttempt(t *testing.T) {
 	event := runtimeinvalidation.Event{ExternalIdentities: []string{"homeassistant:subject"}, SessionIDs: []string{"session"}, CloseConnections: true}
-	service, err := commands.NewService(commands.HandlerFunc{
+	service, err := commands.NewServiceWithCommands(commands.Command{Handler: commands.HandlerFunc{
 		DefinitionValue: commands.Definition{Name: "erase", UserExclusive: true},
 		ExecuteFunc: func(context.Context, commands.Request) (commands.Result, error) {
 			return commands.Result{Text: "deleted", Invalidation: &event}, nil
 		},
-	})
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -287,7 +288,7 @@ func TestExecuteSerializesCommandBehindAgentRequest(t *testing.T) {
 	b := broker.NewBroker(processor, 2, log)
 	b.Start()
 	defer b.Shutdown()
-	commandService, err := commands.NewService(pingHandler{})
+	commandService, err := commands.NewServiceWithCommands(commands.Command{Handler: pingHandler{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -324,7 +325,7 @@ func TestExecuteRunsOutOfBandStopAheadOfActiveLaneRequest(t *testing.T) {
 	b.Start()
 	defer b.Shutdown()
 	stopHandler := outOfBandStopHandler{broker: b}
-	service, err := commands.NewService(stopHandler)
+	service, err := commands.NewServiceWithCommands(commands.Command{Handler: stopHandler})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -371,7 +372,7 @@ func TestExecuteHoldsResolvedUserFencesThroughDeliveryAndInvalidation(t *testing
 
 	event := runtimeinvalidation.Event{SessionIDs: []string{"target-session"}}
 	commandStarted := make(chan struct{})
-	service, err := commands.NewService(commands.HandlerFunc{
+	service, err := commands.NewServiceWithCommands(commands.Command{Handler: commands.HandlerFunc{
 		DefinitionValue: commands.Definition{Name: "deleteuser", UserExclusive: true},
 		ResolveFenceTargetsFunc: func(_ context.Context, req commands.Request) ([]string, error) {
 			return []string{req.Args[0]}, nil
@@ -380,7 +381,7 @@ func TestExecuteHoldsResolvedUserFencesThroughDeliveryAndInvalidation(t *testing
 			close(commandStarted)
 			return commands.Result{Text: "deleted", Invalidation: &event}, nil
 		},
-	})
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -628,11 +629,11 @@ func testDependencies(t *testing.T, log *config.Logger) (Dependencies, func()) {
 		t.Fatalf("seed account user: %v", err)
 	}
 	db.Close() // nolint:errcheck
-	memory := usermemory.NewStore(dbPath, log)
+	memory := testutil.NewMemoryStore(t, dbPath, log)
 	ai := agent.NewAgent(runtimeFakeChatter{}, registry.New(log), "test-model", soulStore, memory, promptbudget.ContextBudget{PromptLimit: 100000}, governance.GlobalPolicy{MaxExecutions: 12, MaxToolIterations: 8, MaxConsecutiveFailures: 3}, log)
 	b := broker.NewBroker(ai, 1, log)
 	b.Start()
-	commandService, err := commands.NewService(pingHandler{})
+	commandService, err := commands.NewServiceWithCommands(commands.Command{Handler: pingHandler{}})
 	if err != nil {
 		t.Fatalf("new command service: %v", err)
 	}

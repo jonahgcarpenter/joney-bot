@@ -97,8 +97,8 @@ func (s *Service) EnsureAccount(gateway, identifier, displayName string) (string
 	if err != nil {
 		return "", err
 	}
-	data.Users[canonicalID] = UserRecord{
-		Accounts: []LinkedAccount{{
+	data.Users[canonicalID] = database.AccountUser{
+		Accounts: []database.LinkedAccount{{
 			Gateway:     strings.ToLower(gateway),
 			Identifier:  identifier,
 			DisplayName: displayName,
@@ -189,7 +189,7 @@ func (s *Service) UserDataResetCommitted(canonicalUserID string) {
 }
 
 // AccountsForUser returns the linked accounts for a canonical user.
-func (s *Service) AccountsForUser(canonicalUserID string) ([]LinkedAccount, error) {
+func (s *Service) AccountsForUser(canonicalUserID string) ([]database.LinkedAccount, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -203,7 +203,7 @@ func (s *Service) AccountsForUser(canonicalUserID string) ([]LinkedAccount, erro
 		return nil, nil
 	}
 
-	accounts := append([]LinkedAccount(nil), user.Accounts...)
+	accounts := append([]database.LinkedAccount(nil), user.Accounts...)
 	sort.Slice(accounts, func(i, j int) bool {
 		if accounts[i].Gateway == accounts[j].Gateway {
 			return accounts[i].Identifier < accounts[j].Identifier
@@ -252,7 +252,8 @@ func (s *Service) User(canonicalUserID string) (UserSummary, bool, error) {
 	return summarizeUser(canonicalUserID, user), true, nil
 }
 
-// IsAdmin reports whether a canonical user can run admin commands.
+// IsAdmin reports a canonical user's administrator state. Permission checks
+// must use IsAdminPrincipal to re-resolve the authenticated account owner.
 func (s *Service) IsAdmin(canonicalUserID string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -345,19 +346,6 @@ func (s *Service) IsAdminPrincipal(principal identity.Principal) (bool, error) {
 	return ok && user.IsAdmin, nil
 }
 
-// IsBanned reports whether a canonical user is blocked from using Oswald.
-func (s *Service) IsBanned(canonicalUserID string) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	data, err := s.loadLocked()
-	if err != nil {
-		return false, err
-	}
-	user, ok := data.Users[canonicalUserID]
-	return ok && user.IsBanned, nil
-}
-
 // BanStatus returns whether a canonical user is banned and the stored reason.
 func (s *Service) BanStatus(canonicalUserID string) (bool, string, error) {
 	s.mu.Lock()
@@ -372,17 +360,6 @@ func (s *Service) BanStatus(canonicalUserID string) (bool, string, error) {
 		return false, "", nil
 	}
 	return true, user.BanReason, nil
-}
-
-// SetAdmin updates a canonical user's admin flag.
-func (s *Service) SetAdmin(actorID, targetID string, isAdmin bool) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	data, err := s.loadLocked()
-	if err != nil {
-		return err
-	}
-	return s.setAdminLocked(data, actorID, targetID, isAdmin)
 }
 
 // SetAdminAs updates admin state after atomically re-resolving the authenticated actor.
@@ -400,7 +377,7 @@ func (s *Service) SetAdminAs(principal identity.Principal, targetID string, isAd
 	return s.setAdminLocked(data, actorID, targetID, isAdmin)
 }
 
-func (s *Service) setAdminLocked(data fileData, actorID, targetID string, isAdmin bool) error {
+func (s *Service) setAdminLocked(data database.AccountLinkData, actorID, targetID string, isAdmin bool) error {
 	if actorID == targetID && !isAdmin {
 		return fmt.Errorf("cannot remove admin from yourself")
 	}
@@ -424,17 +401,6 @@ func (s *Service) setAdminLocked(data fileData, actorID, targetID string, isAdmi
 	return nil
 }
 
-// BanUser marks a canonical user as banned.
-func (s *Service) BanUser(actorID, targetID, reason string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	data, err := s.loadLocked()
-	if err != nil {
-		return err
-	}
-	return s.banUserLocked(data, actorID, targetID, reason)
-}
-
 // BanUserAs bans a user after atomically re-resolving the authenticated actor.
 func (s *Service) BanUserAs(principal identity.Principal, targetID, reason string) error {
 	s.mu.Lock()
@@ -450,7 +416,7 @@ func (s *Service) BanUserAs(principal identity.Principal, targetID, reason strin
 	return s.banUserLocked(data, actorID, targetID, reason)
 }
 
-func (s *Service) banUserLocked(data fileData, actorID, targetID, reason string) error {
+func (s *Service) banUserLocked(data database.AccountLinkData, actorID, targetID, reason string) error {
 	if actorID == targetID {
 		return fmt.Errorf("cannot ban yourself")
 	}
@@ -468,17 +434,6 @@ func (s *Service) banUserLocked(data fileData, actorID, targetID, reason string)
 	return nil
 }
 
-// UnbanUser clears a canonical user's ban state.
-func (s *Service) UnbanUser(actorID, targetID string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	data, err := s.loadLocked()
-	if err != nil {
-		return err
-	}
-	return s.unbanUserLocked(data, actorID, targetID)
-}
-
 // UnbanUserAs unbans a user after atomically re-resolving the authenticated actor.
 func (s *Service) UnbanUserAs(principal identity.Principal, targetID string) error {
 	s.mu.Lock()
@@ -494,7 +449,7 @@ func (s *Service) UnbanUserAs(principal identity.Principal, targetID string) err
 	return s.unbanUserLocked(data, actorID, targetID)
 }
 
-func (s *Service) unbanUserLocked(data fileData, actorID, targetID string) error {
+func (s *Service) unbanUserLocked(data database.AccountLinkData, actorID, targetID string) error {
 	user, ok := data.Users[targetID]
 	if !ok {
 		return fmt.Errorf("canonical user %q not found", targetID)
@@ -510,17 +465,6 @@ func (s *Service) unbanUserLocked(data fileData, actorID, targetID string) error
 	}
 	s.log.Info("account_link.user.unbanned", "unbanned user", config.F("actor_user_id", actorID), config.F("target_user_id", targetID), config.F("status", "ok"))
 	return nil
-}
-
-func (s *Service) deleteUser(actorID, targetID string) error {
-	targetID = strings.TrimSpace(targetID)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	data, err := s.loadLocked()
-	if err != nil {
-		return err
-	}
-	return s.deleteUserLocked(data, actorID, targetID)
 }
 
 // DeleteUserAs deletes a user after atomically re-resolving the authenticated actor.
@@ -544,12 +488,7 @@ func (s *Service) DeleteUserAsWithRuntimeInvalidation(principal identity.Princip
 	return s.deleteUserLockedWithInvalidation(data, actorID, strings.TrimSpace(targetID))
 }
 
-func (s *Service) deleteUserLocked(data fileData, actorID, targetID string) error {
-	_, err := s.deleteUserLockedWithInvalidation(data, actorID, targetID)
-	return err
-}
-
-func (s *Service) deleteUserLockedWithInvalidation(data fileData, actorID, targetID string) (UserDeletionDescriptor, error) {
+func (s *Service) deleteUserLockedWithInvalidation(data database.AccountLinkData, actorID, targetID string) (UserDeletionDescriptor, error) {
 	if targetID == "" {
 		return UserDeletionDescriptor{}, fmt.Errorf("canonical user ID cannot be empty")
 	}
@@ -583,7 +522,7 @@ func (s *Service) deleteUserLockedWithInvalidation(data fileData, actorID, targe
 	return UserDeletionDescriptor{ExternalIdentities: invalidation.ExternalIdentities, SessionIDs: invalidation.SessionIDs}, nil
 }
 
-func authenticatedAdminActor(data fileData, principal identity.Principal) (string, error) {
+func authenticatedAdminActor(data database.AccountLinkData, principal identity.Principal) (string, error) {
 	if !principal.Valid() || !principal.Authenticated() {
 		return "", fmt.Errorf("admin command requires an authenticated identity")
 	}
@@ -603,15 +542,6 @@ func authenticatedAdminActor(data fileData, principal identity.Principal) (strin
 		return "", fmt.Errorf("canonical user %q is not an admin", actorID)
 	}
 	return actorID, nil
-}
-
-// SpeakerLine returns a deterministic speaker line for the canonical user.
-func (s *Service) SpeakerLine(canonicalUserID string) (string, error) {
-	accounts, err := s.AccountsForUser(canonicalUserID)
-	if err != nil {
-		return "", err
-	}
-	return FormatSpeakerLine(accounts), nil
 }
 
 // DisconnectAccountAs removes one exact linked account after atomically
@@ -679,9 +609,9 @@ func (s *Service) DisconnectAccountAs(ctx context.Context, principal identity.Pr
 		if err != nil {
 			return fmt.Errorf("read remaining linked accounts: %w", err)
 		}
-		remaining := make([]LinkedAccount, 0, accountCount-1)
+		remaining := make([]database.LinkedAccount, 0, accountCount-1)
 		for rows.Next() {
-			var account LinkedAccount
+			var account database.LinkedAccount
 			if err := rows.Scan(&account.Gateway, &account.Identifier, &account.DisplayName); err != nil {
 				rows.Close()
 				return fmt.Errorf("scan remaining linked account: %w", err)
@@ -725,14 +655,14 @@ func (s *Service) DisconnectAccountAs(ctx context.Context, principal identity.Pr
 	return descriptor, nil
 }
 
-func (s *Service) loadLocked() (fileData, error) {
+func (s *Service) loadLocked() (database.AccountLinkData, error) {
 	if err := s.Initialize(); err != nil {
-		return fileData{}, err
+		return database.AccountLinkData{}, err
 	}
 	return s.db.LoadAccountLinks()
 }
 
-func (s *Service) saveLocked(data fileData) error {
+func (s *Service) saveLocked(data database.AccountLinkData) error {
 	if err := s.Initialize(); err != nil {
 		return err
 	}
@@ -756,8 +686,8 @@ func newCanonicalUserID() (string, error) {
 	return "usr_" + hex.EncodeToString(b), nil
 }
 
-func summarizeUser(canonicalID string, user UserRecord) UserSummary {
-	accounts := append([]LinkedAccount(nil), user.Accounts...)
+func summarizeUser(canonicalID string, user database.AccountUser) UserSummary {
+	accounts := append([]database.LinkedAccount(nil), user.Accounts...)
 	sort.Slice(accounts, func(i, j int) bool {
 		if accounts[i].Gateway == accounts[j].Gateway {
 			return accounts[i].Identifier < accounts[j].Identifier
@@ -776,7 +706,7 @@ func summarizeUser(canonicalID string, user UserRecord) UserSummary {
 }
 
 // FormatSpeakerLine formats a stable speaker line from linked gateway accounts.
-func FormatSpeakerLine(accounts []LinkedAccount) string {
+func FormatSpeakerLine(accounts []database.LinkedAccount) string {
 	var imessageName string
 	var discordName string
 	var homeAssistantName string

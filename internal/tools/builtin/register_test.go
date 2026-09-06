@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/toolnames"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
@@ -15,6 +16,15 @@ import (
 
 func testConfig() *config.Config {
 	return &config.Config{SearxngURL: "http://localhost:8080"}
+}
+
+func visibleTestTool(reg *registry.Registry, name string) (llm.Tool, bool) {
+	for _, tool := range reg.LLMTools() {
+		if tool.Function.Name == name {
+			return tool, true
+		}
+	}
+	return llm.Tool{}, false
 }
 
 func newTestRegistry(t *testing.T, log *config.Logger) *registry.Registry {
@@ -60,12 +70,13 @@ func TestRegisterIncludesCurrentTimeTool(t *testing.T) {
 		t.Fatal("time.current handler was not registered")
 	}
 
-	for _, entry := range reg.BuiltinCatalog() {
-		if entry.Name != "time.current" {
+	for _, tool := range reg.LLMTools() {
+		if tool.Function.Name != "time.current" {
 			continue
 		}
-		if len(entry.Parameters) != 1 || entry.Parameters[0].Name != "timezone" || entry.Parameters[0].Type != "string" || !entry.Parameters[0].Required {
-			t.Fatalf("unexpected time.current parameters: %+v", entry.Parameters)
+		params := tool.Function.Parameters
+		if len(params.Properties) != 1 || params.Properties["timezone"].Type != "string" || len(params.Required) != 1 || params.Required[0] != "timezone" {
+			t.Fatalf("unexpected time.current parameters: %+v", params)
 		}
 		return
 	}
@@ -84,12 +95,13 @@ func TestRegisterIncludesTranscriptSearchTool(t *testing.T) {
 	if !reg.HasHandler(toolnames.SessionTranscriptSearch) {
 		t.Fatalf("%s handler was not registered", toolnames.SessionTranscriptSearch)
 	}
-	for _, entry := range reg.BuiltinCatalog() {
-		if entry.Name != toolnames.SessionTranscriptSearch {
+	for _, tool := range reg.LLMTools() {
+		if tool.Function.Name != toolnames.SessionTranscriptSearch {
 			continue
 		}
-		if len(entry.Parameters) != 2 || entry.Parameters[0].Name != "query" || entry.Parameters[0].Type != "string" || !entry.Parameters[0].Required || entry.Parameters[1].Name != "limit" || entry.Parameters[1].Type != "integer" || entry.Parameters[1].Required {
-			t.Fatalf("unexpected %s parameters: %+v", toolnames.SessionTranscriptSearch, entry.Parameters)
+		params := tool.Function.Parameters
+		if len(params.Properties) != 2 || params.Properties["query"].Type != "string" || params.Properties["limit"].Type != "integer" || len(params.Required) != 1 || params.Required[0] != "query" {
+			t.Fatalf("unexpected %s parameters: %+v", toolnames.SessionTranscriptSearch, params)
 		}
 		return
 	}
@@ -106,7 +118,7 @@ func TestRegisterExposesUserMemoryTools(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, name := range []string{toolnames.UserMemorySave, toolnames.UserMemorySearch, toolnames.UserMemoryList, toolnames.SessionTranscriptSearch} {
-		if _, ok := reg.LLMTool(name); !ok || !reg.HasHandler(name) {
+		if _, ok := visibleTestTool(reg, name); !ok || !reg.HasHandler(name) {
 			t.Fatalf("user memory tool is unavailable: %s", name)
 		}
 	}
@@ -130,12 +142,13 @@ func TestRegisterGlobalMemorySearchIsDefaultVisibleWithSchema(t *testing.T) {
 	if !foundVisible {
 		t.Fatalf("%s is not default-visible", toolnames.GlobalMemorySearch)
 	}
-	for _, entry := range reg.BuiltinCatalog() {
-		if entry.Name != toolnames.GlobalMemorySearch {
+	for _, tool := range reg.LLMTools() {
+		if tool.Function.Name != toolnames.GlobalMemorySearch {
 			continue
 		}
-		if len(entry.Parameters) != 2 || entry.Parameters[0].Name != "query" || entry.Parameters[0].Type != "string" || !entry.Parameters[0].Required || entry.Parameters[1].Name != "limit" || entry.Parameters[1].Type != "integer" || entry.Parameters[1].Required {
-			t.Fatalf("unexpected %s parameters: %+v", toolnames.GlobalMemorySearch, entry.Parameters)
+		params := tool.Function.Parameters
+		if len(params.Properties) != 2 || params.Properties["query"].Type != "string" || params.Properties["limit"].Type != "integer" || len(params.Required) != 1 || params.Required[0] != "query" {
+			t.Fatalf("unexpected %s parameters: %+v", toolnames.GlobalMemorySearch, params)
 		}
 		return
 	}
@@ -156,8 +169,8 @@ func TestRegisterCatalogOmitsRemovedGlobalMemoryTools(t *testing.T) {
 		advertised[tool.Function.Name] = true
 	}
 	cataloged := map[string]bool{}
-	for _, entry := range reg.BuiltinCatalog() {
-		cataloged[entry.Name] = true
+	for _, name := range reg.Names() {
+		cataloged[name] = true
 	}
 	for _, name := range []string{"global_memory_save", "global_memory_list", "global_memory_forget"} {
 		if advertised[name] || cataloged[name] || reg.HasHandler(name) {
@@ -209,7 +222,7 @@ func TestRegisterUserMemorySavePolicyAndStrictSchema(t *testing.T) {
 	if !ok || policy.MaxExecutions != 2 || policy.History.Mode != governance.HistoryMetadata || policy.History.SearchResult {
 		t.Fatalf("unexpected user memory save policy: %+v", policy)
 	}
-	tool, ok := reg.LLMTool(toolnames.UserMemorySave)
+	tool, ok := visibleTestTool(reg, toolnames.UserMemorySave)
 	if !ok {
 		t.Fatal("user memory save schema is unavailable")
 	}
@@ -318,7 +331,7 @@ func TestRegisterWebSearchProviderMatrix(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, toolName := range []string{"web.fetch", "web.search"} {
-				_, shown := reg.LLMTool(toolName)
+				_, shown := visibleTestTool(reg, toolName)
 				if shown != test.wantShown || reg.HasHandler(toolName) != test.wantShown {
 					t.Fatalf("%s shown=%t handler=%t", toolName, shown, reg.HasHandler(toolName))
 				}
@@ -405,7 +418,7 @@ func TestRegisterComfyUIProviderMatrix(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, name := range []string{toolnames.ComfyUITextToImage, toolnames.ComfyUIImageToImage} {
-				_, visible := reg.LLMTool(name)
+				_, visible := visibleTestTool(reg, name)
 				if visible != test.enabled || reg.HasHandler(name) != test.enabled {
 					t.Fatalf("%s visible=%t handler=%t", name, visible, reg.HasHandler(name))
 				}
@@ -439,7 +452,7 @@ func TestRegisterComfyUISchemasExposeOnlyPrompts(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, name := range []string{toolnames.ComfyUITextToImage, toolnames.ComfyUIImageToImage} {
-		tool, ok := reg.LLMTool(name)
+		tool, ok := visibleTestTool(reg, name)
 		if !ok {
 			t.Fatalf("missing %s", name)
 		}

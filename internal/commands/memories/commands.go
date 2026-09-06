@@ -127,10 +127,6 @@ func listResult(memories []usermemory.ListedMemory) (commands.Result, error) {
 	} else if len(memories) == 0 {
 		result.Text = "Your memory list is attached."
 	}
-	if len(attachments) == 1 {
-		result.Attachment = &attachments[0]
-		result.Attachments = nil
-	}
 	if err := result.ValidateAttachments(); err != nil {
 		return commands.Result{}, fmt.Errorf("memory list cannot be delivered: %w", err)
 	}
