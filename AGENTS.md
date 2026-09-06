@@ -30,7 +30,7 @@ There is no JavaScript, TypeScript, or frontend code in this repository.
 
 Current layers:
 
-1. `cmd/agent/main.go` — startup wiring
+1. `cmd/agent/main.go` and `internal/startup/` - process entry and application assembly/lifecycle
 2. `internal/commands/` — shared command routing and command implementations
 3. `internal/accounts/` - canonical user identity, account linking, and moderation services; `internal/commands/bootstrap/` and `internal/commands/accountlinking/` own command adapters, not account infrastructure
 4. `internal/identity/` — typed request principals and identity assurance
@@ -60,10 +60,11 @@ Current layers:
 - `internal/shared/` is only a directory grouping for the three focused packages above, not an importable facade or a general-purpose domain container. Import concrete owning packages directly; do not add forwarding aliases or compatibility facades for moved Go APIs.
 - Transactional stores remain in their owning parent packages. Worker packages depend on those stores, never the reverse: `memory` must not import its formation/indexing workers, and `database` must not import `database/maintenance`. Keep transaction-fenced job, outbox, merge, and deletion operations together even when workers orchestrate them.
 - Package moves and Go API renames do not change model-visible names, gateway wire fields, commands, environment variables, schema migrations, persisted artifact versions, or behavioral policy.
+- `internal/startup` is the composition root. It imports domain packages to assemble the application; domain packages must not import it. `main` owns configuration loading, the terminal banner call, signal registration, and final fatal logging; startup returns errors only after resource cleanup.
 
 ## Startup Flow
 
-`cmd/agent/main.go` performs startup in this order:
+`cmd/agent/main.go` loads configuration, prints the banner, creates the root logger, and registers interrupt/SIGTERM handling before calling `startup.Run(ctx, cfg, log, stdout)`. The signal context is a shutdown trigger, not a shared worker parent. Main releases signal registration when Run returns, then logs any returned startup error with its original event, message, and cause. Application startup proceeds in this order:
 
 1. Load environment config and print the startup block-letter banner if stdout is a terminal, before logging success or configuration failure
 2. Create the shared logger and validate required LLM gateway settings
@@ -80,7 +81,11 @@ Current layers:
 13. Create the command service, including `/stop`, `/memories`, `/bootstrap`, and administrator global-memory management, then create the runtime invalidation bus and build enabled gateways
 14. Start formation and compaction with the broker's low-priority model gate
 15. Start each gateway in its own goroutine
-16. Wait for shutdown signal, stop maintenance, drain the broker, stop index/formation/compaction workers, and close MCP clients; the current gateway interface has no graceful stop method, so gateway listeners remain live until `main` returns and deferred database closes run
+16. Wait for signal-context cancellation, log shutdown, and run ordered cleanup: stop maintenance, drain the broker, stop formation, compaction, and indexing, close MCP clients, then close account, MCP, global-memory, and user-memory database handles
+
+`internal/startup/app.go` registers cleanup as each resource is acquired. Partial initialization failures take the same cleanup path before returning a typed `startup.Error`; only main calls `Fatal`. MCP close failures retain their warning event, and database close failures remain nonfatal. `startup/bootstrap.go` writes first-administrator instructions to the supplied writer without terminal gating; the bootstrap code is never logged. The startup tests use private per-call database-path, registry, and gateway seams with temporary stores and fake gateways, not environment secrets or live services.
+
+Cancellation before startup, at checked initialization boundaries, or during normal operation returns successfully. Worker contexts remain independent so signal cancellation cannot bypass ordered shutdown. The gateway interface still has no graceful stop method: real listeners may outlive Run and remain active until process exit. Run is therefore process-oriented, not a restartable in-process application API; asynchronous gateway failures are logged rather than returned as initialization failures.
 
 ### Database Migrations
 
@@ -847,7 +852,10 @@ Current startup requirements:
 
 | File                                           | Purpose                                      |
 | ---------------------------------------------- | -------------------------------------------- |
-| `cmd/agent/main.go`                            | Startup wiring and shutdown                  |
+| `cmd/agent/main.go`                            | Config loading, signals, and process exit     |
+| `internal/startup/app.go`                      | Application assembly and ordered cleanup     |
+| `internal/startup/bootstrap.go`                | First-administrator startup instructions     |
+| `internal/startup/banner.go`                   | Terminal-gated startup banner                |
 | `internal/agent/agent.go`                      | Main agent loop                              |
 | `internal/broker/broker.go`                    | Request queue and worker pool                |
 | `internal/compaction/budget/`                  | Context budget and prompt token estimates    |
@@ -935,7 +943,7 @@ Current startup requirements:
 5. Implement a gateway-specific `runtime.Responder`
 6. Wire it in `internal/gateway/bootstrap.go`
 7. Add principal assurance and validity tests
-8. Do not import concrete gateway packages directly in `cmd/agent/main.go`
+8. Keep concrete gateway construction in `internal/gateway/bootstrap.go`; neither `cmd/agent/main.go` nor `internal/startup` should import concrete gateways directly
 
 ### Adding A Migration
 
