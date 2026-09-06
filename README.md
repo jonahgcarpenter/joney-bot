@@ -60,12 +60,6 @@ Replies to Oswald do not need another mention:
 Can you elaborate on that?
 ```
 
-## Startup Output
-
-Oswald prints a large `OSWALD-AI` block-letter banner and the project's GitHub URL in bright magenta once per startup when stdout is a terminal. Normal Docker deployments, pipes, and redirected output omit the banner. An explicitly allocated TTY (such as `docker run -it`) enables it. The banner always uses ANSI color and requires a UTF-8-capable terminal.
-
-Production logs remain uncolored, single-line JSON on stderr. First-administrator bootstrap instructions still use stdout, so JSON-only log collectors should ingest the container's stderr stream without TTY stream merging. The terminal banner announces startup, not readiness; it can also appear before a startup failure.
-
 ## Bootstrap
 
 When no administrator exists, Oswald prints a process-local, single-use bootstrap code to the terminal. From an authenticated Discord, iMessage, or Home Assistant conversation, run:
@@ -131,7 +125,7 @@ In Discord servers and iMessage groups, slash commands must mention Oswald
   - [x] Images
   - [x] GIFs
   - [ ] Files
-- [x] Global vs User defined MCP servers
+- [x] Global vs User defined MCP servers(HTTP only currently)
 - [ ] Scheduled task (cron tool)
 - [ ] STT & TTS support
 
