@@ -512,8 +512,14 @@ VALUES ('session_compaction', 'legacy', 'user', 'session', 1, 1, 2, '2026-08-23T
 	if _, err := db.SQL().Exec(`UPDATE durable_jobs SET compaction_invalid_output_retry_count = 1 WHERE idempotency_key = 'current'`); err != nil {
 		t.Fatalf("dedicated compaction retry rejected: %v", err)
 	}
-	if _, err := db.SQL().Exec(`UPDATE durable_jobs SET compaction_invalid_output_retry_count = 2 WHERE idempotency_key = 'current'`); err == nil {
-		t.Fatal("second dedicated compaction retry was accepted")
+	if _, err := db.SQL().Exec(`UPDATE durable_jobs SET compaction_invalid_output_retry_count = 2 WHERE idempotency_key = 'current'`); err != nil {
+		t.Fatalf("second dedicated compaction retry rejected: %v", err)
+	}
+	if _, err := db.SQL().Exec(`UPDATE durable_jobs SET compaction_invalid_output_retry_count = 3 WHERE idempotency_key = 'current'`); err != nil {
+		t.Fatalf("third dedicated compaction retry rejected: %v", err)
+	}
+	if _, err := db.SQL().Exec(`UPDATE durable_jobs SET compaction_invalid_output_retry_count = 4 WHERE idempotency_key = 'current'`); err == nil {
+		t.Fatal("fourth dedicated compaction retry was accepted")
 	}
 	if _, err := db.SQL().Exec(`UPDATE durable_jobs SET compaction_model = 'changed' WHERE idempotency_key = 'current'`); err == nil {
 		t.Fatal("compaction contract mutation was accepted")

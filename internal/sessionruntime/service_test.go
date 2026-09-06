@@ -67,7 +67,7 @@ func (f *fakeSummaryExtractor) Compact(_ context.Context, previous *usermemory.S
 	}, nil
 }
 
-func TestServicePlansCompactsAndPreservesRecentTail(t *testing.T) {
+func TestServicePlansCompactsAllEligibleTurns(t *testing.T) {
 	store := newSessionRuntimeStore(t)
 	profile, err := store.ResolveSessionProfile(context.Background(), "user-1", "session-1", time.Hour)
 	if err != nil {
@@ -95,18 +95,18 @@ func TestServicePlansCompactsAndPreservesRecentTail(t *testing.T) {
 	if err := service.process(context.Background(), &job); err != nil {
 		t.Fatal(err)
 	}
-	if extractor.calls != 1 || extractor.previous != nil || len(extractor.turns) != 23 {
+	if extractor.calls != 1 || extractor.previous != nil || len(extractor.turns) != 25 {
 		t.Fatalf("extractor calls=%d previous=%+v turns=%d", extractor.calls, extractor.previous, len(extractor.turns))
 	}
 	summary, err := store.LatestSessionSummary(context.Background(), "user-1", "session-1", profile.Generation)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(summary.SourceTurnIDs) != 23 || summary.CoveredThroughTurnID != extractor.turns[len(extractor.turns)-1].ID {
+	if len(summary.SourceTurnIDs) != 25 || summary.CoveredThroughTurnID != extractor.turns[len(extractor.turns)-1].ID {
 		t.Fatalf("summary=%+v", summary)
 	}
 	tail, err := store.RecentCompletedExchangesAfter(context.Background(), "user-1", "session-1", profile.Generation, summary.CoveredThroughTurnID, 100)
-	if err != nil || len(tail) != maximumRecentTail {
+	if err != nil || len(tail) != 0 {
 		t.Fatalf("tail=%d err=%v", len(tail), err)
 	}
 	for i := 26; i <= 42; i++ {
@@ -133,11 +133,11 @@ func TestServicePlansCompactsAndPreservesRecentTail(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(summary.SourceTurnIDs) != 40 || len(summary.Commitments) != 2 || summary.Commitments[0] != "Report progress" || summary.Commitments[1] != "Finish review" {
+	if len(summary.SourceTurnIDs) != 42 || len(summary.Commitments) != 2 || summary.Commitments[0] != "Report progress" || summary.Commitments[1] != "Finish review" {
 		t.Fatalf("incremental checkpoint lost continuity: %+v", summary)
 	}
 	tail, err = store.RecentCompletedExchangesAfter(context.Background(), "user-1", "session-1", profile.Generation, summary.CoveredThroughTurnID, 100)
-	if err != nil || len(tail) != maximumRecentTail {
+	if err != nil || len(tail) != 0 {
 		t.Fatalf("incremental tail=%d err=%v", len(tail), err)
 	}
 	active, err := store.ListMemories("user-1", "", "", 10)
@@ -298,10 +298,14 @@ func TestServiceBoundsInvalidCompactionOutput(t *testing.T) {
 	}
 	makeCompactionJobReady(t, db, jobID)
 	service.drain(context.Background())
+	makeCompactionJobReady(t, db, jobID)
+	service.drain(context.Background())
+	makeCompactionJobReady(t, db, jobID)
+	service.drain(context.Background())
 	if err := db.SQL().QueryRow(`SELECT state, attempt_count, compaction_invalid_output_retry_count, model_submission_count FROM durable_jobs WHERE id = ?`, jobID).Scan(&state, &attempts, &invalidRetries, &submissions); err != nil {
 		t.Fatal(err)
 	}
-	if state != "skipped" || attempts != 2 || invalidRetries != 1 || submissions != 2 || extractor.calls != 2 || extractor.lastErrorCode != "missing_tool_call" {
+	if state != "skipped" || attempts != 4 || invalidRetries != usermemory.SessionCompactionInvalidOutputRetryLimit || submissions != usermemory.SessionCompactionModelSubmissionLimit || extractor.calls != usermemory.SessionCompactionModelSubmissionLimit || extractor.lastErrorCode != "missing_tool_call" {
 		t.Fatalf("terminal state=%q attempts=%d invalid_retries=%d submissions=%d calls=%d", state, attempts, invalidRetries, submissions, extractor.calls)
 	}
 }
@@ -383,7 +387,7 @@ func TestServiceCompactionProviderCallsHaveAbsoluteBound(t *testing.T) {
 			if err := db.SQL().QueryRow(`SELECT attempt_count, compaction_invalid_output_retry_count FROM durable_jobs WHERE id = ?`, jobID).Scan(&attempts, &invalidRetries); err != nil {
 				t.Fatal(err)
 			}
-			if extractor.calls != usermemory.DurableModelSubmissionLimit || submissions != usermemory.DurableModelSubmissionLimit || attempts != usermemory.DurableModelSubmissionLimit || invalidRetries != 1 || extractor.lastErrorCode != "missing_tool_call" {
+			if extractor.calls != usermemory.SessionCompactionModelSubmissionLimit || submissions != usermemory.SessionCompactionModelSubmissionLimit || attempts != usermemory.SessionCompactionModelSubmissionLimit || invalidRetries != 1 || extractor.lastErrorCode != "missing_tool_call" {
 				t.Fatalf("calls=%d submissions=%d attempts=%d invalid_retries=%d corrective_code=%q", extractor.calls, submissions, attempts, invalidRetries, extractor.lastErrorCode)
 			}
 			return
@@ -399,8 +403,8 @@ func TestServicePlannerWaitsBelowThreshold(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < maximumRecentTail+1; i++ {
-		if err := appendDeliveredPressureTurn(store, "session-1", "user-1", profile.Generation, "short", "short", 99999, 100000); err != nil {
+	for i := 0; i < 3; i++ {
+		if err := appendDeliveredPressureTurn(store, "session-1", "user-1", profile.Generation, "short", "short", 69999, 100000); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -418,7 +422,7 @@ func TestServicePlannerTriggersAtPressureBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := 0; i < 3; i++ {
-		if err := appendDeliveredPressureTurn(store, "session-1", "user-1", profile.Generation, fmt.Sprintf("turn %d", i), "answer", 100000, 100000); err != nil {
+		if err := appendDeliveredPressureTurn(store, "session-1", "user-1", profile.Generation, fmt.Sprintf("turn %d", i), "answer", 70000, 100000); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -433,17 +437,6 @@ func TestServicePlannerTriggersAtPressureBoundary(t *testing.T) {
 	}
 	if job.CoveredThroughTurnID != job.TargetTurnID {
 		t.Fatalf("single-head campaign job=%+v", job)
-	}
-}
-
-func TestPreservedRecentTailIsAtMostTwoCompleteExchanges(t *testing.T) {
-	small := usermemory.SessionTurn{UserText: "short", AssistantText: "short"}
-	if got := preservedRecentTailCount([]usermemory.SessionTurn{small, small, small}, 100000); got != 2 {
-		t.Fatalf("small tail count=%d", got)
-	}
-	oversized := usermemory.SessionTurn{UserText: strings.Repeat("x", 9000), AssistantText: strings.Repeat("y", 9000)}
-	if got := preservedRecentTailCount([]usermemory.SessionTurn{small, oversized}, 4000); got != 0 {
-		t.Fatalf("oversized newest tail count=%d", got)
 	}
 }
 
@@ -477,6 +470,37 @@ func TestServiceCampaignContinuesAfterFirstChunk(t *testing.T) {
 	}
 	if next.TargetTurnID != job.TargetTurnID || next.CoveredThroughTurnID != job.TargetTurnID {
 		t.Fatalf("continuation target changed: first=%+v next=%+v", job, next)
+	}
+}
+
+func TestServiceCampaignTargetExceedsPlannerPage(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionRuntimeStore(t)
+	profile, err := seedCompactionRuntimeTurns(t, store, "session-1", 1001)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newest, err := store.LatestDeliveredSessionPromptPressure(ctx, "user-1", "session-1", profile.Generation, promptPressureVersion("model", 100000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A pending gap still bounds the target even when later turns are delivered.
+	if _, err := store.AppendSessionTurnForGenerationResult(ctx, "session-1", "user-1", profile.Generation, "pending", "answer", nil, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := appendDeliveredPressureTurn(store, "session-1", "user-1", profile.Generation, "after gap", "answer", 70000, 100000); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(store, &fakeSummaryExtractor{}, "model", promptbudget.ContextBudget{PromptLimit: 100000}, config.NewLogger(config.LevelError))
+	if id, err := service.plan(ctx, "user-1", "session-1", profile.Generation); err != nil || id == 0 {
+		t.Fatalf("plan=%d err=%v", id, err)
+	}
+	job, err := store.ClaimSessionCompactionJob(ctx, service.owner, time.Minute, "model", SummaryGeneratorVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.TargetTurnID != newest.TurnID || job.CoveredThroughTurnID >= job.TargetTurnID {
+		t.Fatalf("job=%+v want target=%d", job, newest.TurnID)
 	}
 }
 
