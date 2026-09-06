@@ -2,16 +2,7 @@ package imessage
 
 import (
 	"encoding/json"
-	"net/http"
-	"regexp"
-	"sync"
 	"time"
-
-	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
-	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
-	"github.com/jonahgcarpenter/oswald-ai/internal/config"
-	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
-	"github.com/jonahgcarpenter/oswald-ai/internal/runtimeinvalidation"
 )
 
 const (
@@ -25,32 +16,6 @@ const (
 	messageIndexTTL      = time.Hour
 	contactCacheTTL      = 6 * time.Hour
 )
-
-var mentionRE = regexp.MustCompile(`@?Oswald\b`)
-
-// Gateway receives BlueBubbles webhooks and sends replies via its REST API.
-type Gateway struct {
-	Port                string
-	BlueBubblesURL      string
-	BlueBubblesPassword string
-	Links               *accountlinking.Service
-	Runtime             gatewayruntime.Dependencies
-	Log                 *config.Logger
-	Broker              *broker.Broker
-	HTTPClient          *http.Client
-	capabilityMu        sync.Mutex
-	capabilitiesLoaded  bool
-	privateAPIEnabled   bool
-	helperConnected     bool
-	messageMu           sync.RWMutex
-	messageIndex        map[string]messageContext
-	contactMu           sync.RWMutex
-	contactNames        map[string]contactNameCacheEntry
-}
-
-func (g *Gateway) log() *config.Logger {
-	return g.Log.Server("gateway.imessage", config.F("gateway", "imessage"))
-}
 
 type webhookEvent struct {
 	Type string         `json:"type"`
@@ -174,38 +139,4 @@ type messageContext struct {
 	Attachments []attachment
 	IsFromBot   bool
 	CreatedAt   time.Time
-}
-
-func (g *Gateway) httpClient() *http.Client {
-	if g.HTTPClient != nil {
-		return g.HTTPClient
-	}
-	return &http.Client{Timeout: 15 * time.Second}
-}
-
-// HandleRuntimeInvalidation purges message and contact context owned by the invalidated tenant.
-func (g *Gateway) HandleRuntimeInvalidation(event runtimeinvalidation.Event) {
-	sessions := make(map[string]bool, len(event.SessionIDs))
-	for _, sessionID := range event.SessionIDs {
-		sessions[sessionID] = true
-	}
-	senders := make(map[string]bool)
-	const prefix = "imessage:"
-	for _, external := range event.ExternalIdentities {
-		if len(external) > len(prefix) && external[:len(prefix)] == prefix {
-			senders[external[len(prefix):]] = true
-		}
-	}
-	g.messageMu.Lock()
-	for id, ctx := range g.messageIndex {
-		if sessions[ctx.SessionKey] || senders[ctx.SenderID] {
-			delete(g.messageIndex, id)
-		}
-	}
-	g.messageMu.Unlock()
-	g.contactMu.Lock()
-	for senderID := range senders {
-		delete(g.contactNames, senderID)
-	}
-	g.contactMu.Unlock()
 }

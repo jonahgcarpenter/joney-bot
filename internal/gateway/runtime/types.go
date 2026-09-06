@@ -7,11 +7,11 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/routing"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
-	"github.com/jonahgcarpenter/oswald-ai/internal/routing"
-	"github.com/jonahgcarpenter/oswald-ai/internal/runtimeinvalidation"
-	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/shared/invalidation"
 )
 
 // Dependencies are the shared services needed to execute a normalized gateway request.
@@ -22,18 +22,18 @@ type Dependencies struct {
 	Log                    *config.Logger
 	Formation              FormationEnqueuer
 	Compaction             CompactionEnqueuer
-	RuntimeInvalidationBus *runtimeinvalidation.Bus
+	RuntimeInvalidationBus *invalidation.Bus
 }
 
 // CompactionEnqueuer durably plans optional session compaction after delivery.
 type CompactionEnqueuer interface {
-	Enqueue(context.Context, string, usermemory.FormationSource) error
+	Enqueue(context.Context, string, memory.FormationSource) error
 	MarkDeliveryFailed(context.Context, string, int64) error
 }
 
 // FormationEnqueuer durably queues optional work after response delivery.
 type FormationEnqueuer interface {
-	Enqueue(context.Context, string, usermemory.FormationSource) error
+	Enqueue(context.Context, string, memory.FormationSource) error
 }
 
 // AccessChecker exposes gateway-neutral user moderation checks.
@@ -68,7 +68,7 @@ type Responder interface {
 	StartProcessing() (func(), error)
 	SendFallback(text string) error
 	SendCommandResponse(result commands.Result) error
-	SendAgentResponse(response *agent.AgentResponse) error
+	SendAgentResponse(response *agent.Response) error
 	SendAgentError(text string) error
 }
 

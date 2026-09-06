@@ -5,22 +5,22 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/accounts"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
-	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
 	"github.com/jonahgcarpenter/oswald-ai/internal/database"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
-	"github.com/jonahgcarpenter/oswald-ai/internal/runtimeinvalidation"
+	"github.com/jonahgcarpenter/oswald-ai/internal/shared/invalidation"
 )
 
 const bannedMessage = "You are banned from using Oswald."
 
 type handler struct {
 	definition commands.Definition
-	users      *accountlinking.Service
+	users      *accounts.Service
 }
 
 // New creates admin command handlers backed by canonical users.
-func New(users *accountlinking.Service) []commands.Handler {
+func New(users *accounts.Service) []commands.Handler {
 	return []commands.Handler{
 		&handler{users: users, definition: commands.Definition{Name: "admin", Summary: "Grant admin access to a user.", Usage: "/admin <canonical_id>", AdminOnly: true}},
 		&handler{users: users, definition: commands.Definition{Name: "ban", Summary: "Ban a user from using Oswald.", Usage: "/ban <canonical_id> [reason]", AdminOnly: true}},
@@ -164,11 +164,11 @@ func (h *handler) handleDeleteUser(principal identity.Principal, args []string) 
 		return commands.Result{Text: commands.UsageText(h.definition)}, nil
 	}
 	targetID := strings.TrimSpace(args[0])
-	invalidation, err := h.users.DeleteUserAsWithRuntimeInvalidation(principal, targetID)
+	descriptor, err := h.users.DeleteUserAsWithRuntimeInvalidation(principal, targetID)
 	if err != nil {
 		return commands.Result{Text: fmt.Sprintf("Could not delete user: %v", err)}, nil
 	}
-	event := runtimeinvalidation.Event{ExternalIdentities: invalidation.ExternalIdentities, SessionIDs: invalidation.SessionIDs, CloseConnections: true}
+	event := invalidation.Event{ExternalIdentities: descriptor.ExternalIdentities, SessionIDs: descriptor.SessionIDs, CloseConnections: true}
 	return commands.Result{Text: fmt.Sprintf("Deleted %s.", targetID), Invalidation: &event}, nil
 }
 
@@ -187,7 +187,7 @@ func renderAccounts(accounts []database.LinkedAccount) string {
 	return strings.Join(parts, ", ")
 }
 
-func renderUser(user accountlinking.UserSummary) string {
+func renderUser(user accounts.UserSummary) string {
 	line := fmt.Sprintf("%s | admin=%t | banned=%t | %s | accounts: %s", user.CanonicalUserID, user.IsAdmin, user.IsBanned, user.Intro, renderAccounts(user.Accounts))
 	if user.IsBanned && strings.TrimSpace(user.BanReason) != "" {
 		line += " | ban_reason: " + user.BanReason

@@ -122,7 +122,7 @@ func (r *runtimeResponder) CancelAgentResponse() error {
 	return r.stream.Abort()
 }
 
-func (r *runtimeResponder) SendAgentResponse(response *agent.AgentResponse) error {
+func (r *runtimeResponder) SendAgentResponse(response *agent.Response) error {
 	if response == nil {
 		return nil
 	}

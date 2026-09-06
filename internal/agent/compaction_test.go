@@ -9,33 +9,33 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/compaction/budget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
-	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
-	"github.com/jonahgcarpenter/oswald-ai/internal/testutil"
-	"github.com/jonahgcarpenter/oswald-ai/internal/toolnames"
-	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memory/memorytest"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
+	toolnames "github.com/jonahgcarpenter/oswald-ai/internal/tools/names"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 )
 
 type foregroundCompactorCall struct {
-	previous *usermemory.SessionSummary
-	turns    []usermemory.SessionTurn
+	previous *memory.SessionSummary
+	turns    []memory.SessionTurn
 	limit    int
 }
 
 type fakeForegroundCompactor struct {
-	artifact usermemory.SummaryArtifact
+	artifact memory.SummaryArtifact
 	err      error
 	calls    []foregroundCompactorCall
 	cancel   context.CancelFunc
 }
 
-func (f *fakeForegroundCompactor) CompactForeground(_ context.Context, previous *usermemory.SessionSummary, turns []usermemory.SessionTurn, limit int) (usermemory.SummaryArtifact, error) {
-	call := foregroundCompactorCall{previous: previous, turns: append([]usermemory.SessionTurn(nil), turns...), limit: limit}
+func (f *fakeForegroundCompactor) CompactForeground(_ context.Context, previous *memory.SessionSummary, turns []memory.SessionTurn, limit int) (memory.SummaryArtifact, error) {
+	call := foregroundCompactorCall{previous: previous, turns: append([]memory.SessionTurn(nil), turns...), limit: limit}
 	f.calls = append(f.calls, call)
 	if f.cancel != nil {
 		f.cancel()
@@ -44,10 +44,10 @@ func (f *fakeForegroundCompactor) CompactForeground(_ context.Context, previous 
 }
 
 func TestForegroundCompactionStateInstallsCheckpointAtomically(t *testing.T) {
-	compactor := &fakeForegroundCompactor{artifact: usermemory.SummaryArtifact{Narrative: "Work completed so far."}}
+	compactor := &fakeForegroundCompactor{artifact: memory.SummaryArtifact{Narrative: "Work completed so far."}}
 	image := llm.InputImage{MimeType: "image/png", Data: "encoded", Source: "fixture"}
 	status := make([]StreamChunk, 0, 1)
-	state := newForegroundCompactionState(compactor, 100, "policy", "profile", "current request", []llm.InputImage{image}, nil, []usermemory.SessionTurn{{ID: 1, UserText: "old", AssistantText: "answer"}}, func(chunk StreamChunk) {
+	state := newForegroundCompactionState(compactor, 100, "policy", "profile", "current request", []llm.InputImage{image}, nil, []memory.SessionTurn{{ID: 1, UserText: "old", AssistantText: "answer"}}, func(chunk StreamChunk) {
 		status = append(status, chunk)
 	})
 	original := []llm.ChatMessage{
@@ -78,7 +78,7 @@ func TestForegroundCompactionStateInstallsCheckpointAtomically(t *testing.T) {
 	}
 
 	failing := &fakeForegroundCompactor{err: errors.New("provider unavailable")}
-	state = newForegroundCompactionState(failing, 100, "policy", "", "current request", nil, nil, []usermemory.SessionTurn{{ID: 1, UserText: "old", AssistantText: "answer"}}, nil)
+	state = newForegroundCompactionState(failing, 100, "policy", "", "current request", nil, nil, []memory.SessionTurn{{ID: 1, UserText: "old", AssistantText: "answer"}}, nil)
 	got, _, err := state.prepare(context.Background(), original, nil, true)
 	if err == nil || len(got) != len(original) || !state.hasDebt() || state.hasCheckpoint {
 		t.Fatalf("failed compaction mutated state: messages=%+v debt=%t checkpoint=%t err=%v", got, state.hasDebt(), state.hasCheckpoint, err)
@@ -87,17 +87,17 @@ func TestForegroundCompactionStateInstallsCheckpointAtomically(t *testing.T) {
 
 func TestForegroundCompactionStateTriggersAtSeventyPercent(t *testing.T) {
 	messages := []llm.ChatMessage{{Role: "system", Content: "policy"}, {Role: "user", Content: strings.Repeat("request ", 40)}}
-	estimated := promptbudget.EstimateRequest(messages, nil)
-	belowLimit := estimated*100/foregroundCompactionPercent + 1
-	below := &fakeForegroundCompactor{artifact: usermemory.SummaryArtifact{Narrative: "checkpoint"}}
-	state := newForegroundCompactionState(below, belowLimit, "policy", "", messages[1].Content, nil, nil, []usermemory.SessionTurn{{ID: 1, UserText: "old", AssistantText: "answer"}}, nil)
+	estimated := budget.EstimateRequest(messages, nil)
+	belowLimit := estimated*100/budget.CompactionTriggerPercent + 1
+	below := &fakeForegroundCompactor{artifact: memory.SummaryArtifact{Narrative: "checkpoint"}}
+	state := newForegroundCompactionState(below, belowLimit, "policy", "", messages[1].Content, nil, nil, []memory.SessionTurn{{ID: 1, UserText: "old", AssistantText: "answer"}}, nil)
 	if _, stats, err := state.prepare(context.Background(), messages, nil, false); err != nil || stats.Compacted || len(below.calls) != 0 {
 		t.Fatalf("below threshold compacted: stats=%+v calls=%d err=%v", stats, len(below.calls), err)
 	}
 
-	atLimit := estimated * 100 / foregroundCompactionPercent
-	at := &fakeForegroundCompactor{artifact: usermemory.SummaryArtifact{Narrative: "checkpoint"}}
-	state = newForegroundCompactionState(at, atLimit, "policy", "", messages[1].Content, nil, nil, []usermemory.SessionTurn{{ID: 1, UserText: "old", AssistantText: "answer"}}, nil)
+	atLimit := estimated * 100 / budget.CompactionTriggerPercent
+	at := &fakeForegroundCompactor{artifact: memory.SummaryArtifact{Narrative: "checkpoint"}}
+	state = newForegroundCompactionState(at, atLimit, "policy", "", messages[1].Content, nil, nil, []memory.SessionTurn{{ID: 1, UserText: "old", AssistantText: "answer"}}, nil)
 	if _, stats, err := state.prepare(context.Background(), messages, nil, false); err != nil || !stats.Compacted || len(at.calls) != 1 {
 		t.Fatalf("threshold did not compact: stats=%+v calls=%d err=%v", stats, len(at.calls), err)
 	}
@@ -116,7 +116,7 @@ func TestProcessCompactsCompletedToolRoundAndContinues(t *testing.T) {
 	}
 	agent, _ := newTestAgent(t, chat, nil, reg)
 	agent.budget.PromptLimit = 1000
-	compactor := &fakeForegroundCompactor{artifact: usermemory.SummaryArtifact{Narrative: "The large lookup completed."}}
+	compactor := &fakeForegroundCompactor{artifact: memory.SummaryArtifact{Narrative: "The large lookup completed."}}
 	agent.SetForegroundCompactor(compactor)
 	var chunks []StreamChunk
 
@@ -155,7 +155,7 @@ func TestProcessRecoversProviderContextOverflowWithTransientCheckpoint(t *testin
 	if err := store.AppendSessionTurnForGeneration(context.Background(), "session", "user-1", profile.Generation, "historical question", "historical answer", nil, time.Hour); err != nil {
 		t.Fatal(err)
 	}
-	compactor := &fakeForegroundCompactor{artifact: usermemory.SummaryArtifact{Narrative: "Historical work summarized."}}
+	compactor := &fakeForegroundCompactor{artifact: memory.SummaryArtifact{Narrative: "Historical work summarized."}}
 	agent.SetForegroundCompactor(compactor)
 	var chunks []StreamChunk
 
@@ -195,7 +195,7 @@ func TestProcessCompactsDeliveredHistoryAcrossPendingGapAndPages(t *testing.T) {
 	}
 	for i := 0; i <= foregroundDebtPageSize; i++ {
 		if i == 1 {
-			if _, err := testutil.AppendPendingTurn(ctx, store.Store, "session", "user-1", profile.Generation, "pending", "pending answer", nil, time.Hour); err != nil {
+			if _, err := memorytest.AppendPendingTurn(ctx, store.Store, "session", "user-1", profile.Generation, "pending", "pending answer", nil, time.Hour); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -203,7 +203,7 @@ func TestProcessCompactsDeliveredHistoryAcrossPendingGapAndPages(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	compactor := &fakeForegroundCompactor{artifact: usermemory.SummaryArtifact{Narrative: "Delivered conversation summarized."}}
+	compactor := &fakeForegroundCompactor{artifact: memory.SummaryArtifact{Narrative: "Delivered conversation summarized."}}
 	agent.SetForegroundCompactor(compactor)
 	response, err := processAgent(agent, "gap-pages", "homeassistant", "session", "user-1", "User", "continue", nil, nil)
 	if err != nil || response.Response != "continued" || len(compactor.calls) != 1 {
@@ -256,7 +256,7 @@ func TestProcessRecoversProviderOverflowOnGovernanceFinalCall(t *testing.T) {
 	}
 	agent, _ := newTestAgent(t, chat, nil, reg)
 	agent.toolPolicy.MaxExecutions = 1
-	compactor := &fakeForegroundCompactor{artifact: usermemory.SummaryArtifact{Narrative: "The lookup completed."}}
+	compactor := &fakeForegroundCompactor{artifact: memory.SummaryArtifact{Narrative: "The lookup completed."}}
 	agent.SetForegroundCompactor(compactor)
 
 	response, err := processAgent(agent, "compact-final", "homeassistant", "session", "user-1", "User", "look this up", nil, nil)
@@ -282,7 +282,7 @@ func TestProcessRecoversProviderOverflowOnEmptyResponseRetry(t *testing.T) {
 	if err := store.AppendSessionTurnForGeneration(context.Background(), "session", "user-1", profile.Generation, "historical question", "historical answer", nil, time.Hour); err != nil {
 		t.Fatal(err)
 	}
-	compactor := &fakeForegroundCompactor{artifact: usermemory.SummaryArtifact{Narrative: "Prior conversation summarized."}}
+	compactor := &fakeForegroundCompactor{artifact: memory.SummaryArtifact{Narrative: "Prior conversation summarized."}}
 	agent.SetForegroundCompactor(compactor)
 
 	response, err := processAgent(agent, "compact-empty", "homeassistant", "session", "user-1", "User", "answer this", nil, nil)
@@ -321,7 +321,7 @@ func TestProcessInitialCompactionUsesPressureBeforeHistoryOmission(t *testing.T)
 			if err := store.AppendSessionTurnForGeneration(context.Background(), "session", "user-1", profile.Generation, strings.Repeat("oversized history ", 2000), "answer", nil, time.Hour); err != nil {
 				t.Fatal(err)
 			}
-			compactor := &fakeForegroundCompactor{artifact: usermemory.SummaryArtifact{Narrative: "Prior context."}}
+			compactor := &fakeForegroundCompactor{artifact: memory.SummaryArtifact{Narrative: "Prior context."}}
 			if fail {
 				compactor.err = errors.New("compaction failed")
 			}
@@ -373,7 +373,7 @@ func TestProcessForegroundEvidenceAndFallbackPersistence(t *testing.T) {
 			if mode == "governance" {
 				a.toolPolicy.MaxExecutions = 2
 			}
-			compactor := &fakeForegroundCompactor{artifact: usermemory.SummaryArtifact{Narrative: "Transient checkpoint."}}
+			compactor := &fakeForegroundCompactor{artifact: memory.SummaryArtifact{Narrative: "Transient checkpoint."}}
 			if mode != "success" {
 				compactor.err = errors.New("compaction failed")
 			}

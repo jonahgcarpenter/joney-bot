@@ -3,27 +3,21 @@ package agent
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
-	"math"
 	"strings"
 	"time"
 
+	tokenbudget "github.com/jonahgcarpenter/oswald-ai/internal/compaction/budget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
-	"github.com/jonahgcarpenter/oswald-ai/internal/mcp"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
-	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
-	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/soul"
-	"github.com/jonahgcarpenter/oswald-ai/internal/toolnames"
-	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
-	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/webfetch"
-	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/websearch"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/exposure"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
+	toolnames "github.com/jonahgcarpenter/oswald-ai/internal/tools/names"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
-	toolruntime "github.com/jonahgcarpenter/oswald-ai/internal/tools/runtime"
 )
 
 const (
@@ -34,241 +28,9 @@ const (
 	sessionTurnTTL               = 24 * time.Hour
 	emptyResponseRetryPrompt     = "Your previous completion contained no visible response. Answer the user's last request now using only visible response content."
 	emptyResponseFallback        = "I blanked on the actual answer. Try again and I'll take another shot."
-	imageSizeFallback            = "Your image is too big. Crop it and try again."
 	contextCompactionFallback    = "I cannot continue because I ran out of context. Any completed actions have not been undone. Try splitting the remaining task into smaller steps."
-	maxImageModelAttempts        = 5
-	imageRetryScale              = 0.75
-	imageInitialScaleMaxEdge     = 1920
 	sessionPromptPressurePrefix  = "session-prompt-pressure-v1"
 )
-
-// StreamChunkType identifies the kind of content in a StreamChunk.
-type StreamChunkType string
-
-const (
-	// ChunkThinking carries tokens from the model's internal reasoning phase.
-	ChunkThinking StreamChunkType = "thinking"
-
-	// ChunkContent carries tokens from the model's visible response.
-	ChunkContent StreamChunkType = "content"
-
-	// ChunkStatus carries status messages injected by the agent (e.g. "[Calling: web.search]").
-	ChunkStatus StreamChunkType = "status"
-
-	// ChunkToolCall carries structured tool invocation data for frontend timelines.
-	ChunkToolCall StreamChunkType = "tool_call"
-
-	// ChunkToolResult carries structured tool result data for frontend timelines.
-	ChunkToolResult StreamChunkType = "tool_result"
-)
-
-// ToolStreamSearchResult is a UI-safe search result emitted for web.search tools.
-type ToolStreamSearchResult struct {
-	Title       string   `json:"title,omitempty"`
-	URL         string   `json:"url,omitempty"`
-	Domain      string   `json:"domain,omitempty"`
-	Content     string   `json:"content,omitempty"`
-	Engines     []string `json:"engines,omitempty"`
-	PublishedAt string   `json:"published_at,omitempty"`
-	Score       float64  `json:"score,omitempty"`
-}
-
-// ToolStreamSearchPayload contains structured web.search details for streaming UIs.
-type ToolStreamSearchPayload struct {
-	Query               string                   `json:"query,omitempty"`
-	Results             []ToolStreamSearchResult `json:"results,omitempty"`
-	IsDegraded          bool                     `json:"is_degraded,omitempty"`
-	UnresponsiveEngines []string                 `json:"unresponsive_engines,omitempty"`
-}
-
-// ToolStreamFetchPayload contains privacy-safe web.fetch details for streaming UIs.
-type ToolStreamFetchPayload struct {
-	Title       string `json:"title,omitempty"`
-	ContentType string `json:"content_type,omitempty"`
-	Source      string `json:"source,omitempty"`
-	IsTruncated bool   `json:"is_truncated,omitempty"`
-	IsDegraded  bool   `json:"is_degraded,omitempty"`
-}
-
-// ToolStreamPayload contains structured tool data for frontend rendering.
-type ToolStreamPayload struct {
-	Name         string                         `json:"name"`
-	Arguments    map[string]interface{}         `json:"arguments,omitempty"`
-	ResultText   string                         `json:"result_text,omitempty"`
-	DurationMS   int64                          `json:"duration_ms,omitempty"`
-	IsError      bool                           `json:"is_error,omitempty"`
-	WebSearch    *ToolStreamSearchPayload       `json:"web.search,omitempty"`
-	WebFetch     *ToolStreamFetchPayload        `json:"web.fetch,omitempty"`
-	UserMemory   *ToolStreamUserMemoryPayload   `json:"user_memory,omitempty"`
-	GlobalMemory *ToolStreamGlobalMemoryPayload `json:"global_memory,omitempty"`
-}
-
-// ToolStreamUserMemoryPayload contains structured user-memory tool details.
-type ToolStreamUserMemoryPayload struct {
-	Action   string                    `json:"action,omitempty"`
-	Category string                    `json:"category,omitempty"`
-	Content  *usermemory.ParsedContent `json:"content,omitempty"`
-}
-
-// ToolStreamGlobalMemoryPayload contains structured global-memory tool details.
-type ToolStreamGlobalMemoryPayload struct {
-	Action string `json:"action,omitempty"`
-	Query  string `json:"query,omitempty"`
-}
-
-// StreamChunk is a single typed token event streamed to gateways during Process().
-// Gateways receive thinking tokens, content tokens, and agent status messages via this type.
-type StreamChunk struct {
-	Type        StreamChunkType          `json:"type"`
-	Text        string                   `json:"text,omitempty"`
-	Tool        *ToolStreamPayload       `json:"tool,omitempty"`
-	Attachments []media.OutputAttachment `json:"-"`
-}
-
-func toolStreamPayload(toolName string, args map[string]interface{}, result string, duration time.Duration, isError bool) *ToolStreamPayload {
-	payload := &ToolStreamPayload{
-		Name:       toolName,
-		Arguments:  args,
-		ResultText: result,
-		DurationMS: duration.Milliseconds(),
-		IsError:    isError,
-	}
-	if toolName == toolnames.UserMemorySave {
-		payload.Arguments = nil
-		payload.ResultText = ""
-		payload.UserMemory = &ToolStreamUserMemoryPayload{Action: "save"}
-		return payload
-	}
-	if toolName == toolnames.ComfyUITextToImage || toolName == toolnames.ComfyUIImageToImage {
-		payload.Arguments = nil
-		payload.ResultText = ""
-		return payload
-	}
-	if toolName == "web.fetch" {
-		payload.Arguments = nil
-		payload.ResultText = ""
-		fetchPayload := &ToolStreamFetchPayload{}
-		if !isError && result != "" {
-			if response, err := webfetch.DecodeToolResponse(result); err == nil {
-				fetchPayload.Title = response.Title
-				fetchPayload.ContentType = response.ContentType
-				fetchPayload.Source = response.Source
-				fetchPayload.IsTruncated = response.IsTruncated
-				fetchPayload.IsDegraded = response.IsDegraded
-			}
-		}
-		payload.WebFetch = fetchPayload
-		return payload
-	}
-
-	if toolName != "web.search" {
-		switch toolName {
-		case toolnames.UserMemorySearch, toolnames.UserMemoryList:
-			payload.UserMemory = userMemoryStreamPayload(toolName, args, result, isError)
-		case toolnames.GlobalMemorySearch:
-			payload.GlobalMemory = globalMemoryStreamPayload(args)
-		}
-		return payload
-	}
-
-	searchPayload := &ToolStreamSearchPayload{}
-	if query, ok := args["query"].(string); ok {
-		searchPayload.Query = strings.TrimSpace(query)
-	}
-	if !isError {
-		response, err := websearch.DecodeToolResponse(result)
-		if err == nil {
-			searchPayload.IsDegraded = response.Degraded
-			searchPayload.UnresponsiveEngines = response.UnresponsiveEngines
-			searchPayload.Results = make([]ToolStreamSearchResult, 0, len(response.Results))
-			for _, r := range response.Results {
-				searchPayload.Results = append(searchPayload.Results, ToolStreamSearchResult{
-					Title:       r.Title,
-					URL:         r.URL,
-					Domain:      r.Domain,
-					Content:     r.Snippet,
-					Engines:     r.Engines,
-					PublishedAt: r.PublishedAt,
-					Score:       r.Score,
-				})
-			}
-		}
-	}
-	payload.WebSearch = searchPayload
-	return payload
-}
-
-func userMemoryStreamPayload(toolName string, args map[string]interface{}, result string, isError bool) *ToolStreamUserMemoryPayload {
-	payload := &ToolStreamUserMemoryPayload{Action: userMemoryToolAction(toolName)}
-	if category, ok := args["category"].(string); ok {
-		payload.Category = strings.TrimSpace(strings.ToLower(category))
-	}
-	if isError {
-		return payload
-	}
-	if payload.Action == "search" || payload.Action == "list" {
-		content := usermemory.ParseContent(result)
-		if content.Intro != "" || len(content.Sections) > 0 {
-			payload.Content = &content
-		}
-	}
-	return payload
-}
-
-func userMemoryToolAction(toolName string) string {
-	switch toolName {
-	case toolnames.UserMemorySave:
-		return "save"
-	case toolnames.UserMemorySearch:
-		return "search"
-	case toolnames.UserMemoryList:
-		return "list"
-	}
-	return ""
-}
-
-func globalMemoryStreamPayload(args map[string]interface{}) *ToolStreamGlobalMemoryPayload {
-	payload := &ToolStreamGlobalMemoryPayload{Action: "search"}
-	if query, ok := args["query"].(string); ok {
-		payload.Query = strings.TrimSpace(query)
-	}
-	return payload
-}
-
-// ModelMetrics holds performance data from a single LLM call.
-type ModelMetrics struct {
-	Model            string  `json:"model"`
-	PromptTokens     int     `json:"prompt_tokens,omitempty"`
-	CompletionTokens int     `json:"completion_tokens,omitempty"`
-	TotalTokens      int     `json:"total_tokens,omitempty"`
-	DurationMS       int64   `json:"duration_ms,omitempty"`
-	TokensPerSecond  float64 `json:"tokens_per_second"`
-}
-
-// AgentResponse is the final payload returned to the gateway after processing.
-type AgentResponse struct {
-	Model       string                   `json:"model"`
-	Response    string                   `json:"response,omitempty"`
-	Thinking    string                   `json:"thinking,omitempty"` // reasoning tokens emitted before the response
-	Error       string                   `json:"error,omitempty"`
-	Metrics     *ModelMetrics            `json:"metrics,omitempty"`
-	Attachments []media.OutputAttachment `json:"-"`
-
-	SourceTurnID      int64 `json:"-"`
-	SessionGeneration int   `json:"-"`
-}
-
-// Request contains one fully resolved request submitted to the agent.
-type Request struct {
-	RequestID   string
-	Principal   identity.Principal
-	DisplayName string
-	SessionKey  string
-	IsDirect    bool
-	Prompt      string
-	Images      []llm.InputImage
-	StreamFunc  func(StreamChunk)
-}
 
 // Agent handles LLM orchestration: a single agentic loop where the model
 // calls tools from the registry and generates the final response.
@@ -276,10 +38,10 @@ type Agent struct {
 	chatClient  llm.Chatter
 	registry    *registry.Registry
 	mcpProvider MCPProvider
-	budget      promptbudget.ContextBudget
+	budget      tokenbudget.ContextBudget
 	model       string
 	soul        *soul.Store
-	userMemory  *usermemory.Store
+	userMemory  *memory.Store
 	toolPolicy  governance.GlobalPolicy
 	compactor   ForegroundCompactor
 	log         *config.Logger
@@ -292,15 +54,6 @@ func (a *Agent) SetForegroundCompactor(compactor ForegroundCompactor) {
 	}
 }
 
-// MCPProvider resolves request-scoped MCP tools for the active canonical user.
-type MCPProvider interface {
-	DiscoveryTools(ctx context.Context, principal identity.Principal) []llm.Tool
-	ResolveTools(ctx context.Context, principal identity.Principal, names []string) []string
-	LLMTools(ctx context.Context, principal identity.Principal, exposed map[string]bool) []llm.Tool
-	Execute(ctx context.Context, principal identity.Principal, name string, args map[string]interface{}, exposed map[string]bool) (mcp.ExecutionResult, bool, error)
-	ToolPolicy(name string) governance.ToolPolicy
-}
-
 // NewAgent initializes the Agent with an LLM chat client, tool registry, model name,
 // soul store, SQLite user memory store, prompt budget, tool-governance policy,
 // and logger.
@@ -309,8 +62,8 @@ func NewAgent(
 	registry *registry.Registry,
 	model string,
 	soul *soul.Store,
-	userMemory *usermemory.Store,
-	budget promptbudget.ContextBudget,
+	userMemory *memory.Store,
+	budget tokenbudget.ContextBudget,
 	toolPolicy governance.GlobalPolicy,
 	log *config.Logger,
 	mcpProviders ...MCPProvider,
@@ -332,286 +85,6 @@ func NewAgent(
 	}
 }
 
-func stripReplyContext(prompt string) (string, bool) {
-	prompt = strings.TrimSpace(prompt)
-	if !strings.HasPrefix(prompt, "[Replying ") {
-		return prompt, false
-	}
-	parts := strings.SplitN(prompt, "\n\n", 2)
-	if len(parts) < 2 {
-		return "", true
-	}
-	return strings.TrimSpace(parts[1]), true
-}
-
-func sessionMemoryUserContent(prompt string, imageCount int) string {
-	content, hadReplyContext := stripReplyContext(prompt)
-	if content == "" && hadReplyContext {
-		content = "[User replied to a prior message]"
-	}
-	if imageCount > 0 {
-		content = strings.TrimSpace(content + fmt.Sprintf("\n\n[Attached %d image(s)]", imageCount))
-	}
-	return strings.TrimSpace(content)
-}
-
-// truncate returns s shortened to at most max runes, appending "..." if cut.
-func truncate(s string, max int) string {
-	r := []rune(s)
-	if len(r) <= max {
-		return s
-	}
-	return string(r[:max]) + "..."
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value)
-		}
-	}
-	return ""
-}
-
-func providerUserValue(value string) string {
-	value = strings.TrimSpace(value)
-	value = strings.TrimPrefix(value, "You are speaking with ")
-	value = strings.TrimSuffix(value, ".")
-	return strings.TrimSpace(value)
-}
-
-func gatewaySystemPrompt(gateway string) string {
-	switch strings.TrimSpace(strings.ToLower(gateway)) {
-	case "imessage":
-		return "# Gateway Instructions\nThe user is reading this in iMessage, which does not render Markdown. Write responses in plain text. Do not use Markdown formatting such as **bold**, headings, tables, fenced code blocks, or inline code ticks. Use simple line breaks and plain bullets when helpful."
-	default:
-		return ""
-	}
-}
-
-// mapMetrics converts an LLM response into a model metrics summary.
-func mapMetrics(resp *llm.ChatResponse) *ModelMetrics {
-	if resp == nil {
-		return nil
-	}
-	tps := 0.0
-	if resp.DurationMS > 0 && resp.CompletionTokens > 0 {
-		tps = float64(resp.CompletionTokens) / (float64(resp.DurationMS) / 1000)
-	}
-	return &ModelMetrics{
-		Model:            resp.Model,
-		PromptTokens:     resp.PromptTokens,
-		CompletionTokens: resp.CompletionTokens,
-		TotalTokens:      resp.TotalTokens,
-		DurationMS:       resp.DurationMS,
-		TokensPerSecond:  tps,
-	}
-}
-
-type offeredToolCatalog struct {
-	Tools    []llm.Tool
-	Policies map[string]governance.ToolPolicy
-}
-
-func (a *Agent) toolsForRequest(ctx context.Context, principal identity.Principal, exposure *toolruntime.Exposure, governor *governance.Governor) offeredToolCatalog {
-	catalog := offeredToolCatalog{Policies: make(map[string]governance.ToolPolicy)}
-	add := func(tool llm.Tool, policy governance.ToolPolicy) {
-		name := tool.Function.Name
-		if _, exists := catalog.Policies[name]; name == "" || exists {
-			return
-		}
-		if governor != nil && governor.IsToolRetired(name, policy) {
-			return
-		}
-		catalog.Tools = append(catalog.Tools, tool)
-		catalog.Policies[name] = policy
-	}
-	for _, tool := range a.registry.LLMToolsForVisibility(exposure.Visibility()) {
-		if policy, ok := a.registry.Policy(tool.Function.Name); ok {
-			add(tool, policy)
-		}
-	}
-	if a.mcpProvider == nil {
-		return catalog
-	}
-	for _, tool := range a.mcpProvider.DiscoveryTools(ctx, principal) {
-		add(tool, a.mcpProvider.ToolPolicy(tool.Function.Name))
-	}
-	for _, tool := range a.mcpProvider.LLMTools(ctx, principal, exposure.ExposedMCPTools()) {
-		add(tool, a.mcpProvider.ToolPolicy(tool.Function.Name))
-	}
-	return catalog
-}
-
-func (a *Agent) executeTool(ctx context.Context, principal identity.Principal, name string, args map[string]interface{}, exposure *toolruntime.Exposure) (governance.Result, error) {
-	if a.registry.HasHandler(name) {
-		return a.registry.Execute(ctx, name, args)
-	}
-	if a.mcpProvider != nil {
-		if result, handled, err := a.mcpProvider.Execute(ctx, principal, name, args, exposure.ExposedMCPTools()); handled {
-			return result.Result, err
-		}
-	}
-	return a.registry.Execute(ctx, name, args)
-}
-
-func normalizeToolCallIDs(message *llm.ChatMessage, iteration int) {
-	if message == nil {
-		return
-	}
-	reserved := make(map[string]bool, len(message.ToolCalls))
-	for _, call := range message.ToolCalls {
-		if id := strings.TrimSpace(call.ID); id != "" {
-			reserved[id] = true
-		}
-	}
-	used := make(map[string]bool, len(message.ToolCalls))
-	for i := range message.ToolCalls {
-		id := strings.TrimSpace(message.ToolCalls[i].ID)
-		if id != "" && !used[id] {
-			message.ToolCalls[i].ID = id
-			used[id] = true
-			continue
-		}
-		base := fmt.Sprintf("call_%d_%d", iteration, i+1)
-		id = base
-		for suffix := 2; reserved[id] || used[id]; suffix++ {
-			id = fmt.Sprintf("%s_%d", base, suffix)
-		}
-		message.ToolCalls[i].ID = id
-		used[id] = true
-	}
-}
-
-func foregroundToolCall(tc llm.ToolCall, decision governance.Decision, result governance.Result, execErr error, toolContent string, executedAt time.Time) usermemory.ToolHistoryCall {
-	call := usermemory.ToolHistoryCall{
-		Name:        strings.TrimSpace(tc.Function.Name),
-		HistoryMode: string(governance.HistoryFull),
-		Arguments:   tc.Function.Arguments,
-		Status:      "succeeded",
-		Outcome:     string(result.Outcome),
-		ReasonCode:  result.ReasonCode,
-		IsDegraded:  result.IsDegraded,
-		Result:      toolContent,
-		ExecutedAt:  executedAt.Format(time.RFC3339Nano),
-	}
-	if !decision.Allowed {
-		call.Status = "blocked"
-		call.Outcome = ""
-		call.ReasonCode = decision.ReasonCode
-	} else if execErr != nil {
-		call.Status = "failed"
-		call.Outcome = ""
-		call.ReasonCode = "execution_error"
-	}
-	return call
-}
-
-func persistedToolCall(tc llm.ToolCall, policy governance.HistoryPolicy, decision governance.Decision, result governance.Result, execErr error, toolContent string, executedAt time.Time) usermemory.ToolHistoryCall {
-	call := foregroundToolCall(tc, decision, result, execErr, toolContent, executedAt)
-	call.HistoryMode = string(policy.Mode)
-	call.SearchResult = policy.SearchResult
-	if policy.Mode == governance.HistoryMetadata {
-		call.Arguments = map[string]interface{}{}
-		call.Result = "Historical tool result omitted by policy."
-		call.ArgumentsTruncated = true
-		call.ResultTruncated = true
-		call.SearchResult = false
-		return call
-	}
-	call.Arguments = tc.Function.Arguments
-	if call.Arguments == nil {
-		call.Arguments = map[string]interface{}{}
-	}
-	if encoded, err := json.Marshal(call.Arguments); err != nil || len(encoded) > policy.MaxArgumentBytes {
-		call.Arguments = map[string]interface{}{}
-		call.ArgumentsTruncated = true
-	}
-	runes := []rune(call.Result)
-	if len(runes) > policy.MaxResultRunes {
-		notice := []rune("\n[Historical result truncated.]")
-		keep := policy.MaxResultRunes - len(notice)
-		if keep > 0 {
-			call.Result = string(runes[:keep]) + string(notice)
-		} else {
-			call.Result = string(notice[:policy.MaxResultRunes])
-		}
-		call.ResultTruncated = true
-	}
-	return call
-}
-
-func governanceResultText(reason string) string {
-	switch reason {
-	case governance.ReasonDuplicate:
-		return "Tool call blocked: the same tool and arguments were already executed in this request. Use the existing result or try meaningfully different arguments."
-	case governance.ReasonToolLimit:
-		return "Tool call blocked: this tool reached its execution limit for the request. Continue with the available results."
-	case governance.ReasonToolFailures:
-		return "Tool call blocked: the tool failure limit was reached. Continue without retrying this tool."
-	case governance.ReasonToolUnproductive:
-		return "Tool call blocked: this tool returned too many unproductive results. Continue with the available information."
-	case governance.ReasonGlobalLimit, governance.ReasonIterationLimit:
-		return "Tool call blocked: the request tool budget was exhausted. Finish the answer using the available results."
-	case governance.ReasonUnadvertised:
-		return "Tool call blocked: this tool was not available for this model step. Use only currently available tools."
-	default:
-		return "Tool call blocked by request policy. Continue with the available information."
-	}
-}
-
-func (a *Agent) chatWithImageRetries(ctx context.Context, req llm.ChatRequest, callback func(llm.ChatMessage), log *config.Logger) (*llm.ChatResponse, error, bool) {
-	originalMessages := req.Messages
-	imageCount := 0
-	for _, message := range originalMessages {
-		imageCount += len(message.Images)
-	}
-
-	var firstErr error
-	for attempt := 1; attempt <= maxImageModelAttempts; attempt++ {
-		if imageCount > 0 {
-			messages := append([]llm.ChatMessage(nil), originalMessages...)
-			for i := range messages {
-				if len(originalMessages[i].Images) == 0 {
-					continue
-				}
-				resized, err := media.ResizeInputImagesForAttempt(originalMessages[i].Images, attempt, imageRetryScale, imageInitialScaleMaxEdge)
-				if err != nil {
-					log.Warn("agent.model.image_retry_resize_failed", "failed to resize images for model retry",
-						config.F("attempt", attempt), config.F("image_count", imageCount),
-						config.F("status", "degraded"), config.ErrorField(err))
-					return nil, err, false
-				}
-				messages[i].Images = resized
-			}
-			req.Messages = messages
-		}
-
-		resp, err := a.chatClient.Chat(ctx, req, callback)
-		if err == nil {
-			return resp, nil, false
-		}
-		if imageCount == 0 || !llm.IsOllamaModelRunnerStoppedError(err) {
-			return nil, err, false
-		}
-		if firstErr == nil {
-			firstErr = err
-		}
-		if attempt == maxImageModelAttempts {
-			log.Error("agent.model.image_retry_exhausted", "model runner stopped after resized image retries",
-				config.F("attempt_count", attempt), config.F("image_count", imageCount),
-				config.F("status", "error"), config.F("original_error", config.SafeErrorText(firstErr)),
-				config.F("last_error", config.SafeErrorText(err)))
-			return nil, err, true
-		}
-		log.Warn("agent.model.image_retry", "retrying model call with smaller images",
-			config.F("attempt", attempt+1), config.F("image_count", imageCount),
-			config.F("scale_percent", int(math.Pow(imageRetryScale, float64(attempt+1))*100)),
-			config.F("status", "retry"))
-	}
-	return nil, firstErr, false
-}
-
 // Process handles the end-to-end agentic pipeline in a single loop.
 // The model receives all registered tools and may call them zero or more times
 // before generating its final response. Thinking tokens, content tokens, and
@@ -619,8 +92,8 @@ func (a *Agent) chatWithImageRetries(ctx context.Context, req llm.ChatRequest, c
 //
 // Tool execution errors are handled gracefully — failures inject an error tool
 // response so the model can decide how to proceed. Provider errors are captured
-// into AgentResponse.Error rather than returned as Go errors.
-func (a *Agent) Process(ctx context.Context, request Request) (*AgentResponse, error) {
+// into Response.Error rather than returned as Go errors.
+func (a *Agent) Process(ctx context.Context, request Request) (*Response, error) {
 	if !request.Principal.Authenticated() {
 		return nil, fmt.Errorf("agent request has no authenticated principal")
 	}
@@ -663,7 +136,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (*AgentResponse, e
 		contextImages = append(contextImages, requestctx.InputImage{MIMEType: image.MimeType, Data: image.Data, Source: image.Source})
 	}
 	ctx = requestctx.WithInputImages(ctx, contextImages)
-	toolExposure := toolruntime.NewExposure()
+	toolExposure := exposure.NewExposure()
 	if strings.EqualFold(strings.TrimSpace(gateway), "homeassistant") {
 		toolExposure.HideBuiltins(toolnames.ComfyUITextToImage, toolnames.ComfyUIImageToImage)
 	} else if len(userImages) == 0 {
@@ -727,12 +200,12 @@ func (a *Agent) Process(ctx context.Context, request Request) (*AgentResponse, e
 	meta := requestctx.MetadataFromContext(ctx)
 	meta.SessionGeneration = sessionGeneration
 	ctx = requestctx.WithMetadata(ctx, meta)
-	var recalledMemories []usermemory.RecallResult
+	var recalledMemories []memory.RecallResult
 	if a.userMemory != nil {
 		recallQuery, _ := stripReplyContext(userPrompt)
 		recallStarted := time.Now()
-		var recallStats usermemory.RecallStats
-		recalledMemories, recallStats = a.userMemory.Recall(ctx, senderID, recallQuery, usermemory.RecallRequest{TopK: automaticRecallTopK})
+		var recallStats memory.RecallStats
+		recalledMemories, recallStats = a.userMemory.Recall(ctx, senderID, recallQuery, memory.RecallRequest{TopK: automaticRecallTopK})
 		if recallStats.LexicalError != nil {
 			reqLog.Warn("agent.user_memory.recall.lexical_degraded", "user-memory lexical recall degraded", config.F("status", "degraded"), config.ErrorField(recallStats.LexicalError))
 		}
@@ -753,15 +226,15 @@ func (a *Agent) Process(ctx context.Context, request Request) (*AgentResponse, e
 		)
 	}
 
-	var recentTurns []usermemory.SessionTurn
+	var recentTurns []memory.SessionTurn
 	var recentToolNames []string
-	var sessionSummary usermemory.SessionSummary
+	var sessionSummary memory.SessionSummary
 	if a.userMemory != nil && sessionGeneration > 0 {
 		var err error
 		sessionSummary, err = a.userMemory.LatestSessionSummary(ctx, senderID, sessionKey, sessionGeneration)
 		if err != nil && err != sql.ErrNoRows {
 			reqLog.Warn("agent.session_summary.load_failed", "failed to load session summary", config.F("status", "degraded"), config.ErrorField(err))
-			sessionSummary = usermemory.SessionSummary{}
+			sessionSummary = memory.SessionSummary{}
 		}
 		recentTools, toolErr := a.userMemory.RecentCompletedExchangesAfter(ctx, senderID, sessionKey, sessionGeneration, 0, recentToolExposureTurns)
 		if toolErr != nil {
@@ -791,7 +264,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (*AgentResponse, e
 		}
 		toolExposure.ExposeTools(a.mcpProvider.ResolveTools(ctx, request.Principal, mcpCandidates))
 	}
-	var foregroundDebt []usermemory.SessionTurn
+	var foregroundDebt []memory.SessionTurn
 	if a.compactor != nil && a.userMemory != nil && sessionGeneration > 0 {
 		boundary := sessionSummary.CoveredThroughTurnID
 		var debtErr error
@@ -804,12 +277,12 @@ func (a *Agent) Process(ctx context.Context, request Request) (*AgentResponse, e
 	initialCatalog := a.toolsForRequest(ctx, request.Principal, toolExposure, toolGovernor)
 	inputLimit := a.budget.UsableInputLimit()
 	minimumTail := preservedRecentTailCount(recentTurns, inputLimit)
-	promptContext := AssemblePromptContextWithSummary(dynamicSystemPrompt, profileContent, userPrompt, userImages, sessionSummary, minimumTail, recalledMemories, automaticRecallCharLimit, recentTurns, initialCatalog.Tools, inputLimit)
+	promptContext := AssemblePromptContext(dynamicSystemPrompt, profileContent, userPrompt, userImages, sessionSummary, minimumTail, recalledMemories, automaticRecallCharLimit, recentTurns, initialCatalog.Tools, inputLimit)
 	if a.userMemory != nil {
 		a.userMemory.RecordRecallUsage(ctx, senderID, promptContext.SelectedRecall)
 	}
 	messages := promptContext.Messages
-	var previousSummary *usermemory.SessionSummary
+	var previousSummary *memory.SessionSummary
 	if sessionSummary.ID > 0 {
 		previousSummary = &sessionSummary
 	}
@@ -850,7 +323,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (*AgentResponse, e
 	// These are appended to the stored assistant message so future turns
 	// show what tools were called without ballooning history size.
 	var toolAnnotations []string
-	toolHistory := usermemory.EmptyToolHistory()
+	toolHistory := memory.EmptyToolHistory()
 
 	// Build the streaming callback that routes thinking vs content chunks.
 	// Tool-call iterations are streamed too — the model may reason aloud before
@@ -894,7 +367,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (*AgentResponse, e
 		catalog := a.toolsForRequest(ctx, request.Principal, toolExposure, toolGovernor)
 		req.Tools = catalog.Tools
 		req.ToolChoice = ""
-		initialPressure := iteration == 1 && promptContext.EstimatedBefore*100 >= inputLimit*foregroundCompactionPercent
+		initialPressure := iteration == 1 && promptContext.EstimatedBefore*100 >= inputLimit*tokenbudget.CompactionTriggerPercent
 		preparedMessages, compactionStats, compactErr := foregroundCompaction.prepare(ctx, messages, req.Tools, initialPressure)
 		if compactErr != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
@@ -992,12 +465,12 @@ func (a *Agent) Process(ctx context.Context, request Request) (*AgentResponse, e
 						}
 					} else {
 						errorText := config.SafeErrorText(fmt.Errorf("model failed: %w", err))
-						return &AgentResponse{Model: a.model, Response: errorText, Error: errorText}, nil
+						return &Response{Model: a.model, Response: errorText, Error: errorText}, nil
 					}
 				}
 			} else {
 				errorText := config.SafeErrorText(fmt.Errorf("model failed: %w", err))
-				return &AgentResponse{Model: a.model, Response: errorText, Error: errorText}, nil
+				return &Response{Model: a.model, Response: errorText, Error: errorText}, nil
 			}
 		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -1033,8 +506,8 @@ func (a *Agent) Process(ctx context.Context, request Request) (*AgentResponse, e
 		// Execute each tool call and inject the results as tool response messages.
 		// NOTE: Most models only emit one tool call at a time, but we handle
 		// multiple to be safe.
-		historyBatch := usermemory.ToolHistoryBatch{AssistantContent: resp.Message.Content}
-		foregroundBatch := usermemory.ToolHistoryBatch{AssistantContent: resp.Message.Content}
+		historyBatch := memory.ToolHistoryBatch{AssistantContent: resp.Message.Content}
+		foregroundBatch := memory.ToolHistoryBatch{AssistantContent: resp.Message.Content}
 		for _, tc := range resp.Message.ToolCalls {
 			toolName := tc.Function.Name
 			if toolName == toolnames.UserMemorySave {
@@ -1222,7 +695,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (*AgentResponse, e
 					}
 				} else {
 					errorText := config.SafeErrorText(fmt.Errorf("model failed: %w", err))
-					return &AgentResponse{Model: a.model, Response: errorText, Error: errorText}, nil
+					return &Response{Model: a.model, Response: errorText, Error: errorText}, nil
 				}
 			}
 		}
@@ -1349,12 +822,12 @@ finalize:
 	if len(stagedMemory) > 0 && (a.userMemory == nil || sessionGeneration <= 0) {
 		return nil, fmt.Errorf("persist staged foreground memory: session storage is unavailable")
 	}
-	var storedTurn usermemory.StoredSessionTurn
+	var storedTurn memory.StoredSessionTurn
 	if finalContent != "" && a.userMemory != nil && sessionGeneration > 0 {
-		storedReplay := usermemory.SessionTurn{UserText: userMemoryContent, AssistantText: finalContent, ToolNames: uniqueToolNames(toolAnnotations), ToolHistory: toolHistory}
-		completedPressure := completedPromptPressure(promptContext, storedReplay)
+		storedReplay := memory.SessionTurn{UserText: userMemoryContent, AssistantText: finalContent, ToolNames: uniqueToolNames(toolAnnotations), ToolHistory: toolHistory}
+		completedPressure := tokenbudget.EstimateCompletedRequest(promptContext.EstimatedBefore, storedReplay.UserText, memory.SessionTurnMessages(storedReplay))
 		var err error
-		storedTurn, err = a.userMemory.AppendSessionTurnForGenerationResultWithPressureHistoryAndForegroundMemory(ctx, sessionKey, senderID, sessionGeneration, userMemoryContent, finalContent, toolAnnotations, toolHistory, stagedMemory, sessionTurnTTL, usermemory.SessionPromptPressure{Tokens: completedPressure, Limit: promptContext.InputLimit, Version: promptPressureVersion(a.model, promptContext.InputLimit)})
+		storedTurn, err = a.userMemory.AppendPendingSessionTurn(ctx, memory.SessionTurnWrite{SessionID: sessionKey, UserID: senderID, Generation: sessionGeneration, UserText: userMemoryContent, AssistantText: finalContent, ToolNames: toolAnnotations, History: toolHistory, Staged: stagedMemory, TTL: sessionTurnTTL, Pressure: memory.SessionPromptPressure{Tokens: completedPressure, Limit: promptContext.InputLimit, Version: promptPressureVersion(a.model, promptContext.InputLimit)}})
 		if err != nil {
 			reqLog.Warn("agent.session_memory.write_failed", "failed to append session memory after turn", config.F("status", "degraded"), config.ErrorField(err))
 			if len(stagedMemory) > 0 {
@@ -1378,7 +851,7 @@ finalize:
 		config.F("status", responseStatus),
 	)
 
-	return &AgentResponse{
+	return &Response{
 		Model:             a.model,
 		Response:          finalContent,
 		Thinking:          finalThinking,
@@ -1387,8 +860,4 @@ finalize:
 		SourceTurnID:      storedTurn.ID,
 		SessionGeneration: storedTurn.Generation,
 	}, nil
-}
-
-func promptPressureVersion(model string, inputLimit int) string {
-	return fmt.Sprintf("%s:%s:%d", sessionPromptPressurePrefix, strings.TrimSpace(model), inputLimit)
 }

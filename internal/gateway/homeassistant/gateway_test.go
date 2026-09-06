@@ -12,12 +12,12 @@ import (
 
 	gorilla "github.com/gorilla/websocket"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/accounts"
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
-	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
-	"github.com/jonahgcarpenter/oswald-ai/internal/testutil"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memory/memorytest"
 )
 
 const testToken = "0123456789abcdef0123456789abcdef"
@@ -26,12 +26,12 @@ type fakeProcessor struct {
 	requests chan agent.Request
 }
 
-func (p *fakeProcessor) Process(_ context.Context, request agent.Request) (*agent.AgentResponse, error) {
+func (p *fakeProcessor) Process(_ context.Context, request agent.Request) (*agent.Response, error) {
 	p.requests <- request
 	if request.StreamFunc != nil {
 		request.StreamFunc(agent.StreamChunk{Type: agent.ChunkContent, Text: "Hello "})
 	}
-	return &agent.AgentResponse{Model: "test", Response: "Hello world"}, nil
+	return &agent.Response{Model: "test", Response: "Hello world"}, nil
 }
 
 func TestNewRejectsShortToken(t *testing.T) {
@@ -213,13 +213,13 @@ func readProtocolMessage(t *testing.T, connection *gorilla.Conn) protocolMessage
 	return message
 }
 
-func testLinks(t *testing.T) (*accountlinking.Service, *config.Logger) {
+func testLinks(t *testing.T) (*accounts.Service, *config.Logger) {
 	t.Helper()
 	log := config.NewLogger(config.LevelError)
 	path := filepath.Join(t.TempDir(), "oswald.db")
-	memory := testutil.NewMemoryStore(t, path, log)
+	memory := memorytest.NewStore(t, path, log)
 	t.Cleanup(func() { _ = memory.Close() })
-	links := accountlinking.NewService(path, memory, nil, log)
+	links := accounts.NewService(path, memory, nil, log)
 	if err := links.Initialize(); err != nil {
 		t.Fatal(err)
 	}

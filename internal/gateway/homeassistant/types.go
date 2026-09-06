@@ -10,11 +10,11 @@ import (
 
 	gorilla "github.com/gorilla/websocket"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/accounts"
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
-	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
-	"github.com/jonahgcarpenter/oswald-ai/internal/runtimeinvalidation"
+	"github.com/jonahgcarpenter/oswald-ai/internal/shared/invalidation"
 )
 
 const protocolVersion = 1
@@ -22,7 +22,7 @@ const protocolVersion = 1
 // Gateway serves the authenticated Home Assistant conversation protocol.
 type Gateway struct {
 	Port          string
-	Links         *accountlinking.Service
+	Links         *accounts.Service
 	Runtime       gatewayruntime.Dependencies
 	Log           *config.Logger
 	tokenHash     [sha256.Size]byte
@@ -86,7 +86,7 @@ func (g *Gateway) authenticate(r *http.Request) bool {
 }
 
 // HandleRuntimeInvalidation closes active conversations for removed or disconnected HA users.
-func (g *Gateway) HandleRuntimeInvalidation(event runtimeinvalidation.Event) {
+func (g *Gateway) HandleRuntimeInvalidation(event invalidation.Event) {
 	if !event.CloseConnections {
 		return
 	}

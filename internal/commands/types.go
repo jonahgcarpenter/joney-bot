@@ -6,7 +6,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
-	"github.com/jonahgcarpenter/oswald-ai/internal/runtimeinvalidation"
+	"github.com/jonahgcarpenter/oswald-ai/internal/shared/invalidation"
 )
 
 const (
@@ -52,7 +52,7 @@ type Attachment = media.OutputAttachment
 type Result struct {
 	Text         string
 	Attachments  []Attachment
-	Invalidation *runtimeinvalidation.Event `json:"-"`
+	Invalidation *invalidation.Event `json:"-"`
 }
 
 // ValidateAttachments validates per-file and aggregate transport limits.

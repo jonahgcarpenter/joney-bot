@@ -2,16 +2,7 @@ package discord
 
 import (
 	"encoding/json"
-	"net/http"
-	"sync"
 	"time"
-
-	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
-	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
-	"github.com/jonahgcarpenter/oswald-ai/internal/config"
-	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
-	"github.com/jonahgcarpenter/oswald-ai/internal/media"
-	"github.com/jonahgcarpenter/oswald-ai/internal/runtimeinvalidation"
 )
 
 const (
@@ -128,64 +119,4 @@ type replyContext struct {
 	Embeds      []Embed
 	IsFromBot   bool
 	CreatedAt   time.Time
-}
-
-// Gateway runs the Discord gateway connection loop.
-type Gateway struct {
-	Token       string
-	BotID       string
-	Broker      *broker.Broker
-	Links       *accountlinking.Service
-	Runtime     gatewayruntime.Dependencies
-	Log         *config.Logger
-	APIBaseURL  string
-	HTTPClient  *http.Client
-	VideoFrames media.VideoFrameExtractor
-	replyMu     sync.RWMutex
-	replyIndex  map[string]replyContext
-	sessionMu   sync.RWMutex
-	sessionID   string
-	resumeURL   string
-	lastSeq     *int
-	hbAcked     bool
-}
-
-func (dg *Gateway) log() *config.Logger {
-	return dg.Log.Server("gateway.discord", config.F("gateway", "discord"))
-}
-
-func (dg *Gateway) apiBaseURL() string {
-	if dg.APIBaseURL != "" {
-		return dg.APIBaseURL
-	}
-	return apiBaseURL
-}
-
-func (dg *Gateway) httpClient(timeout time.Duration) *http.Client {
-	if dg.HTTPClient != nil {
-		return dg.HTTPClient
-	}
-	return &http.Client{Timeout: timeout}
-}
-
-// HandleRuntimeInvalidation purges reply context owned by the invalidated tenant.
-func (dg *Gateway) HandleRuntimeInvalidation(event runtimeinvalidation.Event) {
-	sessions := make(map[string]bool, len(event.SessionIDs))
-	for _, sessionID := range event.SessionIDs {
-		sessions[sessionID] = true
-	}
-	senders := make(map[string]bool)
-	const prefix = "discord:"
-	for _, external := range event.ExternalIdentities {
-		if len(external) > len(prefix) && external[:len(prefix)] == prefix {
-			senders[external[len(prefix):]] = true
-		}
-	}
-	dg.replyMu.Lock()
-	for id, ctx := range dg.replyIndex {
-		if sessions[ctx.SessionKey] || senders[ctx.SenderID] {
-			delete(dg.replyIndex, id)
-		}
-	}
-	dg.replyMu.Unlock()
 }

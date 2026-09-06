@@ -1,4 +1,3 @@
-// Package memories implements the /memories command surface.
 package memories
 
 import (
@@ -10,10 +9,10 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/accounts"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
-	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
-	"github.com/jonahgcarpenter/oswald-ai/internal/runtimeinvalidation"
-	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/shared/invalidation"
 )
 
 const usage = "/memories list | forget <id|all>"
@@ -21,12 +20,12 @@ const usage = "/memories list | forget <id|all>"
 const maxMemoryListBytes = commands.MaxTotalAttachmentBytes - (utf8.UTFMax-1)*(commands.MaxAttachments-1)
 
 type handler struct {
-	accounts *accountlinking.Service
-	memory   *usermemory.Store
+	accounts *accounts.Service
+	memory   *memory.Store
 }
 
 // New creates the memories command handler.
-func New(accounts *accountlinking.Service, memory *usermemory.Store) commands.Handler {
+func New(accounts *accounts.Service, memory *memory.Store) commands.Handler {
 	return handler{accounts: accounts, memory: memory}
 }
 
@@ -56,24 +55,24 @@ func (h handler) Execute(ctx context.Context, req commands.Request) (commands.Re
 		var sessionIDs []string
 		if err := h.accounts.RunAuthenticatedCanonicalMutation(req.Principal, func(userID string) error {
 			if userID != req.Principal.CanonicalUserID {
-				return accountlinking.ErrPrincipalMismatch
+				return accounts.ErrPrincipalMismatch
 			}
 			var err error
-			sessionIDs, err = h.memory.HardDeleteAllUserData(ctx, userID, time.Now().UTC())
+			sessionIDs, err = h.memory.ResetUserDataPreservingAccount(ctx, userID, time.Now().UTC())
 			return err
 		}); err != nil {
 			return commands.Result{}, err
 		}
 		h.accounts.UserDataResetCommitted(req.Principal.CanonicalUserID)
-		return commands.Result{Text: "All stored information was permanently deleted. Your account was preserved and your sessions were reset.", Invalidation: &runtimeinvalidation.Event{SessionIDs: sessionIDs}}, nil
+		return commands.Result{Text: "All stored information was permanently deleted. Your account was preserved and your sessions were reset.", Invalidation: &invalidation.Event{SessionIDs: sessionIDs}}, nil
 	}
-	id, err := usermemory.ParseMemoryID(req.Args[1])
+	id, err := memory.ParseMemoryID(req.Args[1])
 	if err != nil {
 		return commands.Result{Text: "ID must be an exact positive decimal stable ID, or all."}, nil
 	}
 	err = h.accounts.RunAuthenticatedCanonicalMutation(req.Principal, func(userID string) error {
 		if userID != req.Principal.CanonicalUserID {
-			return accountlinking.ErrPrincipalMismatch
+			return accounts.ErrPrincipalMismatch
 		}
 		return h.memory.HardDeleteMemory(ctx, userID, id, time.Now().UTC())
 	})
@@ -91,12 +90,12 @@ func (h handler) resolveUser(req commands.Request) (string, error) {
 		return "", err
 	}
 	if userID != req.Principal.CanonicalUserID {
-		return "", accountlinking.ErrPrincipalMismatch
+		return "", accounts.ErrPrincipalMismatch
 	}
 	return userID, nil
 }
 
-func listResult(memories []usermemory.ListedMemory) (commands.Result, error) {
+func listResult(memories []memory.ListedMemory) (commands.Result, error) {
 	var content strings.Builder
 	if len(memories) == 0 {
 		content.WriteString("No active memories.\n")

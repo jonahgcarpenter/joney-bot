@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
+	"github.com/jonahgcarpenter/oswald-ai/internal/accounts"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/discord"
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/homeassistant"
@@ -15,7 +15,7 @@ import (
 )
 
 // NewServicesFromConfig creates all enabled gateway services for the current runtime config.
-func NewServicesFromConfig(cfg *config.Config, links *accountlinking.Service, runtimeDeps gatewayruntime.Dependencies, log *config.Logger) ([]Service, error) {
+func NewServicesFromConfig(cfg *config.Config, links *accounts.Service, runtimeDeps gatewayruntime.Dependencies, log *config.Logger) ([]Service, error) {
 	gatewayLog := log.Server("gateway.bootstrap")
 	services := make([]Service, 0, 3)
 	homeAssistantTokenSet := strings.TrimSpace(cfg.HomeAssistantAuthToken) != ""

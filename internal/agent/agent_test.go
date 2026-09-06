@@ -16,22 +16,22 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/compaction/budget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/database"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
-	"github.com/jonahgcarpenter/oswald-ai/internal/indexruntime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/mcp"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
-	"github.com/jonahgcarpenter/oswald-ai/internal/memoryformation"
-	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
-	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memory/indexing"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memory/memorytest"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memory/policy"
+	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/soul"
-	"github.com/jonahgcarpenter/oswald-ai/internal/testutil"
-	"github.com/jonahgcarpenter/oswald-ai/internal/toolnames"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin"
-	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
+	toolnames "github.com/jonahgcarpenter/oswald-ai/internal/tools/names"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 )
 
@@ -70,7 +70,7 @@ func TestProcessPropagatesCancellationDuringProviderCallWithoutPersistence(t *te
 	agent, store := newTestAgent(t, chat, nil, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct {
-		response *AgentResponse
+		response *Response
 		err      error
 	}, 1)
 	go func() {
@@ -79,7 +79,7 @@ func TestProcessPropagatesCancellationDuringProviderCallWithoutPersistence(t *te
 			Principal: identity.Principal{CanonicalUserID: "user-1", Gateway: "homeassistant", ExternalID: "user-1", Assurance: identity.AssuranceHomeAssistantToken},
 		})
 		done <- struct {
-			response *AgentResponse
+			response *Response
 			err      error
 		}{response: response, err: err}
 	}()
@@ -983,18 +983,18 @@ func TestProcessUsesCommittedSummaryWithRecentVerbatimTail(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	turns, err := store.DeliveredSessionTurnsAfter(context.Background(), "user-1", "session-1", profile.Generation, 0, 100)
+	turns, err := store.CompactionWindowAfter(context.Background(), "user-1", "session-1", profile.Generation, 0, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.EnqueueSessionCompactionCampaignJob(context.Background(), "user-1", "session-1", profile.Generation, turns.Turns[0].ID, turns.Turns[1].ID, turns.Turns[1].ID, "test-model", "test-v1"); err != nil {
+	if _, err := store.EnqueueSessionCompactionJob(context.Background(), "user-1", "session-1", profile.Generation, turns.Turns[0].ID, turns.Turns[1].ID, turns.Turns[1].ID, "test-model", "test-v1"); err != nil {
 		t.Fatal(err)
 	}
 	job, err := store.ClaimSessionCompactionJob(context.Background(), "test", time.Minute, "test-model", "test-v1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.SaveSessionCompactionArtifact(context.Background(), job, usermemory.SummaryArtifact{Narrative: "The first two turns established Atlas.", OpenTasks: []string{"Continue"}, GenerationModel: "test-model", GeneratorVersion: "test-v1"}); err != nil {
+	if err := store.SaveSessionCompactionArtifact(context.Background(), job, memory.SummaryArtifact{Narrative: "The first two turns established Atlas.", OpenTasks: []string{"Continue"}, GenerationModel: "test-model", GeneratorVersion: "test-v1"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.PublishSessionSummary(context.Background(), job); err != nil {
@@ -1018,19 +1018,19 @@ func TestProcessUsesCommittedSummaryWithRecentVerbatimTail(t *testing.T) {
 func TestProcessInjectsTenantScopedRecallWithoutPersistingIt(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "Atlas."}}}}
 	agent, store := newTestAgent(t, chat, nil, nil)
-	_, err := testutil.PublishMemory(context.Background(), store.Store, "user-1", testutil.MemoryFixture{
-		Scope: usermemory.ScopeLongTerm, Category: "projects", Statement: "The project codename is Atlas.", Evidence: "The user named it.", Confidence: 0.95, Importance: 4,
+	_, err := memorytest.PublishMemory(context.Background(), store.Store, "user-1", memorytest.MemoryFixture{
+		Scope: memory.ScopeLongTerm, Category: "projects", Statement: "The project codename is Atlas.", Evidence: "The user named it.", Confidence: 0.95, Importance: 4,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = testutil.PublishMemory(context.Background(), store.Store, "user-2", testutil.MemoryFixture{
-		Scope: usermemory.ScopeLongTerm, Category: "projects", Statement: "The private project codename is Borealis.", Evidence: "Another user's project.", Confidence: 1, Importance: 5,
+	_, err = memorytest.PublishMemory(context.Background(), store.Store, "user-2", memorytest.MemoryFixture{
+		Scope: memory.ScopeLongTerm, Category: "projects", Statement: "The private project codename is Borealis.", Evidence: "Another user's project.", Confidence: 1, Importance: 5,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := indexruntime.NewService(store.Store, nil, nil, "", config.NewLogger(config.LevelError)).RunOnce(context.Background()); err != nil {
+	if err := indexing.NewService(store.Store, nil, nil, "", config.NewLogger(config.LevelError)).RunOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1058,17 +1058,17 @@ func TestProcessInjectsTenantScopedRecallWithoutPersistingIt(t *testing.T) {
 func TestProcessDoesNotConversationallyConfirmPendingMemory(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "model response"}}}}
 	agent, store := newTestAgent(t, chat, nil, nil)
-	output, err := memoryformation.Evaluate(memoryformation.CandidateInput{
+	output, err := policy.Evaluate(policy.CandidateInput{
 		SourceUserText: "My phone is 555-0100", Statement: "The user's phone is 555-0100.", Evidence: "My phone is 555-0100",
-		Provenance: memoryformation.ProvenanceUserStatement, ClaimedAuthority: memoryformation.AuthorityUserDirect,
-		Sensitivity: memoryformation.SensitivityIdentityOrContact, Mode: memoryformation.ModeAutomaticExtraction,
-		Scope: memoryformation.ScopeLongTerm, Category: memoryformation.CategoryIdentity,
-		Context: memoryformation.ContextDirectAssertion, Confidence: 0.95, Importance: 4,
+		Provenance: policy.ProvenanceUserStatement, ClaimedAuthority: policy.AuthorityUserDirect,
+		Sensitivity: policy.SensitivityIdentityOrContact, Mode: policy.ModeAutomaticExtraction,
+		Scope: policy.ScopeLongTerm, Category: policy.CategoryIdentity,
+		Context: policy.ContextDirectAssertion, Confidence: 0.95, Importance: 4,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	candidate, _, err := store.ProposeCandidate(context.Background(), "user-1", usermemory.CandidateProposal{Output: output, IdempotencyKey: "pending-phone"})
+	candidate, _, err := store.ProposeCandidate(context.Background(), "user-1", memory.CandidateProposal{Output: output, IdempotencyKey: "pending-phone"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1301,18 +1301,18 @@ func TestProcessPreExposesLatestFourMCPToolsAcrossSummaryBoundary(t *testing.T) 
 			t.Fatal(err)
 		}
 	}
-	turns, err := store.DeliveredSessionTurnsAfter(context.Background(), "user-1", "session-mcp", profile.Generation, 0, 10)
+	turns, err := store.CompactionWindowAfter(context.Background(), "user-1", "session-mcp", profile.Generation, 0, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.EnqueueSessionCompactionCampaignJob(context.Background(), "user-1", "session-mcp", profile.Generation, turns.Turns[0].ID, turns.Turns[1].ID, turns.Turns[1].ID, "test-model", "test-v1"); err != nil {
+	if _, err := store.EnqueueSessionCompactionJob(context.Background(), "user-1", "session-mcp", profile.Generation, turns.Turns[0].ID, turns.Turns[1].ID, turns.Turns[1].ID, "test-model", "test-v1"); err != nil {
 		t.Fatal(err)
 	}
 	job, err := store.ClaimSessionCompactionJob(context.Background(), "test", time.Minute, "test-model", "test-v1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.SaveSessionCompactionArtifact(context.Background(), job, usermemory.SummaryArtifact{Narrative: "Earlier context.", GenerationModel: "test-model", GeneratorVersion: "test-v1"}); err != nil {
+	if err := store.SaveSessionCompactionArtifact(context.Background(), job, memory.SummaryArtifact{Narrative: "Earlier context.", GenerationModel: "test-model", GeneratorVersion: "test-v1"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.PublishSessionSummary(context.Background(), job); err != nil {
@@ -1342,14 +1342,14 @@ func TestProcessFreezesTenantProfileUntilNewSession(t *testing.T) {
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "three"}},
 	}}
 	agent, store := newTestAgent(t, chat, nil, nil)
-	if _, err := testutil.PublishMemory(context.Background(), store.Store, "user-1", testutil.MemoryFixture{Scope: usermemory.ScopeLongTerm, Category: "identity", Statement: "The user is Ada.", Confidence: 1, Importance: 5}); err != nil {
+	if _, err := memorytest.PublishMemory(context.Background(), store.Store, "user-1", memorytest.MemoryFixture{Scope: memory.ScopeLongTerm, Category: "identity", Statement: "The user is Ada.", Confidence: 1, Importance: 5}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := processAgent(agent, "req-1", "homeassistant", "session-1", "user-1", "Ada", "first", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	firstProfile := tenantProfileMessage(primaryRequests(chat.requests)[0].Messages)
-	if _, err := testutil.PublishMemory(context.Background(), store.Store, "user-1", testutil.MemoryFixture{Scope: usermemory.ScopeLongTerm, Category: "communication_preferences", Statement: "The user prefers concise replies.", Confidence: 1, Importance: 5}); err != nil {
+	if _, err := memorytest.PublishMemory(context.Background(), store.Store, "user-1", memorytest.MemoryFixture{Scope: memory.ScopeLongTerm, Category: "communication_preferences", Statement: "The user prefers concise replies.", Confidence: 1, Importance: 5}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := processAgent(agent, "req-2", "homeassistant", "session-1", "user-1", "Ada", "second", nil, nil); err != nil {
@@ -1379,7 +1379,7 @@ func TestProcessNeverIncludesAnotherUsersTenantProfile(t *testing.T) {
 	}}
 	agent, store := newTestAgent(t, chat, nil, nil)
 	for _, tc := range []struct{ user, statement string }{{"user-1", "The user is Alice."}, {"user-2", "The user is Bob."}} {
-		if _, err := testutil.PublishMemory(context.Background(), store.Store, tc.user, testutil.MemoryFixture{Scope: usermemory.ScopeLongTerm, Category: "identity", Statement: tc.statement, Confidence: 1, Importance: 5}); err != nil {
+		if _, err := memorytest.PublishMemory(context.Background(), store.Store, tc.user, memorytest.MemoryFixture{Scope: memory.ScopeLongTerm, Category: "identity", Statement: tc.statement, Confidence: 1, Importance: 5}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1483,19 +1483,19 @@ func productiveResult(content string) governance.Result {
 	return governance.Result{Content: content, Outcome: governance.OutcomeProductive}
 }
 
-func registerStagingTool(t *testing.T, reg *registry.Registry, store *usermemory.Store, resetSession bool) {
+func registerStagingTool(t *testing.T, reg *registry.Registry, store *memory.Store, resetSession bool) {
 	t.Helper()
-	policy := testToolPolicy()
-	policy.History = governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false}
-	err := registerTestTool(t, reg, registry.Spec{Name: toolnames.UserMemorySave, Description: "Stage a memory", Schema: &llm.ToolParameters{Type: "object"}}, policy, func(ctx context.Context, _ map[string]interface{}) (governance.Result, error) {
+	toolPolicy := testToolPolicy()
+	toolPolicy.History = governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false}
+	err := registerTestTool(t, reg, registry.Spec{Name: toolnames.UserMemorySave, Description: "Stage a memory", Schema: &llm.ToolParameters{Type: "object"}}, toolPolicy, func(ctx context.Context, _ map[string]interface{}) (governance.Result, error) {
 		collector := requestctx.MemoryStageCollectorFromContext(ctx)
 		if collector == nil {
 			return governance.Result{}, errors.New("memory collector is missing")
 		}
-		candidate := memoryformation.CandidateOutput{
+		candidate := policy.CandidateOutput{
 			Statement: "The user prefers dark mode.", Evidence: "I prefer dark mode.",
-			Category: memoryformation.CategoryDurablePreferences, ClaimSlot: "durable_preferences.fact", ClaimValue: "dark mode",
-			Mode: memoryformation.ModeAgentSave, Approval: memoryformation.ApprovalApproved,
+			Category: policy.CategoryDurablePreferences, ClaimSlot: "durable_preferences.fact", ClaimValue: "dark mode",
+			Mode: policy.ModeAgentSave, Approval: policy.ApprovalApproved,
 		}
 		if err := collector.Stage([]requestctx.StagedMemoryCandidate{{CanonicalUserID: "user-1", Candidate: candidate}}); err != nil {
 			return governance.Result{}, err
@@ -1618,7 +1618,7 @@ func (p *fakeMCPProvider) Execute(ctx context.Context, _ identity.Principal, nam
 	return mcp.ExecutionResult{}, false, nil
 }
 
-func processAgent(agent *Agent, requestID, gateway, sessionKey, userID, displayName, prompt string, images []llm.InputImage, streamFunc func(StreamChunk)) (*AgentResponse, error) {
+func processAgent(agent *Agent, requestID, gateway, sessionKey, userID, displayName, prompt string, images []llm.InputImage, streamFunc func(StreamChunk)) (*Response, error) {
 	assurance := identity.AssuranceHomeAssistantToken
 	switch gateway {
 	case "discord":
@@ -1689,11 +1689,11 @@ func newTestAgentWithSoulPath(t *testing.T, chat llm.Chatter, embedder llm.Embed
 	if embedder != nil {
 		embeddingModel = "embed-model"
 	}
-	userStore, err := usermemory.NewSQLiteStore(dbPath, embedder, embeddingModel, log)
+	userStore, err := memory.NewSQLiteStore(dbPath, embedder, embeddingModel, log)
 	if err != nil {
 		t.Fatalf("user store: %v", err)
 	}
-	agent := NewAgent(chat, reg, "test-model", soulStore, userStore, promptbudget.ContextBudget{PromptLimit: 100000}, testGlobalPolicy(), log)
+	agent := NewAgent(chat, reg, "test-model", soulStore, userStore, budget.ContextBudget{PromptLimit: 100000}, testGlobalPolicy(), log)
 	t.Cleanup(func() { _ = userStore.Close() })
 	return agent, &agentMemoryFixture{Store: userStore, sql: db.SQL()}, soulPath
 }

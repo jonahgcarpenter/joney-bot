@@ -13,16 +13,16 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
+	"github.com/jonahgcarpenter/oswald-ai/internal/compaction/budget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/database"
+	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/routing"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
-	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
-	"github.com/jonahgcarpenter/oswald-ai/internal/routing"
-	"github.com/jonahgcarpenter/oswald-ai/internal/runtimeinvalidation"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memory/memorytest"
+	"github.com/jonahgcarpenter/oswald-ai/internal/shared/invalidation"
 	"github.com/jonahgcarpenter/oswald-ai/internal/soul"
-	"github.com/jonahgcarpenter/oswald-ai/internal/testutil"
-	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 )
@@ -183,7 +183,7 @@ func TestExecuteAttachmentLogsExcludeContent(t *testing.T) {
 }
 
 func TestExecutePublishesCommandInvalidationAfterEveryDeliveryAttempt(t *testing.T) {
-	event := runtimeinvalidation.Event{ExternalIdentities: []string{"homeassistant:subject"}, SessionIDs: []string{"session"}, CloseConnections: true}
+	event := invalidation.Event{ExternalIdentities: []string{"homeassistant:subject"}, SessionIDs: []string{"session"}, CloseConnections: true}
 	service, err := commands.NewServiceWithCommands(commands.Command{Handler: commands.HandlerFunc{
 		DefinitionValue: commands.Definition{Name: "erase", UserExclusive: true},
 		ExecuteFunc: func(context.Context, commands.Request) (commands.Result, error) {
@@ -193,10 +193,10 @@ func TestExecutePublishesCommandInvalidationAfterEveryDeliveryAttempt(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	bus := runtimeinvalidation.NewBus()
+	bus := invalidation.NewBus()
 	responder := &fakeResponder{}
 	published := 0
-	bus.Subscribe(func(got runtimeinvalidation.Event) {
+	bus.Subscribe(func(got invalidation.Event) {
 		published++
 		if responder.command.Text != "deleted" || !got.CloseConnections {
 			t.Fatalf("invalidation published before delivery or with wrong event: response=%+v event=%+v", responder.command, got)
@@ -231,7 +231,7 @@ func TestExecuteEnqueuesFormationOnlyAfterResponseDelivery(t *testing.T) {
 
 func TestExecuteEnqueuesCompactionOnlyAfterSuccessfulDelivery(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
-	processor := responseRuntimeProcessor{response: &agent.AgentResponse{Model: "model", Response: "answer", SourceTurnID: 77, SessionGeneration: 3}}
+	processor := responseRuntimeProcessor{response: &agent.Response{Model: "model", Response: "answer", SourceTurnID: 77, SessionGeneration: 3}}
 	b := broker.NewBroker(processor, 1, log)
 	b.Start()
 	defer b.Shutdown()
@@ -370,7 +370,7 @@ func TestExecuteHoldsResolvedUserFencesThroughDeliveryAndInvalidation(t *testing
 	}()
 	<-activeStarted
 
-	event := runtimeinvalidation.Event{SessionIDs: []string{"target-session"}}
+	event := invalidation.Event{SessionIDs: []string{"target-session"}}
 	commandStarted := make(chan struct{})
 	service, err := commands.NewServiceWithCommands(commands.Command{Handler: commands.HandlerFunc{
 		DefinitionValue: commands.Definition{Name: "deleteuser", UserExclusive: true},
@@ -390,9 +390,9 @@ func TestExecuteHoldsResolvedUserFencesThroughDeliveryAndInvalidation(t *testing
 		fakeResponder: &fakeResponder{}, broker: b, target: target,
 		laterTargetStarted: laterTargetStarted,
 	}
-	bus := runtimeinvalidation.NewBus()
+	bus := invalidation.NewBus()
 	heldAtBus := false
-	bus.Subscribe(func(runtimeinvalidation.Event) {
+	bus.Subscribe(func(invalidation.Event) {
 		select {
 		case <-laterTargetStarted:
 		case <-time.After(30 * time.Millisecond):
@@ -441,7 +441,7 @@ type fakeResponder struct {
 	cleaned  bool
 	fallback string
 	command  commands.Result
-	agent    *agent.AgentResponse
+	agent    *agent.Response
 	agentErr string
 	sendErr  error
 	canceled bool
@@ -486,7 +486,7 @@ func (r *fakeResponder) SendCommandResponse(result commands.Result) error {
 	return r.sendErr
 }
 
-func (r *fakeResponder) SendAgentResponse(response *agent.AgentResponse) error {
+func (r *fakeResponder) SendAgentResponse(response *agent.Response) error {
 	r.agent = response
 	return r.sendErr
 }
@@ -522,7 +522,7 @@ type fakeFormationEnqueuer struct {
 	called            bool
 	responseDelivered bool
 	userID            string
-	source            usermemory.FormationSource
+	source            memory.FormationSource
 }
 
 type fakeCompactionEnqueuer struct {
@@ -531,10 +531,10 @@ type fakeCompactionEnqueuer struct {
 	failureMarked     bool
 	responseDelivered bool
 	userID            string
-	source            usermemory.FormationSource
+	source            memory.FormationSource
 }
 
-func (f *fakeCompactionEnqueuer) Enqueue(_ context.Context, userID string, source usermemory.FormationSource) error {
+func (f *fakeCompactionEnqueuer) Enqueue(_ context.Context, userID string, source memory.FormationSource) error {
 	f.enqueueCalled = true
 	f.responseDelivered = f.responder.agent != nil && f.responder.sendErr == nil
 	f.userID = userID
@@ -550,7 +550,7 @@ func (f *fakeCompactionEnqueuer) MarkDeliveryFailed(_ context.Context, userID st
 	return nil
 }
 
-func (f *fakeFormationEnqueuer) Enqueue(_ context.Context, userID string, source usermemory.FormationSource) error {
+func (f *fakeFormationEnqueuer) Enqueue(_ context.Context, userID string, source memory.FormationSource) error {
 	f.called = true
 	f.responseDelivered = f.responder.agent != nil
 	f.userID = userID
@@ -558,9 +558,9 @@ func (f *fakeFormationEnqueuer) Enqueue(_ context.Context, userID string, source
 	return nil
 }
 
-type responseRuntimeProcessor struct{ response *agent.AgentResponse }
+type responseRuntimeProcessor struct{ response *agent.Response }
 
-func (p responseRuntimeProcessor) Process(context.Context, agent.Request) (*agent.AgentResponse, error) {
+func (p responseRuntimeProcessor) Process(context.Context, agent.Request) (*agent.Response, error) {
 	return p.response, nil
 }
 
@@ -599,16 +599,16 @@ func (h outOfBandStopHandler) Execute(_ context.Context, req commands.Request) (
 	return commands.Result{Text: "Stopped."}, nil
 }
 
-func (p *cancelAwareRuntimeProcessor) Process(ctx context.Context, _ agent.Request) (*agent.AgentResponse, error) {
+func (p *cancelAwareRuntimeProcessor) Process(ctx context.Context, _ agent.Request) (*agent.Response, error) {
 	close(p.started)
 	<-ctx.Done()
 	return nil, ctx.Err()
 }
 
-func (p *blockingRuntimeProcessor) Process(context.Context, agent.Request) (*agent.AgentResponse, error) {
+func (p *blockingRuntimeProcessor) Process(context.Context, agent.Request) (*agent.Response, error) {
 	close(p.started)
 	<-p.release
-	return &agent.AgentResponse{Response: "agent response"}, nil
+	return &agent.Response{Response: "agent response"}, nil
 }
 
 func testDependencies(t *testing.T, log *config.Logger) (Dependencies, func()) {
@@ -629,8 +629,8 @@ func testDependencies(t *testing.T, log *config.Logger) (Dependencies, func()) {
 		t.Fatalf("seed account user: %v", err)
 	}
 	db.Close() // nolint:errcheck
-	memory := testutil.NewMemoryStore(t, dbPath, log)
-	ai := agent.NewAgent(runtimeFakeChatter{}, registry.New(log), "test-model", soulStore, memory, promptbudget.ContextBudget{PromptLimit: 100000}, governance.GlobalPolicy{MaxExecutions: 12, MaxToolIterations: 8}, log)
+	memory := memorytest.NewStore(t, dbPath, log)
+	ai := agent.NewAgent(runtimeFakeChatter{}, registry.New(log), "test-model", soulStore, memory, budget.ContextBudget{PromptLimit: 100000}, governance.GlobalPolicy{MaxExecutions: 12, MaxToolIterations: 8}, log)
 	b := broker.NewBroker(ai, 1, log)
 	b.Start()
 	commandService, err := commands.NewServiceWithCommands(commands.Command{Handler: pingHandler{}})

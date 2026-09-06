@@ -9,8 +9,9 @@ import (
 	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
+	toolnames "github.com/jonahgcarpenter/oswald-ai/internal/tools/names"
 )
 
 const (
@@ -101,7 +102,7 @@ func NewHandler(searcher Searcher, log *config.Logger) func(ctx context.Context,
 		agentLog.Debug(
 			"agent.tool.web.search.start",
 			"starting web search tool",
-			config.F("tool_name", "web.search"),
+			config.F("tool_name", toolnames.WebSearch),
 			config.F("query_chars", len([]rune(query))),
 		)
 

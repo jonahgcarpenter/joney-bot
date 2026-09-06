@@ -64,7 +64,7 @@ func (r *runtimeResponder) CancelAgentResponse() error {
 	return r.sendError("request_canceled", "The request was canceled.")
 }
 
-func (r *runtimeResponder) SendAgentResponse(response *agent.AgentResponse) error {
+func (r *runtimeResponder) SendAgentResponse(response *agent.Response) error {
 	if response == nil {
 		return r.sendError("request_failed", "Oswald returned no response.")
 	}

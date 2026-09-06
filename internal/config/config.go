@@ -68,7 +68,7 @@ func DefaultRetentionPolicy() RetentionPolicy {
 const (
 	DefaultSoulPath                        = "data/memory/soul/soul.md"
 	DefaultToolsConfigDir                  = "data/tools"
-	DefaultAccountLinkPath                 = "data/database/oswald.db"
+	DefaultDatabasePath                    = "data/database/oswald.db"
 	DefaultComfyUITextToImageWorkflowPath  = "data/workflows/comfyui/text-to-image-basic.json"
 	DefaultComfyUIImageToImageWorkflowPath = "data/workflows/comfyui/image-to-image-basic.json"
 )

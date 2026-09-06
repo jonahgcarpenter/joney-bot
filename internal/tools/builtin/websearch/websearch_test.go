@@ -334,7 +334,7 @@ func TestNormalizationBoundsTextAndEngineNames(t *testing.T) {
 	for i := range engines {
 		engines[i] = fmt.Sprintf("engine-%d-%s", i, strings.Repeat("x", 100))
 	}
-	result, ok := normalizeResult(searxngResult{
+	result, ok := normalizeResult(searchCandidate{
 		Title: strings.Repeat("界", 300), URL: "https://public.example/", Content: strings.Repeat("界", maxSnippetRunes+100), Engines: engines,
 	})
 	if !ok {
@@ -352,10 +352,10 @@ func TestNormalizationBoundsTextAndEngineNames(t *testing.T) {
 
 func TestNormalizeResultRejectsMalformedQueryAndAcceptsUppercaseScheme(t *testing.T) {
 	t.Parallel()
-	if _, ok := normalizeResult(searxngResult{Title: "bad", URL: "https://example.com/?a=1;b=2"}); ok {
+	if _, ok := normalizeResult(searchCandidate{Title: "bad", URL: "https://example.com/?a=1;b=2"}); ok {
 		t.Fatal("result with malformed query was accepted")
 	}
-	result, ok := normalizeResult(searxngResult{Title: "good", URL: "HTTPS://Example.com/path"})
+	result, ok := normalizeResult(searchCandidate{Title: "good", URL: "HTTPS://Example.com/path"})
 	if !ok || result.URL != "https://example.com/path" {
 		t.Fatalf("uppercase scheme result = %+v, accepted=%t", result, ok)
 	}

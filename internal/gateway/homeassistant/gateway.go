@@ -15,9 +15,9 @@ import (
 
 	gorilla "github.com/gorilla/websocket"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/accounts"
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
-	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
@@ -26,7 +26,7 @@ import (
 var protocolIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
 
 // New creates a Home Assistant gateway with a deployment-scoped service token.
-func New(port, token string, links *accountlinking.Service, runtime gatewayruntime.Dependencies, log *config.Logger) (*Gateway, error) {
+func New(port, token string, links *accounts.Service, runtime gatewayruntime.Dependencies, log *config.Logger) (*Gateway, error) {
 	token = strings.TrimSpace(token)
 	if len(token) < 32 {
 		return nil, fmt.Errorf("HOME_ASSISTANT_AUTH_TOKEN must contain at least 32 characters")
@@ -97,7 +97,7 @@ func (g *Gateway) handleConnection(w http.ResponseWriter, r *http.Request, b *br
 		_ = tracked.writeJSON(protocolMessage{Type: "error", Code: "invalid_request", Message: "The request was invalid."})
 		return
 	}
-	userID, err := accountlinking.NormalizeIdentifier("homeassistant", request.UserID)
+	userID, err := accounts.NormalizeIdentifier("homeassistant", request.UserID)
 	if err != nil {
 		_ = tracked.writeJSON(protocolMessage{Type: "error", RequestID: request.RequestID, Code: "user_required", Message: "An authenticated Home Assistant user is required."})
 		return

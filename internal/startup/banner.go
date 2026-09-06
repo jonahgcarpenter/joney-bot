@@ -1,4 +1,4 @@
-// Package startup provides human-readable application startup output.
+// Package startup assembles the application, coordinates cleanup, and presents startup output.
 package startup
 
 import (

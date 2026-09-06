@@ -1,4 +1,3 @@
-// Package globalmemory implements administrator management of shared global facts.
 package globalmemory
 
 import (
@@ -9,16 +8,16 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
-	globalstore "github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/globalmemory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memory/global"
 )
 
 type handler struct {
-	store *globalstore.Store
+	store *global.Store
 	log   *config.Logger
 }
 
 // New creates the administrator-only global-memory command family.
-func New(store *globalstore.Store, log *config.Logger) commands.Handler {
+func New(store *global.Store, log *config.Logger) commands.Handler {
 	return &handler{store: store, log: log}
 }
 

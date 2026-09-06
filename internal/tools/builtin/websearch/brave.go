@@ -24,6 +24,27 @@ const (
 	braveRateLimit       = 50
 )
 
+type braveContextResponse struct {
+	Grounding *braveGrounding               `json:"grounding"`
+	Sources   map[string]braveContextSource `json:"sources"`
+}
+
+type braveGrounding struct {
+	Generic *[]braveContextResult `json:"generic"`
+}
+
+type braveContextResult struct {
+	URL      string   `json:"url"`
+	Title    string   `json:"title"`
+	Snippets []string `json:"snippets"`
+}
+
+type braveContextSource struct {
+	Title    string   `json:"title"`
+	Hostname string   `json:"hostname"`
+	Age      []string `json:"age"`
+}
+
 type braveContextRequest struct {
 	Query                 string `json:"q"`
 	Country               string `json:"country"`
@@ -166,7 +187,7 @@ func decodeBraveResponse(body io.Reader) (SearchResponse, int, error) {
 	if backend.Grounding == nil || backend.Grounding.Generic == nil {
 		return SearchResponse{}, len(data), errors.New("failed to parse Brave response")
 	}
-	candidates := make([]searxngResult, 0, len(*backend.Grounding.Generic))
+	candidates := make([]searchCandidate, 0, len(*backend.Grounding.Generic))
 	for _, result := range *backend.Grounding.Generic {
 		source := backend.Sources[result.URL]
 		title := result.Title
@@ -185,12 +206,12 @@ func decodeBraveResponse(body io.Reader) (SearchResponse, int, error) {
 				cleanSnippets = append(cleanSnippets, cleaned)
 			}
 		}
-		candidates = append(candidates, searxngResult{
+		candidates = append(candidates, searchCandidate{
 			Title: title, URL: result.URL, Content: strings.Join(cleanSnippets, "\n\n"), Engine: "brave",
 			PublishedDate: published, PreserveWhitespace: true,
 		})
 	}
-	return filterResponse(searxngResponse{Results: candidates}), len(data), nil
+	return normalizeCandidates(candidates, []string{}), len(data), nil
 }
 
 func braveRetry(status int, headers http.Header) (time.Duration, bool, string) {
