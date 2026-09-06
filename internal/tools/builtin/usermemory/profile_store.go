@@ -177,8 +177,8 @@ func bindSessionProfileTx(ctx context.Context, tx *sql.Tx, userID, sessionID str
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO sessions (canonical_user_id, session_id, generation, is_active, last_seen_at, expires_at,
 	profile_version, profile_version_high_water, renderer_version, source_digest, speaker_intro, rendered_content,
-	fact_count, profile_bytes, source_memory_ids)
-VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	source_memory_ids)
+VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(canonical_user_id, session_id) DO UPDATE SET
 	generation = excluded.generation, is_active = 1,
 	last_seen_at = excluded.last_seen_at, expires_at = excluded.expires_at,
@@ -186,11 +186,10 @@ ON CONFLICT(canonical_user_id, session_id) DO UPDATE SET
 	profile_version_high_water = MAX(sessions.profile_version_high_water, excluded.profile_version_high_water),
 	renderer_version = excluded.renderer_version, source_digest = excluded.source_digest,
 	speaker_intro = excluded.speaker_intro, rendered_content = excluded.rendered_content,
-	fact_count = excluded.fact_count, profile_bytes = excluded.profile_bytes,
 	source_memory_ids = excluded.source_memory_ids
 `, userID, sessionID, generation, formatTime(now), formatTime(now.Add(ttl)),
 		profile.Version, profile.Version, ProfileRendererVersion, profile.sourceDigest, profile.SpeakerIntro,
-		profile.Content, profile.FactCount, profile.Bytes, string(encoded)); err != nil {
+		profile.Content, string(encoded)); err != nil {
 		return fmt.Errorf("bind tenant session profile: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET profile_version_high_water = MAX(profile_version_high_water, ?) WHERE canonical_user_id = ?`, profile.Version, userID); err != nil {
@@ -257,10 +256,11 @@ FROM memory_entries WHERE canonical_user_id = ?`, userID)
 
 func loadSessionProfileTx(ctx context.Context, tx *sql.Tx, userID, sessionID string) (SessionProfile, error) {
 	var profile SessionProfile
-	err := tx.QueryRowContext(ctx, `SELECT profile_version, profile_version, speaker_intro, rendered_content, fact_count, profile_bytes FROM sessions WHERE canonical_user_id = ? AND session_id = ?`, userID, sessionID).Scan(&profile.VersionID, &profile.Version, &profile.SpeakerIntro, &profile.Content, &profile.FactCount, &profile.Bytes)
+	err := tx.QueryRowContext(ctx, `SELECT profile_version, profile_version, speaker_intro, rendered_content, json_array_length(source_memory_ids) FROM sessions WHERE canonical_user_id = ? AND session_id = ?`, userID, sessionID).Scan(&profile.VersionID, &profile.Version, &profile.SpeakerIntro, &profile.Content, &profile.FactCount)
 	if err != nil {
 		return SessionProfile{}, fmt.Errorf("load tenant session profile: %w", err)
 	}
+	profile.Bytes = len(profile.Content)
 	return profile, nil
 }
 
@@ -274,14 +274,14 @@ func rebindProfileCopiesTx(ctx context.Context, tx *sql.Tx, userID string, memor
 		return fmt.Errorf("encode rebound profile sources: %w", err)
 	}
 	condition := `EXISTS (SELECT 1 FROM json_each(sessions.source_memory_ids) source JOIN memory_entries memory ON memory.id = CAST(source.value AS INTEGER) WHERE memory.canonical_user_id = ? AND memory.status = 'expired')`
-	args := []any{profile.Version, profile.Version, ProfileRendererVersion, profile.sourceDigest, profile.SpeakerIntro, profile.Content, profile.FactCount, profile.Bytes, string(encoded), userID, userID}
+	args := []any{profile.Version, profile.Version, ProfileRendererVersion, profile.sourceDigest, profile.SpeakerIntro, profile.Content, string(encoded), userID, userID}
 	if memoryID > 0 {
 		condition = `EXISTS (SELECT 1 FROM json_each(sessions.source_memory_ids) source WHERE CAST(source.value AS INTEGER) = ?)`
-		args = []any{profile.Version, profile.Version, ProfileRendererVersion, profile.sourceDigest, profile.SpeakerIntro, profile.Content, profile.FactCount, profile.Bytes, string(encoded), userID, memoryID}
+		args = []any{profile.Version, profile.Version, ProfileRendererVersion, profile.sourceDigest, profile.SpeakerIntro, profile.Content, string(encoded), userID, memoryID}
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET
 	profile_version = ?, profile_version_high_water = MAX(profile_version_high_water, ?), renderer_version = ?,
-	source_digest = ?, speaker_intro = ?, rendered_content = ?, fact_count = ?, profile_bytes = ?,
+	source_digest = ?, speaker_intro = ?, rendered_content = ?,
 	source_memory_ids = ?
 WHERE canonical_user_id = ? AND `+condition, args...); err != nil {
 		return fmt.Errorf("rebind tenant profile snapshots: %w", err)

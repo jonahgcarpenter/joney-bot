@@ -147,7 +147,7 @@ func (s *Store) HardDeleteAllUserData(ctx context.Context, userID string, now ti
 	if err := deleteDerivedRowsTx(ctx, tx, "all", nil, userID); err != nil {
 		return nil, err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET generation = generation + 1, is_active = 0, last_seen_at = ?, expires_at = ?, source_digest = '', rendered_content = speaker_intro, fact_count = 0, profile_bytes = length(CAST(speaker_intro AS BLOB)), source_memory_ids = '[]' WHERE canonical_user_id = ?`, nowText, nowText, userID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET generation = generation + 1, is_active = 0, last_seen_at = ?, expires_at = ?, source_digest = '', rendered_content = speaker_intro, source_memory_ids = '[]' WHERE canonical_user_id = ?`, nowText, nowText, userID); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {

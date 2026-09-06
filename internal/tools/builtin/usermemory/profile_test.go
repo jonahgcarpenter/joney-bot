@@ -199,7 +199,7 @@ func TestSessionProfileFreezesUntilNewSession(t *testing.T) {
 	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
 	defer store.Close() // nolint:errcheck
 	seedAccountUsers(t, store, "user")
-	if err := store.SyncSpeakerIntro("user", "You are speaking with Ada."); err != nil {
+	if err := store.SyncSpeakerIntro("user", "You are speaking with Zoë 界."); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.SaveMemory(context.Background(), "user", SaveRequest{Scope: ScopeLongTerm, Category: "identity", Statement: "The user is Ada.", Confidence: 0.9, Importance: 3}); err != nil {
@@ -223,8 +223,30 @@ func TestSessionProfileFreezesUntilNewSession(t *testing.T) {
 	if frozen.VersionID != first.VersionID || frozen.Content != first.Content {
 		t.Fatalf("active session profile changed: first=%+v frozen=%+v", first, frozen)
 	}
+	if first.FactCount != 1 || frozen.FactCount != 1 || frozen.Bytes != len(first.Content) || frozen.Bytes == len([]rune(first.Content)) || frozen.LatestFactCount != 2 || latest.FactCount != 2 || latest.Bytes != len(latest.Content) {
+		t.Fatalf("frozen profile metrics: first=%+v frozen=%+v latest=%+v", first, frozen, latest)
+	}
 	if latest.Version <= first.Version || !strings.Contains(latest.Content, "concise replies") {
 		t.Fatalf("new session did not receive latest profile: %+v", latest)
+	}
+}
+
+func TestEmptyFrozenSessionProfileMetrics(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
+	defer store.Close()
+	seedAccountUsers(t, store, "empty-user")
+	for range 2 {
+		profile, err := store.ResolveSessionProfile(context.Background(), "empty-user", "session", time.Hour)
+		if err != nil || profile.Bytes != len(profile.Content) || profile.FactCount != 0 {
+			t.Fatalf("empty profile=%+v err=%v", profile, err)
+		}
+	}
+	if _, err := store.sql.Exec(`UPDATE sessions SET rendered_content = '' WHERE canonical_user_id = 'empty-user'`); err != nil {
+		t.Fatal(err)
+	}
+	profile, err := store.ResolveSessionProfile(context.Background(), "empty-user", "session", time.Hour)
+	if err != nil || profile.Content != "" || profile.Bytes != 0 || profile.FactCount != 0 {
+		t.Fatalf("empty frozen content=%+v err=%v", profile, err)
 	}
 }
 
@@ -254,6 +276,10 @@ func TestSessionProfileIsTenantScopedAndResetClearsHistory(t *testing.T) {
 	reset, err := store.ResetSession(context.Background(), "user-a", "shared", time.Hour)
 	if err != nil {
 		t.Fatal(err)
+	}
+	loadedReset, err := store.ResolveSessionProfile(context.Background(), "user-a", "shared", time.Hour)
+	if err != nil || loadedReset.FactCount != 1 || loadedReset.Bytes != len(reset.Content) || loadedReset.Content != reset.Content {
+		t.Fatalf("reset profile metrics=%+v err=%v", loadedReset, err)
 	}
 	turns, err := store.RecentCompletedExchanges(context.Background(), "user-a", "shared", reset.Generation, 4)
 	if err != nil || len(turns) != 0 || reset.Generation <= a.Generation {
@@ -374,6 +400,9 @@ func TestMergePreservesFrozenSessionAndPublishesMergedProfile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if merged.FactCount != loserSession.FactCount || merged.Bytes != len(loserSession.Content) || merged.LatestFactCount != 2 {
+		t.Fatalf("merged frozen metrics=%+v loser=%+v", merged, loserSession)
+	}
 	turns, err := store.RecentCompletedExchanges(context.Background(), "winner", "shared", merged.Generation, 4)
 	if err != nil || merged.Generation <= winnerSession.Generation || len(turns) != 1 || turns[0].UserText != "loser old" || !strings.Contains(merged.Content, "concise replies") || merged.LatestVersion <= merged.Version {
 		t.Fatalf("merged profile=%+v turns=%+v err=%v", merged, turns, err)
@@ -410,6 +439,9 @@ func TestForgetAllRemovesSupersededFrozenProfileFacts(t *testing.T) {
 	}
 	if strings.Contains(latest.Content, "Paris") || strings.Contains(latest.Content, "Rome") {
 		t.Fatalf("deleted facts survived profile reset: frozen=%+v latest=%+v", frozen, latest)
+	}
+	if latest.FactCount != 0 || latest.Bytes != len(latest.Content) {
+		t.Fatalf("deleted profile metrics=%+v", latest)
 	}
 	var copied int
 	if err := store.sql.QueryRow(`SELECT COUNT(*) FROM sessions, json_each(sessions.source_memory_ids) source WHERE CAST(source.value AS INTEGER) IN (?, ?)`, paris.ID, rome.ID).Scan(&copied); err != nil || copied != 0 {

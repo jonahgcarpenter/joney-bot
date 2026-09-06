@@ -17,7 +17,7 @@ func TestNonInteractiveStartupOmitsBanner(t *testing.T) {
 	cmd := exec.Command(os.Args[0], "-test.run=^TestNonInteractiveStartupOmitsBanner$")
 	cmd.Dir = t.TempDir()
 	// An isolated environment fails config validation before any storage or network work.
-	cmd.Env = []string{"OSWALD_STARTUP_TEST_HELPER=1", "MEMORY_RETIRED_INDEX_RETENTION=0s"}
+	cmd.Env = []string{"OSWALD_STARTUP_TEST_HELPER=1", "COMFYUI_GENERATION_TIMEOUT=0s"}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err == nil {

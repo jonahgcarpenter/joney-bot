@@ -77,7 +77,7 @@ Current layers:
 
 ### Database Migrations
 
-Permanent migration history starts at `internal/database/migrations/v4.0.0.sql`. Files use strict `vMAJOR.MINOR.PATCH.sql` names, are embedded and ordered semantically, and contain the complete SQL for one release. `schema_migration_versions.version` is the contiguous application sequence rather than the product version; release name and SQL content are protected by a SHA-256 checksum. Applied rows must be an exact prefix of the embedded registry. Fresh databases currently receive nine rows: version `1`, name `v4.0.0`; version `2`, name `v4.0.1`; version `3`, name `v4.0.2`; version `4`, name `v4.0.3`; version `5`, name `v4.0.4`; version `6`, name `v4.0.5`; version `7`, name `v4.0.6`; version `8`, name `v4.0.7`; and version `9`, name `v4.0.8`. The `v4.0.7` migration widens immutable foreground save artifacts to five candidates and adds durable provider-submission and corrective-reason state. The `v4.0.8` migration raises only session compaction to four model submissions and three invalid-output retries; memory formation retains its three-submission and one-invalid-retry contract.
+Permanent migration history starts at `internal/database/migrations/v4.0.0.sql`. Files use strict `vMAJOR.MINOR.PATCH.sql` names, are embedded and ordered semantically, and contain the complete SQL for one release. `schema_migration_versions.version` is the contiguous application sequence rather than the product version; release name and SQL content are protected by a SHA-256 checksum. Applied rows must be an exact prefix of the embedded registry. Fresh databases currently receive ten rows, from version `1`, name `v4.0.0`, through version `10`, name `v4.0.9`. The `v4.0.7` migration widens immutable foreground save artifacts to five candidates and adds durable provider-submission and corrective-reason state. The `v4.0.8` migration raises only session compaction to four model submissions and three invalid-output retries; memory formation retains its three-submission and one-invalid-retry contract. The `v4.0.9` migration removes the obsolete job redrive counter and redundant stored profile counts; historical redrive-to-submission reconstruction still runs in `v4.0.7` before removal. Operational state and useful audit metadata, including failure codes, timestamps, lineage, and index validation counts, remain retained.
 
 Migration execution runs on one connection in one `BEGIN IMMEDIATE` transaction with foreign-key actions temporarily disabled. SQL is executed directly without per-migration Go callbacks, `PRAGMA foreign_key_check` must pass before commit, and foreign keys are restored afterward. FTS5 and sqlite-vec tables are derived physical capabilities rather than canonical migration history.
 
@@ -151,7 +151,7 @@ Per request it does the following:
 - after every complete tool-call batch has one correlated result per call, compact all delivered post-checkpoint exchanges and completed active-request tool rounds when the next estimated model request reaches 70% of usable input; install the validated checkpoint atomically in memory and continue the same loop
 - repeat until no tool calls remain or a global tool-governance limit is hit
 
-14. If the global execution, tool-iteration, or consecutive-failure budget is exhausted, make one final model call with all tools disabled
+14. If the global execution or tool-iteration budget is exhausted, make one final model call with all tools disabled
 15. Persist the cleaned final user message, final assistant reply, successful tool-name continuity projection, and bounded immutable native tool-call/result trace to the active session generation
 16. Return the final `AgentResponse`
 
@@ -159,7 +159,7 @@ Multimodal request notes:
 
 - Images are attached only to the current user turn; they are not replayed into future turns
 - Session memory stays text-only; image-bearing turns are stored with a short attachment marker instead of raw image data
-- Session expiry is controlled by `MEMORY_SESSION_INACTIVITY` (`24h` by default); complete recent exchanges from the active generation are injected automatically when budget permits
+- Sessions expire after the code-owned 24-hour inactivity period; complete recent exchanges from the active generation are injected automatically when budget permits
 - Proactive durable compaction runs in the background after successful response delivery; active requests can also create non-persisted foreground checkpoints between complete tool rounds. Undelivered or failed-delivery turns cannot enter durable summaries, transcript-search results, or background compaction ranges
 - Reply context is sent directly on the current prompt, but stripped from stored session memory and memory query text to avoid reintroducing the same quoted message later
 - Attachments that fail image validation or are not supported image types are not rejected outright; gateways convert them into a short prompt note so the model knows the user attached an unsupported file
@@ -256,7 +256,7 @@ Oswald keeps four distinct memory layers.
 - FTS5 and sqlite-vec tables are rebuildable derived revisions. Index kinds are `memory_fts`, `transcript_fts`, `memory_vector`, `global_memory_fts`, and `global_memory_vector`; `durable_jobs` rows with `job_kind = 'derived_index'` form the leased, idempotent canonical-mutation outbox
 - Global-memory outbox rows use `entity_kind = 'global_memory'` and a `NULL` canonical user because the records are shared. Private memory and transcript outbox rows require a canonical user and remain tenant-fenced throughout indexing and retrieval
 - Startup creates internally named generated revisions through the index lifecycle worker, reconciles missing outbox entries, and then polls every 30 seconds in addition to mutation wakeups
-- Succeeded derived-index history is pruned after `MEMORY_SUCCESSFUL_JOB_RETENTION`, except for one successful upsert receipt per still-live canonical entity. Reconciliation recognizes that receipt, preventing unchanged live state from recreating historical work
+- Succeeded derived-index history is pruned after seven days, except for one successful upsert receipt per still-live canonical entity. Reconciliation recognizes that receipt, preventing unchanged live state from recreating historical work
 - Canonical writes enqueue outbox changes transactionally. The serialized worker applies each change to all matching live and building revisions and retries stale canonical reads, leases, provider failures, and failed changes without weakening tenant predicates
 - Rebuilds create an internally named shadow table with kind, model, dimension, schema version, and monotonically increasing revision metadata; table names are globally unique and generated names must exactly encode their recorded kind and revision before publication or cleanup
 - Before publication, validation checks the physical vector dimension when applicable, exact canonical expected count, physical indexed count, canonical-user ownership joins, active/approved/unexpired memory eligibility, delivered active-generation transcript eligibility, and vector model identity
@@ -297,25 +297,25 @@ Exact-ID and forget-all deletion are physical row deletions in the command trans
 
 Runtime invalidation is in-process and transport-neutral. Account disconnect, user deletion, and forget-all clear matching gateway caches and can close matching Home Assistant connections.
 
-Retention configuration uses positive Go durations and a positive batch size:
+Retention and maintenance use code-owned policy, not environment configuration:
 
-| Variable                            | Default | Purpose                                                                                                         |
+| Policy                              | Value   | Purpose                                                                                                         |
 | ----------------------------------- | ------- | --------------------------------------------------------------------------------------------------------------- |
-| `MEMORY_RETIRED_INDEX_RETENTION`    | `168h`  | Retain internally generated retired/failed index tables.                                                        |
-| `MEMORY_SESSION_INACTIVITY`         | `24h`   | Active session lifetime before expiry cleanup.                                                                  |
-| `MEMORY_PENDING_DELIVERY_TIMEOUT`   | `15m`   | Mark a persisted turn with no delivery outcome as terminally failed so it cannot indefinitely block compaction. |
-| `MEMORY_SUCCESSFUL_JOB_RETENTION`   | `168h`  | Retain successful/skipped formation and compaction jobs.                                                        |
-| `MEMORY_DEAD_JOB_RETENTION`         | `720h`  | Retain permanently failed formation and compaction jobs.                                                        |
-| `MEMORY_ACCOUNT_CHALLENGE_GRACE`    | `24h`   | Additional retention after account-link challenge expiry.                                                       |
-| `MEMORY_MAINTENANCE_INTERVAL`       | `1h`    | Serialized sweep interval after the immediate startup sweep.                                                    |
-| `MEMORY_DATABASE_OPTIMIZE_INTERVAL` | `24h`   | Minimum interval between `PRAGMA optimize` runs.                                                                |
-| `MEMORY_MAINTENANCE_BATCH_SIZE`     | `100`   | Per-category row bound for one sweep.                                                                           |
+| Retired index retention            | `168h`  | Retain internally generated retired/failed index tables.                                                        |
+| Session inactivity                 | `24h`   | Active session lifetime before expiry cleanup.                                                                  |
+| Pending delivery timeout           | `15m`   | Mark a persisted turn with no delivery outcome as terminally failed so it cannot indefinitely block compaction. |
+| Successful job retention           | `168h`  | Retain successful/skipped formation/compaction jobs and successful index jobs, except live upsert and active failed-contract receipts. |
+| Dead job retention                 | `720h`  | Retain dead formation/compaction jobs and unpublished candidates, except active failed-contract receipts.        |
+| Account challenge grace            | `24h`   | Additional retention after account-link challenge expiry.                                                       |
+| Maintenance interval               | `1h`    | Serialized sweep interval after the immediate startup sweep.                                                    |
+| Database optimize interval         | `24h`   | Minimum interval between `PRAGMA optimize` runs.                                                                |
+| Maintenance batch size             | `100`   | Row-selection bound per maintenance operation, not a total per category or sweep.                               |
 
 Fallback memory extraction and session-compaction model calls are always enabled and share one broker-owned low-priority permit. They run only with no active or queued foreground work, and accepted foreground work cancels and durably defers the background call without consuming its provider retry budget.
 
-Startup rejects non-positive values. Dead-job retention must be at least successful-job retention, and optimize interval must be at least maintenance interval.
+`config.DefaultRetentionPolicy()` supplies the production policy and store maintenance fallback values. The policy remains injectable for deterministic tests. Retention and maintenance environment overrides are not supported.
 
-Maintenance is serialized and runs immediately, then at `MEMORY_MAINTENANCE_INTERVAL`. It checks foreign keys before any mutation, terminally fails stale turns that still have neither delivery outcome, expires inactive sessions and short-term memory, directly deletes stale candidates and terminal jobs, prunes derived-index history while retaining live receipts, removes orphan or ineligible derived rows, validates live index physical availability/corruption/exact coverage, and drops only expired internally generated retired/failed tables. A terminal no-artifact compaction job remains as the failed-contract suppression receipt while its exact session generation is active, then ordinary session cleanup removes it. All categories are batch-bounded and reported only as aggregate counts. Canonical retention commits before optional index/database hygiene and wakes the index worker even if later hygiene degrades. A genuine late successful delivery clears a timeout failure before formation and compaction eligibility is restored.
+Maintenance is serialized and runs immediately, then hourly. It checks foreign keys before any mutation, terminally fails stale turns that still have neither delivery outcome, expires inactive sessions and short-term memory, directly deletes stale candidates and terminal jobs, prunes derived-index history while retaining live receipts, removes orphan or ineligible derived rows, validates live index physical availability/corruption/exact coverage, and drops only expired internally generated retired/failed tables. A terminal no-artifact compaction job remains as the failed-contract suppression receipt while its exact session generation is active, then ordinary session cleanup removes it. Each cleanup operation bounds selected rows and reports aggregate counts; overlapping operations and dependent deletions can affect more rows than one batch per category. Canonical retention commits before optional index/database hygiene and wakes the index worker even if later hygiene degrades. A genuine late successful delivery clears a timeout failure before formation and compaction eligibility is restored.
 
 SQLite opens with foreign keys and `secure_delete=ON`, WAL mode, `synchronous=NORMAL`, a 5-second busy timeout, immediate write locks, and a 1000-page WAL auto-checkpoint. Each sweep performs a passive WAL checkpoint, runs `incremental_vacuum(100)` only if SQLite is already in incremental auto-vacuum mode, and records/runs `PRAGMA optimize` when due. Maintenance logs only aggregate counts and durations.
 
@@ -345,11 +345,11 @@ Operator backup contract: `data/database/oswald.db` is canonical, but a live fil
 - Session compaction artifacts retain an empty `candidates` field for wire compatibility, but compaction does not validate or publish durable-memory candidates. Existing persisted summary artifacts with retired candidate data remain readable and publish only their summary content
 - Recent completed exchanges newer than the latest summary boundary are replayed chronologically with native assistant tool calls, correlated historical tool results, and the final assistant reply when the current catalog and budget permit. Replay falls back to the exact `user`/final-`assistant` pair when a historical tool is unavailable or the native trace does not fit
 - Successful MCP tools from the latest four delivered exchanges in the active generation are pre-exposed on the initial model call only when they remain available to the current canonical user; this continuity query is independent of the latest summary boundary
-- Each stored turn has an optional `expires_at`, but delivered transcripts and summary sources normally remain retained while their matching session generation is active; startup and periodic maintenance at `MEMORY_MAINTENANCE_INTERVAL` remove expired artifacts
+- Each stored turn has an optional `expires_at`, but delivered transcripts and summary sources normally remain retained while their matching session generation is active; startup and hourly maintenance remove expired artifacts
 - `/reset` advances the generation, deletes that tenant session's turns, summaries, and compaction jobs, and binds the latest tenant profile; the old transcript is no longer searchable
 - Session expiry causes the next request to use a new generation, while cleanup removes inactive summaries, compaction jobs, turns, and the expired session. Generation counters are preserved so reset or expired generations are never reused
 - `sessions` is the sole physical profile/session bookkeeping table: one row is retained per canonical user/session, including inactive rows, so generation high-water is never reused
-- Each session row stores active/expiry state and its frozen profile version, renderer, digest, speaker intro, rendered snapshot, size/count metadata, profile high-water, and exact source memory IDs as a checked JSON array
+- Each session row stores active/expiry state and its frozen profile version, renderer, digest, speaker intro, rendered snapshot, profile high-water, and exact source memory IDs as a checked JSON array. Profile fact count is derived from that frozen array, and profile byte size from the frozen UTF-8 content, rather than persisted as redundant columns
 - Cleanup deletes expired generation artifacts and marks the session inactive without deleting its row; memory deletion recompiles and rebinds snapshots whose JSON source membership contains the removed memory
 - Bounded tool-call batches, canonical arguments, safe results, outcomes, and visible intermediate assistant content are persisted atomically with the session turn; intermediate reasoning is never persisted. Historical results are explicitly untrusted and potentially stale
 
@@ -366,6 +366,7 @@ Context budgeting lives in `internal/promptbudget/`.
 
 - Oswald uses an OpenAI-compatible model gateway at runtime and does not perform model-metadata discovery
 - `MODEL_CONTEXT_WINDOW` and `MODEL_MAX_OUTPUT_TOKENS` directly configure prompt budgeting and should match the limits configured in the model gateway
+- `MODEL_MAX_OUTPUT_TOKENS` reserves foreground response capacity but does not send a foreground `max_tokens` cap; the gateway controls that limit. Private memory extraction and session compaction send the resolved value as `max_tokens`
 - A non-positive context-window value uses the package default of 32,768 tokens; a non-positive output-token value uses the package default of 8,192 tokens
 - Max input tokens are derived as context window minus max output tokens and the safety margin
 
@@ -548,9 +549,8 @@ Runtime governance lives in `internal/tools/governance/`. Builtin policies are d
 - Successful handlers return a typed productive or unproductive outcome. `user_memory_save` permits one initial call and one distinct corrective retry while retaining a five-candidate request-wide staging cap; `web.search` retires after two unproductive results or two execution failures in one request; `web.fetch` permits four executions and retires after two unproductive results or two execution failures; other builtin and MCP tools have no per-tool execution, failure, or unproductive-result limit
 - Exact duplicate successful or unproductive calls are blocked before handler execution, but failed executions release their fingerprint so the exact call can be retried
 - Per-tool execution, failure, and unproductive limits are code-owned policy; zero disables a guard, and exhaustion of an enabled guard removes only that exact tool
-- `MAX_TOOL_CALLS_PER_REQUEST` defaults to `50` actual handler executions as an emergency request-wide ceiling
-- `MAX_TOOL_ITERATIONS_PER_REQUEST` defaults to `30` model responses containing tool calls as an emergency request-wide ceiling
-- `MAX_TOOL_FAILURE_RETRIES` defaults to `0`, disabling the request-wide consecutive-failure guard; positive values re-enable it, and productive execution resets the streak
+- `governance.DefaultGlobalPolicy()` sets code-owned emergency ceilings of `50` actual handler executions and `30` model responses containing tool calls per request. Tests can inject smaller policies; environment overrides are not supported
+- There is no request-wide consecutive-failure guard. Per-tool failure limits remain independent, and all executions still count toward the request-wide ceiling
 - Global limit exhaustion completes every declared call in the active batch with a correlated result, then asks the model to finish in one final call with all tools disabled
 - Calls not advertised in the active model request are blocked. MCP discovery therefore exposes matching remote tools only for a subsequent model iteration, not later in the same emitted batch
 - Broker lifecycle cancellation, tool-governance ceilings, transport failures, and the independently configured Bifrost provider timeout are the final safeguards; Oswald imposes no generation-duration deadline

@@ -7,18 +7,6 @@ import (
 	"time"
 )
 
-var retentionEnvKeys = []string{
-	"MEMORY_RETIRED_INDEX_RETENTION",
-	"MEMORY_SESSION_INACTIVITY",
-	"MEMORY_PENDING_DELIVERY_TIMEOUT",
-	"MEMORY_SUCCESSFUL_JOB_RETENTION",
-	"MEMORY_DEAD_JOB_RETENTION",
-	"MEMORY_ACCOUNT_CHALLENGE_GRACE",
-	"MEMORY_MAINTENANCE_INTERVAL",
-	"MEMORY_DATABASE_OPTIMIZE_INTERVAL",
-	"MEMORY_MAINTENANCE_BATCH_SIZE",
-}
-
 func TestEnvHelpersUseFallbacksForMissingEmptyAndInvalidValues(t *testing.T) {
 	t.Setenv("OSWALD_TEST_STRING", "")
 	t.Setenv("OSWALD_TEST_INT", "not-an-int")
@@ -56,41 +44,6 @@ func TestLoadModelBudgetConfig(t *testing.T) {
 	}
 	if cfg.ModelContextWindow != 65536 || cfg.ModelMaxOutputTokens != 4096 {
 		t.Fatalf("unexpected model budget config: context=%d output=%d", cfg.ModelContextWindow, cfg.ModelMaxOutputTokens)
-	}
-}
-
-func TestLoadToolGovernanceLimits(t *testing.T) {
-	t.Setenv("MAX_TOOL_CALLS_PER_REQUEST", "15")
-	t.Setenv("MAX_TOOL_ITERATIONS_PER_REQUEST", "9")
-	t.Setenv("MAX_TOOL_FAILURE_RETRIES", "4")
-	cfg, err := Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.MaxToolCallsPerRequest != 15 || cfg.MaxToolIterations != 9 || cfg.MaxToolFailureRetries != 4 {
-		t.Fatalf("unexpected tool limits: calls=%d iterations=%d failures=%d", cfg.MaxToolCallsPerRequest, cfg.MaxToolIterations, cfg.MaxToolFailureRetries)
-	}
-}
-
-func TestLoadRejectsInvalidToolGovernanceLimits(t *testing.T) {
-	for _, test := range []struct {
-		name  string
-		key   string
-		value string
-	}{
-		{name: "calls", key: "MAX_TOOL_CALLS_PER_REQUEST", value: "0"},
-		{name: "iterations", key: "MAX_TOOL_ITERATIONS_PER_REQUEST", value: "-1"},
-		{name: "failures", key: "MAX_TOOL_FAILURE_RETRIES", value: "-1"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			t.Setenv("MAX_TOOL_CALLS_PER_REQUEST", "12")
-			t.Setenv("MAX_TOOL_ITERATIONS_PER_REQUEST", "8")
-			t.Setenv("MAX_TOOL_FAILURE_RETRIES", "3")
-			t.Setenv(test.key, test.value)
-			if _, err := Load(); err == nil || !strings.Contains(err.Error(), test.key) {
-				t.Fatalf("Load error = %v, want %s validation", err, test.key)
-			}
-		})
 	}
 }
 
@@ -208,13 +161,7 @@ func TestLoadRejectsInvalidComfyUITimeout(t *testing.T) {
 	}
 }
 
-func TestLoadRetentionPolicyDefaults(t *testing.T) {
-	unsetRetentionEnv(t)
-
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
+func TestDefaultRetentionPolicy(t *testing.T) {
 	want := RetentionPolicy{
 		RetiredIndexRetention:    168 * time.Hour,
 		SessionInactivity:        24 * time.Hour,
@@ -226,128 +173,30 @@ func TestLoadRetentionPolicyDefaults(t *testing.T) {
 		DatabaseOptimizeInterval: 24 * time.Hour,
 		BatchSize:                100,
 	}
-	if cfg.RetentionPolicy != want {
-		t.Fatalf("RetentionPolicy = %+v, want %+v", cfg.RetentionPolicy, want)
+	if got := DefaultRetentionPolicy(); got != want {
+		t.Fatalf("DefaultRetentionPolicy() = %+v, want %+v", got, want)
 	}
 }
 
-func TestLoadRetentionPolicyOverrides(t *testing.T) {
-	unsetRetentionEnv(t)
-	overrides := map[string]string{
-		"MEMORY_RETIRED_INDEX_RETENTION":    "4h",
-		"MEMORY_SESSION_INACTIVITY":         "5h",
-		"MEMORY_PENDING_DELIVERY_TIMEOUT":   "6h",
-		"MEMORY_SUCCESSFUL_JOB_RETENTION":   "8h",
-		"MEMORY_DEAD_JOB_RETENTION":         "9h",
-		"MEMORY_ACCOUNT_CHALLENGE_GRACE":    "10h",
-		"MEMORY_MAINTENANCE_INTERVAL":       "11h",
-		"MEMORY_DATABASE_OPTIMIZE_INTERVAL": "12h",
-		"MEMORY_MAINTENANCE_BATCH_SIZE":     "12",
-	}
-	for key, value := range overrides {
-		t.Setenv(key, value)
-	}
-
-	cfg, err := Load()
+func TestLoadIgnoresRetiredPolicyEnvironment(t *testing.T) {
+	before, err := Load()
 	if err != nil {
-		t.Fatalf("Load: %v", err)
+		t.Fatal(err)
 	}
-	want := RetentionPolicy{
-		RetiredIndexRetention:    4 * time.Hour,
-		SessionInactivity:        5 * time.Hour,
-		PendingDeliveryTimeout:   6 * time.Hour,
-		SuccessfulJobRetention:   8 * time.Hour,
-		DeadJobRetention:         9 * time.Hour,
-		AccountChallengeGrace:    10 * time.Hour,
-		MaintenanceInterval:      11 * time.Hour,
-		DatabaseOptimizeInterval: 12 * time.Hour,
-		BatchSize:                12,
+	policy := DefaultRetentionPolicy()
+	for _, key := range []string{
+		"MEMORY_RETIRED_INDEX_RETENTION", "MEMORY_SESSION_INACTIVITY", "MEMORY_PENDING_DELIVERY_TIMEOUT",
+		"MEMORY_SUCCESSFUL_JOB_RETENTION", "MEMORY_DEAD_JOB_RETENTION", "MEMORY_ACCOUNT_CHALLENGE_GRACE",
+		"MEMORY_MAINTENANCE_INTERVAL", "MEMORY_DATABASE_OPTIMIZE_INTERVAL", "MEMORY_MAINTENANCE_BATCH_SIZE",
+		"MAX_TOOL_CALLS_PER_REQUEST", "MAX_TOOL_ITERATIONS_PER_REQUEST", "MAX_TOOL_FAILURE_RETRIES",
+	} {
+		t.Setenv(key, "-1")
 	}
-	if cfg.RetentionPolicy != want {
-		t.Fatalf("RetentionPolicy = %+v, want %+v", cfg.RetentionPolicy, want)
+	after, err := Load()
+	if err != nil {
+		t.Fatalf("retired policy environment must be ignored: %v", err)
 	}
-}
-
-func TestLoadRejectsInvalidRetentionValues(t *testing.T) {
-	tests := []struct {
-		name  string
-		key   string
-		value string
-	}{
-		{name: "empty duration", key: "MEMORY_RETIRED_INDEX_RETENTION", value: ""},
-		{name: "malformed duration", key: "MEMORY_SESSION_INACTIVITY", value: "tomorrow"},
-		{name: "zero pending delivery timeout", key: "MEMORY_PENDING_DELIVERY_TIMEOUT", value: "0s"},
-		{name: "zero duration", key: "MEMORY_SUCCESSFUL_JOB_RETENTION", value: "0s"},
-		{name: "negative duration", key: "MEMORY_MAINTENANCE_INTERVAL", value: "-1h"},
-		{name: "empty integer", key: "MEMORY_MAINTENANCE_BATCH_SIZE", value: ""},
-		{name: "malformed integer", key: "MEMORY_MAINTENANCE_BATCH_SIZE", value: "many"},
-		{name: "zero integer", key: "MEMORY_MAINTENANCE_BATCH_SIZE", value: "0"},
-		{name: "negative integer", key: "MEMORY_MAINTENANCE_BATCH_SIZE", value: "-1"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			unsetRetentionEnv(t)
-			t.Setenv(tt.key, tt.value)
-			if _, err := Load(); err == nil || !strings.Contains(err.Error(), tt.key) {
-				t.Fatalf("Load error = %v, want error naming %s", err, tt.key)
-			}
-		})
-	}
-}
-
-func TestLoadRejectsInvalidRetentionRelationships(t *testing.T) {
-	tests := []struct {
-		name      string
-		overrides map[string]string
-		wantKey   string
-	}{
-		{
-			name: "dead job shorter than successful job",
-			overrides: map[string]string{
-				"MEMORY_SUCCESSFUL_JOB_RETENTION": "2h",
-				"MEMORY_DEAD_JOB_RETENTION":       "1h",
-			},
-			wantKey: "MEMORY_DEAD_JOB_RETENTION",
-		},
-		{
-			name: "optimize shorter than maintenance",
-			overrides: map[string]string{
-				"MEMORY_MAINTENANCE_INTERVAL":       "2h",
-				"MEMORY_DATABASE_OPTIMIZE_INTERVAL": "1h",
-			},
-			wantKey: "MEMORY_DATABASE_OPTIMIZE_INTERVAL",
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			unsetRetentionEnv(t)
-			for key, value := range tt.overrides {
-				t.Setenv(key, value)
-			}
-			if _, err := Load(); err == nil || !strings.Contains(err.Error(), tt.wantKey) {
-				t.Fatalf("Load error = %v, want relationship error naming %s", err, tt.wantKey)
-			}
-		})
-	}
-}
-
-func unsetRetentionEnv(t *testing.T) {
-	t.Helper()
-	for _, key := range retentionEnvKeys {
-		value, exists := os.LookupEnv(key)
-		if err := os.Unsetenv(key); err != nil {
-			t.Fatalf("unset %s: %v", key, err)
-		}
-		t.Cleanup(func() {
-			if exists {
-				if err := os.Setenv(key, value); err != nil {
-					t.Errorf("restore %s: %v", key, err)
-				}
-				return
-			}
-			if err := os.Unsetenv(key); err != nil {
-				t.Errorf("unset restored %s: %v", key, err)
-			}
-		})
+	if *after != *before || DefaultRetentionPolicy() != policy {
+		t.Fatal("retired policy environment changed configuration or retention defaults")
 	}
 }

@@ -7,7 +7,17 @@ func testPolicy() ToolPolicy {
 }
 
 func testGlobal() GlobalPolicy {
-	return GlobalPolicy{MaxExecutions: 4, MaxToolIterations: 2, MaxConsecutiveFailures: 2}
+	return GlobalPolicy{MaxExecutions: 4, MaxToolIterations: 2}
+}
+
+func TestDefaultGlobalPolicy(t *testing.T) {
+	policy := DefaultGlobalPolicy()
+	if policy != (GlobalPolicy{MaxExecutions: 50, MaxToolIterations: 30}) {
+		t.Fatalf("default policy = %+v", policy)
+	}
+	if err := policy.Validate(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestFingerprintCanonicalizesMapOrder(t *testing.T) {
@@ -101,6 +111,9 @@ func TestGovernorZeroLimitsDoNotRetireTool(t *testing.T) {
 	if g.IsToolRetired("unlimited.tool", policy) {
 		t.Fatal("zero-limit tool was retired")
 	}
+	if g.GlobalStopReason() != "" || g.Stats("unlimited.tool").Failures != 10 {
+		t.Fatalf("failures must remain statistics, not a global ceiling: %+v", g.Stats("unlimited.tool"))
+	}
 }
 
 func TestGovernorRetiresOnlyExhaustedTool(t *testing.T) {
@@ -121,7 +134,7 @@ func TestGovernorRetiresOnlyExhaustedTool(t *testing.T) {
 	}
 }
 
-func TestGovernorProductiveResultResetsOnlyGlobalFailureStreak(t *testing.T) {
+func TestGovernorFailuresRetireOnlyExhaustedTool(t *testing.T) {
 	g := New(testGlobal())
 	policy := testPolicy()
 	badDecision := g.BeforeExecution("bad.tool", map[string]interface{}{"n": 1}, policy, true)
@@ -129,23 +142,23 @@ func TestGovernorProductiveResultResetsOnlyGlobalFailureStreak(t *testing.T) {
 		t.Fatal(badDecision)
 	}
 	g.RecordResult("bad.tool", badDecision, Result{}, assertError{})
-	emptyDecision := g.BeforeExecution("empty.tool", map[string]interface{}{"n": 1}, policy, true)
-	if !emptyDecision.Allowed {
-		t.Fatal(emptyDecision)
+	retry := g.BeforeExecution("bad.tool", map[string]interface{}{"n": 1}, policy, true)
+	if !retry.Allowed {
+		t.Fatal(retry)
 	}
-	g.RecordResult("empty.tool", emptyDecision, Result{Outcome: OutcomeUnproductive}, nil)
-	if g.ConsecutiveFailures() != 1 {
-		t.Fatalf("unproductive result reset failure streak: %d", g.ConsecutiveFailures())
+	g.RecordResult("bad.tool", retry, Result{}, assertError{})
+	if !g.IsToolRetired("bad.tool", policy) || g.GlobalStopReason() != "" {
+		t.Fatal("per-tool failures did not remain isolated")
+	}
+	if blocked := g.BeforeExecution("bad.tool", nil, policy, true); blocked.Allowed || blocked.ReasonCode != ReasonToolFailures {
+		t.Fatalf("retired tool decision = %+v", blocked)
 	}
 	goodDecision := g.BeforeExecution("good.tool", map[string]interface{}{"n": 1}, policy, true)
 	if !goodDecision.Allowed {
 		t.Fatal(goodDecision)
 	}
 	g.RecordResult("good.tool", goodDecision, Result{Outcome: OutcomeProductive}, nil)
-	if g.ConsecutiveFailures() != 0 {
-		t.Fatalf("productive result did not reset failure streak: %d", g.ConsecutiveFailures())
-	}
-	if g.Stats("bad.tool").Failures != 1 {
+	if g.Stats("bad.tool").Failures != 2 {
 		t.Fatal("per-tool failure count was reset")
 	}
 }

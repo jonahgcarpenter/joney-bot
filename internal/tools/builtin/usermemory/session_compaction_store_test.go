@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -760,6 +761,60 @@ func TestSessionPromptPressureBecomesVisibleOnlyAfterDelivery(t *testing.T) {
 	}
 	if _, err := store.sql.Exec(`UPDATE session_turns SET compaction_pressure_tokens = 7001 WHERE id = ?`, turn.ID); err == nil {
 		t.Fatal("immutable pressure update succeeded")
+	}
+}
+
+func TestLatestDeliveredSessionPromptPressureUsesPartialIndex(t *testing.T) {
+	store := newSessionCompactionTestStore(t)
+	seedAccountUsers(t, store, "user")
+	generation := activateCompactionSession(t, store, "user", "session")
+	// Most historical turns have no pressure snapshot. Only a sparse delivered
+	// subset belongs in the pressure index.
+	if _, err := store.sql.Exec(`WITH RECURSIVE turns(n) AS (VALUES(1) UNION ALL SELECT n + 1 FROM turns WHERE n < 2000)
+INSERT INTO session_turns(canonical_user_id, session_id, session_generation, user_text, assistant_text, created_at, delivered_at,
+ compaction_pressure_tokens, compaction_pressure_limit, compaction_pressure_version)
+SELECT 'user', 'session', ?, 'question', 'answer', '2026-09-01T00:00:00Z', '2026-09-01T00:00:01Z',
+ CASE WHEN n % 100 = 0 THEN n END, CASE WHEN n % 100 = 0 THEN 10000 END,
+ CASE WHEN n % 100 = 0 THEN 'pressure-v1' END FROM turns`, generation); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.sql.Exec(`ANALYZE`); err != nil {
+		t.Fatal(err)
+	}
+	for _, explicit := range []bool{false, true} {
+		query := latestDeliveredSessionPromptPressureSQL
+		if !explicit {
+			query = strings.Replace(query, " AND compaction_pressure_tokens IS NOT NULL", "", 1)
+		}
+		rows, err := store.sql.Query("EXPLAIN QUERY PLAN "+query, "user", "session", generation, "pressure-v1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var plan strings.Builder
+		for rows.Next() {
+			var id, parent, unused int
+			var detail string
+			if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+				t.Fatal(err)
+			}
+			plan.WriteString(detail)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		rows.Close()
+		t.Logf("explicit tokens predicate=%v plan=%s", explicit, plan.String())
+		usesIndex := strings.Contains(plan.String(), "idx_session_turns_compaction_pressure")
+		if explicit && (!usesIndex || strings.Contains(plan.String(), "TEMP B-TREE")) {
+			t.Fatalf("unexpected pressure query plan: %s", plan.String())
+		}
+	}
+	pressure, err := store.LatestDeliveredSessionPromptPressure(context.Background(), "user", "session", generation, "pressure-v1")
+	if err != nil || pressure.Tokens != 2000 {
+		t.Fatalf("latest pressure=%+v err=%v", pressure, err)
+	}
+	if _, err := store.LatestDeliveredSessionPromptPressure(context.Background(), "user", "session", generation, "other-version"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("wrong version pressure err=%v", err)
 	}
 }
 

@@ -103,7 +103,7 @@ func (s *Store) MaintenanceSweep(ctx context.Context, now time.Time, policy conf
 }
 
 func normalizedMaintenancePolicy(policy config.RetentionPolicy) config.RetentionPolicy {
-	defaults := config.RetentionPolicy{RetiredIndexRetention: 7 * 24 * time.Hour, SessionInactivity: 24 * time.Hour, PendingDeliveryTimeout: 15 * time.Minute, SuccessfulJobRetention: 7 * 24 * time.Hour, DeadJobRetention: 30 * 24 * time.Hour, AccountChallengeGrace: 24 * time.Hour, MaintenanceInterval: time.Hour, DatabaseOptimizeInterval: 24 * time.Hour, BatchSize: 100}
+	defaults := config.DefaultRetentionPolicy()
 	values := []*time.Duration{&policy.RetiredIndexRetention, &policy.SessionInactivity, &policy.PendingDeliveryTimeout, &policy.SuccessfulJobRetention, &policy.DeadJobRetention, &policy.AccountChallengeGrace, &policy.MaintenanceInterval, &policy.DatabaseOptimizeInterval}
 	defaultValues := []time.Duration{defaults.RetiredIndexRetention, defaults.SessionInactivity, defaults.PendingDeliveryTimeout, defaults.SuccessfulJobRetention, defaults.DeadJobRetention, defaults.AccountChallengeGrace, defaults.MaintenanceInterval, defaults.DatabaseOptimizeInterval}
 	for i := range values {
