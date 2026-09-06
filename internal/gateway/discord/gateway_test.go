@@ -866,6 +866,41 @@ func TestDiscordReplyToBotIncludesReplyContext(t *testing.T) {
 	}
 }
 
+func TestDiscordGroupPublicTextPreservesRawMentionsEmojiAndImageURL(t *testing.T) {
+	rest := newFakeDiscordREST(t)
+	defer rest.server.Close()
+	dg, b, chat := newDiscordTestGateway(t, rest.server.URL)
+	defer b.Shutdown()
+	imageBytes := testDiscordJPEG(t)
+	imageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/jpeg")
+		_, _ = w.Write(imageBytes)
+	}))
+	defer imageServer.Close()
+	const imageURL = "https://example.com/photo.jpg"
+	const raw = "  <@bot-1> inspect <@456> <:wave:789> " + imageURL + "  "
+	msg := discordMessage("msg-public", "channel-1", "guild-1", "123", "Alice", raw)
+	msg.Mentions = []struct {
+		ID       string `json:"id"`
+		Username string `json:"username"`
+	}{{ID: "456", Username: "Bob"}}
+	msg.Embeds = []Embed{{Type: "image", URL: imageURL, Image: EmbedImage{ProxyURL: imageServer.URL + "/photo.jpg"}}}
+	dg.handleMessage(msg)
+	chat.mu.Lock()
+	defer chat.mu.Unlock()
+	primary := primaryDiscordRequests(chat.requests)
+	if len(primary) != 1 {
+		t.Fatalf("model requests=%d", len(primary))
+	}
+	current := primary[0].Messages[len(primary[0].Messages)-1]
+	if current.Content != "inspect @Bob :wave:" || len(current.Images) != 1 {
+		t.Fatalf("expected cleaned prompt and embed image: %q images=%d", current.Content, len(current.Images))
+	}
+	if chat.metadata.GroupGateway != "discord" || chat.metadata.GroupChatID != msg.ChannelID || chat.metadata.PublicUserText != raw {
+		t.Fatalf("raw public metadata lost: %+v", chat.metadata)
+	}
+}
+
 func TestDiscordHelpers(t *testing.T) {
 	chunks := splitMessage("one. two three\nfour", 10)
 	if len(chunks) != 3 || chunks[0] != "one." || chunks[1] != "two three" || chunks[2] != "four" {
@@ -1133,6 +1168,7 @@ func testDiscordJPEG(t *testing.T) []byte {
 
 type discordFakeChatter struct {
 	mu           sync.Mutex
+	metadata     requestctx.Metadata
 	requests     []llm.ChatRequest
 	principal    identity.Principal
 	streamChunks []llm.ChatMessage
@@ -1143,6 +1179,7 @@ func (f *discordFakeChatter) Chat(ctx context.Context, req llm.ChatRequest, cb f
 	f.mu.Lock()
 	f.requests = append(f.requests, req)
 	f.principal, _ = requestctx.PrincipalFromContext(ctx)
+	f.metadata = requestctx.MetadataFromContext(ctx)
 	streamChunks := append([]llm.ChatMessage(nil), f.streamChunks...)
 	response := f.response
 	f.mu.Unlock()

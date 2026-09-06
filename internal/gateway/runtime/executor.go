@@ -117,7 +117,7 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 				reasonCode = "shutdown"
 			}
 		}
-		if outcome.Reason == "invalid_principal" || outcome.Reason == "user_banned" {
+		if outcome.Reason == "invalid_principal" || outcome.Reason == "user_banned" || outcome.Reason == "invalid_group_context" {
 			executionStatus, status = "rejected", "rejected"
 			reasonCode = outcome.Reason
 		}
@@ -183,6 +183,16 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 	}
 	userID = req.Principal.CanonicalUserID
 	workCtx = requestctx.WithPrincipal(workCtx, req.Principal)
+	if req.IsGroup {
+		if req.IsDirect || strings.TrimSpace(req.ChatID) == "" || strings.TrimSpace(req.ChatID) != req.ChatID || (req.Principal.Gateway != "discord" && req.Principal.Gateway != "imessage") {
+			responseKind = "error"
+			err := responder.SendAgentError("Failed to resolve group conversation context")
+			return Outcome{Action: decision.Action, Reason: "invalid_group_context", Err: err}
+		}
+		// Keep the exact transport scope and inbound text, never the enriched prompt.
+		meta.GroupGateway, meta.GroupChatID, meta.PublicUserText = req.Principal.Gateway, req.ChatID, req.PublicUserText
+		workCtx = requestctx.WithMetadata(workCtx, meta)
+	}
 
 	if deps.Access != nil {
 		isBanned, banReason, err := deps.Access.BanStatus(userID)

@@ -899,7 +899,7 @@ finalize:
 		storedReplay := memory.SessionTurn{UserText: userMemoryContent, AssistantText: finalContent, ToolNames: uniqueToolNames(toolAnnotations), ToolHistory: toolHistory}
 		completedPressure := tokenbudget.EstimateCompletedRequest(promptContext.EstimatedBefore, storedReplay.UserText, memory.SessionTurnMessages(storedReplay))
 		var err error
-		storedTurn, err = a.userMemory.AppendPendingSessionTurn(ctx, memory.SessionTurnWrite{SessionID: sessionKey, UserID: senderID, Generation: sessionGeneration, UserText: userMemoryContent, AssistantText: finalContent, ToolNames: toolAnnotations, History: toolHistory, Staged: stagedMemory, TTL: sessionTurnTTL, Pressure: memory.SessionPromptPressure{Tokens: completedPressure, Limit: promptContext.InputLimit, Version: promptPressureVersion(a.model, promptContext.InputLimit)}})
+		storedTurn, err = a.userMemory.AppendPendingSessionTurn(ctx, memory.SessionTurnWrite{SessionID: sessionKey, UserID: senderID, Generation: sessionGeneration, UserText: userMemoryContent, AssistantText: finalContent, GroupGateway: meta.GroupGateway, GroupChatID: meta.GroupChatID, PublicUserText: meta.PublicUserText, ToolNames: toolAnnotations, History: toolHistory, Staged: stagedMemory, TTL: sessionTurnTTL, Pressure: memory.SessionPromptPressure{Tokens: completedPressure, Limit: promptContext.InputLimit, Version: promptPressureVersion(a.model, promptContext.InputLimit)}})
 		if err != nil {
 			reqLog.Warn("agent.session_memory.write_failed", "failed to append session memory after turn", config.F("status", "degraded"), config.ErrorField(err))
 			if len(stagedMemory) > 0 {

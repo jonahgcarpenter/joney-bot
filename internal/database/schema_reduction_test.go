@@ -11,7 +11,7 @@ import (
 
 func TestV409SupportedPrefixesPreserveDataAndReopen(t *testing.T) {
 	registry := orderedMigrations()
-	if len(registry) != 10 || registry[9].name != "v4.0.9" {
+	if len(registry) < 10 || registry[9].name != "v4.0.9" {
 		t.Fatalf("unexpected migration registry: %+v", registry)
 	}
 	for prefix := 0; prefix <= 9; prefix++ {

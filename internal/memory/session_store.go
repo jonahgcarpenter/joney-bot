@@ -17,11 +17,18 @@ type SessionTurnWrite struct {
 	Generation    int
 	UserText      string
 	AssistantText string
-	ToolNames     []string
-	History       ToolHistory
-	Staged        []requestctx.StagedMemoryCandidate
-	TTL           time.Duration
-	Pressure      SessionPromptPressure
+	// Group scope is trusted gateway provenance, never inferred from session IDs.
+	// Both fields must be set together; absent scope is never shared.
+	GroupGateway string
+	GroupChatID  string
+	// PublicUserText is the exact public prompt, without internal enrichment.
+	// It may be empty and never falls back to UserText; absent scope discards it.
+	PublicUserText string
+	ToolNames      []string
+	History        ToolHistory
+	Staged         []requestctx.StagedMemoryCandidate
+	TTL            time.Duration
+	Pressure       SessionPromptPressure
 }
 
 // AppendPendingSessionTurn atomically stores one pending exchange, native tool
@@ -32,10 +39,18 @@ func (s *Store) AppendPendingSessionTurn(ctx context.Context, input SessionTurnW
 		return StoredSessionTurn{}, fmt.Errorf("append session turn: invalid compaction pressure")
 	}
 	pressure.Version = strings.TrimSpace(pressure.Version)
-	return s.appendSessionTurnWithForegroundMemory(ctx, input.SessionID, input.UserID, input.Generation, input.UserText, input.AssistantText, input.ToolNames, input.History, input.Staged, input.TTL, &pressure)
+	return s.appendSessionTurnWithForegroundMemory(ctx, input, &pressure)
 }
 
-func (s *Store) appendSessionTurnWithForegroundMemory(ctx context.Context, sessionID, userID string, generation int, userText, assistantText string, toolNames []string, history ToolHistory, staged []requestctx.StagedMemoryCandidate, ttl time.Duration, pressure *SessionPromptPressure) (StoredSessionTurn, error) {
+func (s *Store) appendSessionTurnWithForegroundMemory(ctx context.Context, input SessionTurnWrite, pressure *SessionPromptPressure) (StoredSessionTurn, error) {
+	sessionID, userID, generation := input.SessionID, input.UserID, input.Generation
+	userText, assistantText := input.UserText, input.AssistantText
+	toolNames, history, staged, ttl := input.ToolNames, input.History, input.Staged, input.TTL
+	if input.GroupGateway == "" && input.GroupChatID == "" {
+		input.PublicUserText = ""
+	} else if (input.GroupGateway != "discord" && input.GroupGateway != "imessage") || strings.TrimSpace(input.GroupChatID) == "" || strings.TrimSpace(input.GroupChatID) != input.GroupChatID {
+		return StoredSessionTurn{}, fmt.Errorf("append session turn: invalid group scope")
+	}
 	if strings.TrimSpace(sessionID) == "" || strings.TrimSpace(userID) == "" || strings.TrimSpace(assistantText) == "" {
 		return StoredSessionTurn{}, nil
 	}
@@ -69,13 +84,13 @@ func (s *Store) appendSessionTurnWithForegroundMemory(ctx context.Context, sessi
 		toolNames = successfulToolHistoryNames(history)
 	}
 	query := `
-INSERT INTO session_turns (session_id, canonical_user_id, session_generation, user_text, assistant_text, tool_names, tool_trace, tool_search_text, foreground_memory, created_at, expires_at, source_request_id, compaction_pressure_tokens, compaction_pressure_limit, compaction_pressure_version)
-SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+INSERT INTO session_turns (session_id, canonical_user_id, session_generation, user_text, assistant_text, tool_names, tool_trace, tool_search_text, foreground_memory, created_at, expires_at, source_request_id, compaction_pressure_tokens, compaction_pressure_limit, compaction_pressure_version, group_gateway, group_chat_id, public_user_text)
+SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 WHERE EXISTS (
 	SELECT 1 FROM sessions WHERE canonical_user_id = ? AND session_id = ? AND generation = ? AND is_active = 1
 	)
 	RETURNING id`
-	args := []any{sessionID, userID, generation, strings.TrimSpace(userText), strings.TrimSpace(assistantText), strings.Join(uniqueStrings(toolNames), ","), toolTrace, toolSearchText, foregroundMemory, formatTime(now), nullableTime(expires), requestID, pressureTokens, pressureLimit, pressureVersion, userID, sessionID, generation}
+	args := []any{sessionID, userID, generation, strings.TrimSpace(userText), strings.TrimSpace(assistantText), strings.Join(uniqueStrings(toolNames), ","), toolTrace, toolSearchText, foregroundMemory, formatTime(now), nullableTime(expires), requestID, pressureTokens, pressureLimit, pressureVersion, input.GroupGateway, input.GroupChatID, input.PublicUserText, userID, sessionID, generation}
 	tx, err := s.sql.BeginTx(ctx, nil)
 	if err != nil {
 		return StoredSessionTurn{}, fmt.Errorf("begin session turn write: %w", err)
