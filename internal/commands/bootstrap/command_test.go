@@ -20,7 +20,7 @@ type fakeAccounts struct {
 
 func (f *fakeAccounts) HasAdmin() (bool, error) { return f.hasAdmin, nil }
 
-func (f *fakeAccounts) ClaimBootstrapAdmin(principal identity.Principal) (string, bool, error) {
+func (f *fakeAccounts) ClaimBootstrapAdmin(_ context.Context, principal identity.Principal) (string, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.claimCall++

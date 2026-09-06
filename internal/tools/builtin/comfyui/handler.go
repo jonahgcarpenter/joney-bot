@@ -63,14 +63,14 @@ func newHandler(mode Mode, workflow *Workflow, client generator, log *config.Log
 			return governance.Result{}, err
 		}
 		meta := requestctx.MetadataFromContext(ctx)
-		agentLog := log.Agent("agent.tool.comfyui", meta.RequestID, meta.SessionID, principal.CanonicalUserID, principal.Gateway, meta.Model)
+		agentLog := log.Agent("agent.tool.comfyui", meta.RequestID, principal.CanonicalUserID, principal.Gateway, meta.Model).With(requestctx.LogFields(ctx)...)
 		agentLog.Debug("agent.tool.comfyui.start", "starting ComfyUI generation", config.F("mode", string(mode)), config.F("prompt_chars", utf8.RuneCountInString(prompt)), config.F("negative_prompt_chars", utf8.RuneCountInString(negative)))
 
 		outputNode := "9"
 		if mode == ImageToImage {
 			outputNode = "30"
 		}
-		generated, cleanupFailed, err := client.Generate(ctx, built, outputNode, inputPNG)
+		generated, cleanupFailed, err := client.Generate(context.WithValue(ctx, generationLoggerKey{}, log), built, outputNode, inputPNG)
 		if err != nil {
 			if cleanupFailed {
 				agentLog.Warn("agent.tool.comfyui.cleanup_failed", "ComfyUI VRAM cleanup failed", config.F("mode", string(mode)), config.F("reason_code", "vram_cleanup_failed"), config.F("status", "degraded"))

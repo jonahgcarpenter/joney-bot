@@ -281,11 +281,11 @@ func evaluateMemoryLifecycleGlobalMemory(t *testing.T) {
 	defer memory.Close() // nolint:errcheck
 	accounts := accounts.NewService(path, memory, nil, log)
 	defer accounts.Close() // nolint:errcheck
-	adminID, err := accounts.EnsureAccount("homeassistant", "admin", "Admin")
+	adminID, err := accounts.EnsureAccount(context.Background(), "homeassistant", "admin", "Admin")
 	if err != nil {
 		t.Fatal(err)
 	}
-	targetID, err := accounts.EnsureAccount("homeassistant", "target", "Target")
+	targetID, err := accounts.EnsureAccount(context.Background(), "homeassistant", "target", "Target")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -361,7 +361,7 @@ func evaluateMemoryLifecycleGlobalMemory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := accounts.DeleteUserAs(admin, targetID); err != nil {
+	if _, err := accounts.DeleteUserAs(context.Background(), admin, targetID); err != nil {
 		t.Fatal(err)
 	}
 	for _, table := range []string{"account_users", "linked_accounts", "memory_candidates", "memory_entries", "session_turns", "sessions", "durable_jobs"} {
@@ -446,7 +446,7 @@ func evaluateMemoryLifecycleForgetLifecycle(t *testing.T) {
 	defer store.Close() // nolint:errcheck
 	accounts := accounts.NewService(path, store, nil, log)
 	defer accounts.Close() // nolint:errcheck
-	userID, err := accounts.EnsureAccount("homeassistant", "actor", "Actor")
+	userID, err := accounts.EnsureAccount(context.Background(), "homeassistant", "actor", "Actor")
 	if err != nil {
 		t.Fatal(err)
 	}

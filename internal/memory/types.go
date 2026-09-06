@@ -144,7 +144,9 @@ type SessionSummary struct {
 
 // SessionCompactionJob is one fixed-range, leased chunk of a stable campaign.
 type SessionCompactionJob struct {
-	ID                      int64
+	ID int64
+	// RequestID is the covered endpoint's persisted origin, loaded at claim time.
+	RequestID               string `json:"-"`
 	UserID                  string
 	SessionID               string
 	SessionGeneration       int

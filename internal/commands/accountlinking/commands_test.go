@@ -16,11 +16,11 @@ import (
 
 func TestCommandHandlerConnectAndDisconnect(t *testing.T) {
 	links := newTestService(t)
-	userID, err := links.EnsureAccount("discord", "123", "Alice")
+	userID, err := links.EnsureAccount(context.Background(), "discord", "123", "Alice")
 	if err != nil {
 		t.Fatalf("ensure account: %v", err)
 	}
-	otherID, err := links.EnsureAccount("homeassistant", "alice-local", "Alice Local")
+	otherID, err := links.EnsureAccount(context.Background(), "homeassistant", "alice-local", "Alice Local")
 	if err != nil {
 		t.Fatalf("ensure other account: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestCommandHandlerConnectAndDisconnect(t *testing.T) {
 
 func TestConnectCommandRequiresAuthenticatedPrincipal(t *testing.T) {
 	links := newTestService(t)
-	userID, _ := links.EnsureAccount("homeassistant", "local", "Local")
+	userID, _ := links.EnsureAccount(context.Background(), "homeassistant", "local", "Local")
 	var registrations []commands.Command
 	for _, handler := range New(links) {
 		registrations = append(registrations, commands.Command{Handler: handler})

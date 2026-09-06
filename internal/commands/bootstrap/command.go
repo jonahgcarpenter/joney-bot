@@ -29,7 +29,7 @@ var (
 // Accounts exposes the account operations needed by administrator bootstrap.
 type Accounts interface {
 	HasAdmin() (bool, error)
-	ClaimBootstrapAdmin(identity.Principal) (string, bool, error)
+	ClaimBootstrapAdmin(context.Context, identity.Principal) (string, bool, error)
 }
 
 // Service owns one process-local, single-use administrator bootstrap code.
@@ -74,27 +74,27 @@ func (s *Service) Definition() commands.Definition {
 }
 
 // Execute validates and consumes the bootstrap code for a supported authenticated principal.
-func (s *Service) Execute(_ context.Context, req commands.Request) (commands.Result, error) {
+func (s *Service) Execute(ctx context.Context, req commands.Request) (commands.Result, error) {
 	if !req.Principal.Authenticated() || (req.Principal.Gateway != "discord" && req.Principal.Gateway != "imessage" && req.Principal.Gateway != "homeassistant") {
-		return commands.Result{Text: "Bootstrap is available only from an authenticated Discord, iMessage, or Home Assistant account."}, nil
+		return commands.Result{Text: "Bootstrap is available only from an authenticated Discord, iMessage, or Home Assistant account.", Outcome: commands.Outcome{Status: "rejected", ReasonCode: "authentication_required"}}, nil
 	}
 	if len(req.Args) != 1 {
-		return commands.Result{Text: commands.UsageText(s.Definition())}, nil
+		return commands.Result{Text: commands.UsageText(s.Definition()), Outcome: commands.Outcome{Status: "rejected", ReasonCode: "invalid_arguments"}}, nil
 	}
-	userID, err := s.redeem(req.Principal, req.Args[0])
+	userID, err := s.redeem(ctx, req.Principal, req.Args[0])
 	switch {
 	case err == nil:
 		return commands.Result{Text: "Administrator access granted to account " + userID + "."}, nil
 	case errors.Is(err, ErrInvalidCode):
-		return commands.Result{Text: "That bootstrap code is invalid."}, nil
+		return commands.Result{Text: "That bootstrap code is invalid.", Outcome: commands.Outcome{Status: "rejected", ReasonCode: "invalid_code"}}, nil
 	case errors.Is(err, ErrUnavailable):
-		return commands.Result{Text: "Bootstrap is unavailable or has already been completed."}, nil
+		return commands.Result{Text: "Bootstrap is unavailable or has already been completed.", Outcome: commands.Outcome{Status: "rejected", ReasonCode: "unavailable"}}, nil
 	default:
 		return commands.Result{}, err
 	}
 }
 
-func (s *Service) redeem(principal identity.Principal, code string) (string, error) {
+func (s *Service) redeem(ctx context.Context, principal identity.Principal, code string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.active {
@@ -104,7 +104,7 @@ func (s *Service) redeem(principal identity.Principal, code string) (string, err
 	if subtle.ConstantTimeCompare(candidate[:], s.hash[:]) != 1 {
 		return "", ErrInvalidCode
 	}
-	userID, claimed, err := s.accounts.ClaimBootstrapAdmin(principal)
+	userID, claimed, err := s.accounts.ClaimBootstrapAdmin(ctx, principal)
 	if err != nil {
 		return "", err
 	}

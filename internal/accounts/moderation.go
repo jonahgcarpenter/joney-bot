@@ -3,7 +3,6 @@ package accounts
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -12,6 +11,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/database"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
 )
 
 // ListUsers returns all canonical users with compact account and status details.
@@ -86,7 +86,7 @@ func (s *Service) HasAdmin() (bool, error) {
 
 // ClaimBootstrapAdmin promotes the current owner of a supported authenticated
 // principal only while no administrator exists.
-func (s *Service) ClaimBootstrapAdmin(principal identity.Principal) (string, bool, error) {
+func (s *Service) ClaimBootstrapAdmin(ctx context.Context, principal identity.Principal) (string, bool, error) {
 	if !principal.Authenticated() || (principal.Gateway != "discord" && principal.Gateway != "imessage" && principal.Gateway != "homeassistant") {
 		return "", false, nil
 	}
@@ -119,7 +119,7 @@ func (s *Service) ClaimBootstrapAdmin(principal identity.Principal) (string, boo
 	if err := s.saveLocked(data); err != nil {
 		return "", false, err
 	}
-	s.log.Info("account_link.user.admin_bootstrapped", "granted initial administrator access", config.F("target_user_id", userID), config.F("gateway", principal.Gateway), config.F("status", "ok"))
+	s.log.With(requestctx.LogFields(ctx)...).Info("account_link.user.admin_bootstrapped", "granted initial administrator access", config.F("actor_user_id", userID), config.F("target_user_id", userID), config.F("gateway", principal.Gateway), config.F("status", "ok"))
 	return userID, true, nil
 }
 
@@ -164,27 +164,32 @@ func (s *Service) BanStatus(canonicalUserID string) (bool, string, error) {
 }
 
 // SetAdminAs updates admin state after atomically re-resolving the authenticated actor.
-func (s *Service) SetAdminAs(principal identity.Principal, targetID string, isAdmin bool) error {
+// It reports whether the state changed after a successful commit.
+func (s *Service) SetAdminAs(ctx context.Context, principal identity.Principal, targetID string, isAdmin bool) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	data, err := s.loadLocked()
 	if err != nil {
-		return err
+		return false, err
 	}
 	actorID, err := authenticatedAdminActor(data, principal)
 	if err != nil {
-		return err
+		return false, err
 	}
-	return s.setAdminLocked(data, actorID, targetID, isAdmin)
+	changed := data.Users[targetID].IsAdmin != isAdmin
+	if err := s.setAdminLocked(ctx, data, actorID, targetID, isAdmin); err != nil {
+		return false, err
+	}
+	return changed, nil
 }
 
-func (s *Service) setAdminLocked(data database.AccountLinkData, actorID, targetID string, isAdmin bool) error {
+func (s *Service) setAdminLocked(ctx context.Context, data database.AccountLinkData, actorID, targetID string, isAdmin bool) error {
 	if actorID == targetID && !isAdmin {
-		return fmt.Errorf("cannot remove admin from yourself")
+		return policyError("self_modification", "cannot remove admin from yourself")
 	}
 	user, ok := data.Users[targetID]
 	if !ok {
-		return fmt.Errorf("canonical user %q not found", targetID)
+		return policyError("not_found", "canonical user %q not found", targetID)
 	}
 	if user.IsAdmin == isAdmin {
 		return nil
@@ -195,15 +200,15 @@ func (s *Service) setAdminLocked(data database.AccountLinkData, actorID, targetI
 		return err
 	}
 	if isAdmin {
-		s.log.Info("account_link.user.admin_granted", "granted user admin access", config.F("actor_user_id", actorID), config.F("target_user_id", targetID), config.F("status", "ok"))
+		s.log.With(requestctx.LogFields(ctx)...).Info("account_link.user.admin_granted", "granted user admin access", config.F("actor_user_id", actorID), config.F("target_user_id", targetID), config.F("status", "ok"))
 	} else {
-		s.log.Info("account_link.user.admin_revoked", "revoked user admin access", config.F("actor_user_id", actorID), config.F("target_user_id", targetID), config.F("status", "ok"))
+		s.log.With(requestctx.LogFields(ctx)...).Info("account_link.user.admin_revoked", "revoked user admin access", config.F("actor_user_id", actorID), config.F("target_user_id", targetID), config.F("status", "ok"))
 	}
 	return nil
 }
 
 // BanUserAs bans a user after atomically re-resolving the authenticated actor.
-func (s *Service) BanUserAs(principal identity.Principal, targetID, reason string) error {
+func (s *Service) BanUserAs(ctx context.Context, principal identity.Principal, targetID, reason string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	data, err := s.loadLocked()
@@ -214,16 +219,16 @@ func (s *Service) BanUserAs(principal identity.Principal, targetID, reason strin
 	if err != nil {
 		return err
 	}
-	return s.banUserLocked(data, actorID, targetID, reason)
+	return s.banUserLocked(ctx, data, actorID, targetID, reason)
 }
 
-func (s *Service) banUserLocked(data database.AccountLinkData, actorID, targetID, reason string) error {
+func (s *Service) banUserLocked(ctx context.Context, data database.AccountLinkData, actorID, targetID, reason string) error {
 	if actorID == targetID {
-		return fmt.Errorf("cannot ban yourself")
+		return policyError("self_modification", "cannot ban yourself")
 	}
 	user, ok := data.Users[targetID]
 	if !ok {
-		return fmt.Errorf("canonical user %q not found", targetID)
+		return policyError("not_found", "canonical user %q not found", targetID)
 	}
 	user.IsBanned = true
 	user.BanReason = strings.TrimSpace(reason)
@@ -231,29 +236,35 @@ func (s *Service) banUserLocked(data database.AccountLinkData, actorID, targetID
 	if err := s.saveLocked(data); err != nil {
 		return err
 	}
-	s.log.Info("account_link.user.banned", "banned user", config.F("actor_user_id", actorID), config.F("target_user_id", targetID), config.F("status", "ok"))
+	s.log.With(requestctx.LogFields(ctx)...).Info("account_link.user.banned", "banned user", config.F("actor_user_id", actorID), config.F("target_user_id", targetID), config.F("status", "ok"))
 	return nil
 }
 
 // UnbanUserAs unbans a user after atomically re-resolving the authenticated actor.
-func (s *Service) UnbanUserAs(principal identity.Principal, targetID string) error {
+// It reports whether the state changed after a successful commit.
+func (s *Service) UnbanUserAs(ctx context.Context, principal identity.Principal, targetID string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	data, err := s.loadLocked()
 	if err != nil {
-		return err
+		return false, err
 	}
 	actorID, err := authenticatedAdminActor(data, principal)
 	if err != nil {
-		return err
+		return false, err
 	}
-	return s.unbanUserLocked(data, actorID, targetID)
+	user := data.Users[targetID]
+	changed := user.IsBanned || user.BanReason != ""
+	if err := s.unbanUserLocked(ctx, data, actorID, targetID); err != nil {
+		return false, err
+	}
+	return changed, nil
 }
 
-func (s *Service) unbanUserLocked(data database.AccountLinkData, actorID, targetID string) error {
+func (s *Service) unbanUserLocked(ctx context.Context, data database.AccountLinkData, actorID, targetID string) error {
 	user, ok := data.Users[targetID]
 	if !ok {
-		return fmt.Errorf("canonical user %q not found", targetID)
+		return policyError("not_found", "canonical user %q not found", targetID)
 	}
 	if !user.IsBanned && user.BanReason == "" {
 		return nil
@@ -264,18 +275,13 @@ func (s *Service) unbanUserLocked(data database.AccountLinkData, actorID, target
 	if err := s.saveLocked(data); err != nil {
 		return err
 	}
-	s.log.Info("account_link.user.unbanned", "unbanned user", config.F("actor_user_id", actorID), config.F("target_user_id", targetID), config.F("status", "ok"))
+	s.log.With(requestctx.LogFields(ctx)...).Info("account_link.user.unbanned", "unbanned user", config.F("actor_user_id", actorID), config.F("target_user_id", targetID), config.F("status", "ok"))
 	return nil
 }
 
 // DeleteUserAs deletes a user after atomically re-resolving the authenticated actor.
-func (s *Service) DeleteUserAs(principal identity.Principal, targetID string) error {
-	_, err := s.DeleteUserAsWithRuntimeInvalidation(principal, targetID)
-	return err
-}
-
-// DeleteUserAsWithRuntimeInvalidation deletes a user and returns its runtime scope.
-func (s *Service) DeleteUserAsWithRuntimeInvalidation(principal identity.Principal, targetID string) (UserDeletionDescriptor, error) {
+// It returns the runtime invalidation scope only after the deletion commits.
+func (s *Service) DeleteUserAs(ctx context.Context, principal identity.Principal, targetID string) (UserDeletionDescriptor, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	data, err := s.loadLocked()
@@ -286,22 +292,21 @@ func (s *Service) DeleteUserAsWithRuntimeInvalidation(principal identity.Princip
 	if err != nil {
 		return UserDeletionDescriptor{}, err
 	}
-	return s.deleteUserLockedWithInvalidation(data, actorID, strings.TrimSpace(targetID))
+	return s.deleteUserLockedWithInvalidation(ctx, data, actorID, strings.TrimSpace(targetID))
 }
 
-func (s *Service) deleteUserLockedWithInvalidation(data database.AccountLinkData, actorID, targetID string) (UserDeletionDescriptor, error) {
+func (s *Service) deleteUserLockedWithInvalidation(ctx context.Context, data database.AccountLinkData, actorID, targetID string) (UserDeletionDescriptor, error) {
 	if targetID == "" {
-		return UserDeletionDescriptor{}, fmt.Errorf("canonical user ID cannot be empty")
+		return UserDeletionDescriptor{}, policyError("invalid_arguments", "canonical user ID cannot be empty")
 	}
 	if actorID == targetID {
-		return UserDeletionDescriptor{}, fmt.Errorf("cannot delete yourself")
+		return UserDeletionDescriptor{}, policyError("self_modification", "cannot delete yourself")
 	}
 	user, ok := data.Users[targetID]
 	if !ok {
-		return UserDeletionDescriptor{}, fmt.Errorf("canonical user %q not found", targetID)
+		return UserDeletionDescriptor{}, policyError("not_found", "canonical user %q not found", targetID)
 	}
 
-	ctx := context.Background()
 	var invalidation memory.UserDeletionScope
 	if err := s.db.WithTx(ctx, func(tx *sql.Tx) error {
 		if s.mcp != nil {
@@ -319,13 +324,13 @@ func (s *Service) deleteUserLockedWithInvalidation(data database.AccountLinkData
 		s.mcp.UserDeleteCommitted(targetID)
 	}
 
-	s.log.Info("account_link.user.deleted", "deleted user", config.F("actor_user_id", actorID), config.F("target_user_id", targetID), config.F("account_count", len(user.Accounts)), config.F("status", "ok"))
+	s.log.With(requestctx.LogFields(ctx)...).Info("account_link.user.deleted", "deleted user", config.F("actor_user_id", actorID), config.F("target_user_id", targetID), config.F("account_count", len(user.Accounts)), config.F("status", "ok"))
 	return UserDeletionDescriptor{ExternalIdentities: invalidation.ExternalIdentities, SessionIDs: invalidation.SessionIDs}, nil
 }
 
 func authenticatedAdminActor(data database.AccountLinkData, principal identity.Principal) (string, error) {
 	if !principal.Valid() || !principal.Authenticated() {
-		return "", fmt.Errorf("admin command requires an authenticated identity")
+		return "", policyError("authentication_required", "admin command requires an authenticated identity")
 	}
 	identifier, err := NormalizeIdentifier(principal.Gateway, principal.ExternalID)
 	if err != nil {
@@ -340,7 +345,7 @@ func authenticatedAdminActor(data database.AccountLinkData, principal identity.P
 		return "", ErrPrincipalMismatch
 	}
 	if !actor.IsAdmin {
-		return "", fmt.Errorf("canonical user %q is not an admin", actorID)
+		return "", policyError("admin_required", "canonical user %q is not an admin", actorID)
 	}
 	return actorID, nil
 }

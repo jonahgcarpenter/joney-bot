@@ -107,7 +107,9 @@ func newBraveClient(endpoint, apiKey string, httpClient *http.Client, limiter at
 }
 
 // Search requests bounded, extracted web context from Brave.
-func (c *BraveClient) Search(ctx context.Context, query string) (SearchResponse, error) {
+func (c *BraveClient) Search(ctx context.Context, query string) (response SearchResponse, err error) {
+	ctx, complete := beginSearch(ctx, c.log, "brave")
+	defer func() { complete(response, err) }()
 	startedAt := time.Now()
 	if err := validateQuery(query); err != nil {
 		return SearchResponse{}, err
@@ -137,7 +139,7 @@ func (c *BraveClient) Search(ctx context.Context, query string) (SearchResponse,
 		req.Header.Set("Api-Version", braveAPIVersion)
 		req.Header.Set("User-Agent", "oswald-ai/web.search")
 
-		resp, err := c.httpClient.Do(req)
+		resp, err := searchAttempt(c.log, c.httpClient, req, "brave", attempt)
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return SearchResponse{}, fmt.Errorf("Brave request canceled: %w", ctxErr)
@@ -162,7 +164,7 @@ func (c *BraveClient) Search(ctx context.Context, query string) (SearchResponse,
 		delay, retry, class := braveRetry(status, resp.Header)
 		if attempt == 2 || !retry {
 			c.logFailure(ctx, status, attempt, class, time.Since(startedAt))
-			return SearchResponse{}, fmt.Errorf("Brave returned status %d", status)
+			return SearchResponse{}, &searchHTTPError{status: status, message: fmt.Sprintf("Brave returned status %d", status)}
 		}
 		c.logRetry(ctx, status, attempt, class)
 		if err := waitForRetry(ctx, delay); err != nil {
@@ -296,7 +298,7 @@ func (c *BraveClient) logRetry(ctx context.Context, status, attempt int, class s
 	if c.log == nil {
 		return
 	}
-	c.log.Warn("tool.web.search.retry", "retrying web search request", requestLogFields(ctx,
+	c.log.Debug("tool.web.search.retry", "retrying web search request", requestLogFields(ctx,
 		config.F("provider", "brave"), config.F("attempt", attempt), config.F("http_status", status),
 		config.F("rate_limit_scope", class), config.F("status", "retry"))...)
 }
@@ -310,7 +312,7 @@ func (c *BraveClient) logFailure(ctx context.Context, status, attempt int, class
 	if status != 0 {
 		fields = append(fields, config.F("http_status", status))
 	}
-	c.log.Warn("tool.web.search.request_failed", "web search request failed", fields...)
+	c.log.Debug("tool.web.search.request_failed", "web search request failed", fields...)
 }
 
 func (c *BraveClient) logCompletion(ctx context.Context, query string, responseBytes int, response SearchResponse, duration time.Duration) {

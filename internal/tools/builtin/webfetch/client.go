@@ -19,6 +19,14 @@ const defaultOEmbedURL = "https://publish.x.com/oembed"
 
 const fetchTimeout = 15 * time.Second
 
+type fetchHTTPError struct {
+	status  int
+	message string
+}
+
+func (e *fetchHTTPError) Error() string       { return e.message }
+func (e *fetchHTTPError) HTTPStatusCode() int { return e.status }
+
 // Fetcher retrieves one public page and returns normalized readable content.
 type Fetcher interface {
 	Fetch(context.Context, string) (Response, error)
@@ -108,7 +116,7 @@ func (c *Client) fetchDirect(ctx context.Context, target *url.URL) (Response, er
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-		return Response{}, errors.New("public page returned an unsuccessful status")
+		return Response{}, &fetchHTTPError{status: resp.StatusCode, message: "public page returned an unsuccessful status"}
 	}
 	if resp.ContentLength > maxBodyBytes {
 		return Response{}, errors.New("public page exceeded the size limit")
@@ -175,7 +183,7 @@ func (c *Client) fetchXPost(ctx context.Context, canonical string) (Response, er
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-		return Response{}, errors.New("X post adapter returned an unsuccessful status")
+		return Response{}, &fetchHTTPError{status: resp.StatusCode, message: "X post adapter returned an unsuccessful status"}
 	}
 	if contentType, _, parseErr := mime.ParseMediaType(resp.Header.Get("Content-Type")); parseErr != nil || contentType != "application/json" {
 		return Response{}, errors.New("X post adapter returned an invalid content type")

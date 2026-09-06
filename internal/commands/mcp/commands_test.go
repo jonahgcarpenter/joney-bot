@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -11,6 +12,53 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	mcpmanager "github.com/jonahgcarpenter/oswald-ai/internal/mcp"
 )
+
+func TestMutationOutcomesDoNotRequireDecryptingConfiguration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "oswald.db")
+	log := config.NewLogger(config.LevelError)
+	store, err := mcpmanager.NewStore(path, "12345678901234567890123456789012", log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	store.SetResolverForTest(staticResolver{"example.com": {"93.184.216.34"}})
+	manager := mcpmanager.NewManagerFromStore(store, log)
+	defer manager.Close()
+	h := New(store, manager, fakeAuth{admin: true})
+	ctx := context.Background()
+	if _, err := store.Save(ctx, mcpmanager.ServerConfig{Scope: mcpmanager.ScopeGlobal, Name: "home", Description: "Synthetic tools.", Transport: mcpmanager.TransportStreamableHTTP, URL: "https://example.com/mcp", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`UPDATE mcp_servers SET url_ciphertext = 'corrupt', headers_ciphertext = 'corrupt'`); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		operation string
+		changed   bool
+		text      string
+	}{
+		{"enable", false, `MCP server "home" enabled.`},
+		{"disable", true, `MCP server "home" disabled.`},
+		{"disable", false, `MCP server "home" disabled.`},
+		{"enable", true, `MCP server "home" enabled.`},
+		{"remove", true, `MCP server "home" removed.`},
+		{"remove", false, `MCP server "home" removed.`},
+		{"enable", false, `MCP server "home" enabled.`},
+	} {
+		result, err := h.Execute(ctx, commands.Request{Principal: identity.Principal{CanonicalUserID: "admin", Gateway: "discord", ExternalID: "admin", Assurance: identity.AssuranceDiscordGateway}, Args: []string{"global", test.operation, "home"}})
+		if err != nil || result.Text != test.text || result.Outcome.Status != "ok" || result.Outcome.IsChanged != test.changed {
+			t.Fatalf("%s result=%+v err=%v", test.operation, result, err)
+		}
+		if test.changed && result.Outcome.AffectedCount != 1 || !test.changed && (result.Outcome.AffectedCount != 0 || result.Outcome.ReasonCode != "no_op") {
+			t.Fatalf("outcome=%+v", result.Outcome)
+		}
+	}
+}
 
 type fakeAuth struct{ admin bool }
 

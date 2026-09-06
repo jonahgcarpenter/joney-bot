@@ -11,9 +11,11 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/compaction/budget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
 )
 
 type summaryFakeChatter struct {
+	ctx       context.Context
 	arguments map[string]interface{}
 	request   llm.ChatRequest
 	response  *llm.ChatResponse
@@ -40,7 +42,8 @@ func (f *summarySequenceChatter) Chat(_ context.Context, request llm.ChatRequest
 	return outcome.response, outcome.err
 }
 
-func (f *summaryFakeChatter) Chat(_ context.Context, request llm.ChatRequest, _ func(llm.ChatMessage)) (*llm.ChatResponse, error) {
+func (f *summaryFakeChatter) Chat(ctx context.Context, request llm.ChatRequest, _ func(llm.ChatMessage)) (*llm.ChatResponse, error) {
+	f.ctx = ctx
 	f.request = request
 	if f.err != nil {
 		return nil, f.err
@@ -51,6 +54,27 @@ func (f *summaryFakeChatter) Chat(_ context.Context, request llm.ChatRequest, _ 
 	return &llm.ChatResponse{Message: llm.ChatMessage{Role: "assistant", ToolCalls: []llm.ToolCall{{
 		Function: llm.ToolFunction{Name: sessionSummarySaveToolName, Arguments: f.arguments},
 	}}}}, nil
+}
+
+func TestForegroundCompactionPreservesOriginAndUsageCollector(t *testing.T) {
+	client := &summaryFakeChatter{arguments: summaryArguments(t, `{"narrative":"Synthetic summary.","open_tasks":[],"commitments":[],"entities":[],"decisions":[],"topic_tags":[],"candidates":[]}`)}
+	compactor := newSummaryTestCompactor(t, client, 8192)
+	meta := requestctx.Metadata{RequestID: "origin-request", OperationID: "parent-operation", Workload: "foreground"}
+	collector := requestctx.NewUsageCollector()
+	ctx := requestctx.WithUsageCollector(requestctx.WithMetadata(context.Background(), meta), collector)
+	if _, err := compactor.CompactForeground(ctx, nil, []memory.SessionTurn{{ID: 1, UserText: "Synthetic turn.", AssistantText: "Synthetic answer."}}, 20000); err != nil {
+		t.Fatal(err)
+	}
+	got := requestctx.MetadataFromContext(client.ctx)
+	if got.Workload != "compaction" || got.RequestID != meta.RequestID || got.ParentOperationID != meta.OperationID || got.OperationID == "" || got.OperationID == meta.OperationID {
+		t.Fatalf("compaction metadata=%+v", got)
+	}
+	if requestctx.UsageCollectorFromContext(client.ctx) != collector {
+		t.Fatal("compaction detached usage collector")
+	}
+	if requestctx.MetadataFromContext(ctx) != meta {
+		t.Fatal("compaction mutated parent metadata")
+	}
 }
 
 func TestLLMCompactorParsesStructuredSummaryWithEmptyCandidates(t *testing.T) {
@@ -278,20 +302,20 @@ func TestLLMCompactorForegroundReservesCorrectivePromptBudget(t *testing.T) {
 }
 
 func TestNewLLMCompactorValidatesDependencies(t *testing.T) {
-	if _, err := NewLLMCompactor(nil, "model", 8192); err == nil {
+	if _, err := NewLLMCompactor(nil, "model", 8192, nil); err == nil {
 		t.Fatal("expected missing client error")
 	}
-	if _, err := NewLLMCompactor(&summaryFakeChatter{}, " ", 8192); err == nil {
+	if _, err := NewLLMCompactor(&summaryFakeChatter{}, " ", 8192, nil); err == nil {
 		t.Fatal("expected missing model error")
 	}
-	if _, err := NewLLMCompactor(&summaryFakeChatter{}, "model", 0); err == nil {
+	if _, err := NewLLMCompactor(&summaryFakeChatter{}, "model", 0, nil); err == nil {
 		t.Fatal("expected invalid max output tokens error")
 	}
 }
 
 func newSummaryTestCompactor(t *testing.T, client llm.Chatter, maxTokens int) *LLMCompactor {
 	t.Helper()
-	compactor, err := NewLLMCompactor(client, "model", maxTokens)
+	compactor, err := NewLLMCompactor(client, "model", maxTokens, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"runtime/debug"
+	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/accounts"
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
@@ -65,14 +67,47 @@ func Run(ctx context.Context, cfg *config.Config, log *config.Logger, stdout io.
 	})
 }
 
-func run(ctx context.Context, cfg *config.Config, rootLog *config.Logger, stdout io.Writer, deps dependencies) error {
+func run(ctx context.Context, cfg *config.Config, rootLog *config.Logger, stdout io.Writer, deps dependencies) (runErr error) {
 	if ctx.Err() != nil {
 		return nil
 	}
 	var cleanup shutdown
-	defer cleanup.run()
 
 	log := rootLog.Server("app")
+	cleanup.log = log
+	defer func() {
+		started := time.Now()
+		reason := "normal"
+		if runErr != nil {
+			reason = "initialization_failure"
+		}
+		log.Info("app.shutdown", "shutting down application", config.F("cleanup_reason", reason))
+		cleanup.run()
+		log.Info("app.shutdown.complete", "application cleanup completed", config.F("cleanup_reason", reason), config.F("duration_ms", time.Since(started).Milliseconds()), config.F("status", "ok"))
+	}()
+	version, revision, goVersion := "unknown", "unknown", "unknown"
+	if info, ok := debug.ReadBuildInfo(); ok {
+		if info.Main.Version != "" && info.Main.Version != "(devel)" {
+			version = info.Main.Version
+		}
+		if info.GoVersion != "" {
+			goVersion = info.GoVersion
+		}
+		for _, setting := range info.Settings {
+			if setting.Key == "vcs.revision" && setting.Value != "" {
+				revision = setting.Value
+			}
+		}
+	}
+	log.Info("app.build", "application build", config.F("build_version", version), config.F("build_revision", revision), config.F("go_version", goVersion))
+	phase := func(name string) func() {
+		started := time.Now()
+		log.Info("app.initialization.starting", "initialization phase starting", config.F("phase", name))
+		return func() {
+			log.Info("app.initialization.completed", "initialization phase completed", config.F("phase", name), config.F("duration_ms", time.Since(started).Milliseconds()), config.F("status", "ok"))
+		}
+	}
+	finishPhase := phase("configuration")
 
 	if cfg.LLMGatewayModel == "" {
 		return &Error{Event: "app.config.invalid", Message: "missing required LLM_GATEWAY_MODEL environment variable"}
@@ -100,6 +135,8 @@ func run(ctx context.Context, cfg *config.Config, rootLog *config.Logger, stdout
 
 	// The user memory store shares the account-link database and initializes its
 	// permanent schema before the other stores open their own handles.
+	finishPhase()
+	finishPhase = phase("storage")
 	userMemStore, err := memory.NewSQLiteStore(deps.databasePath, llmClient, cfg.LLMGatewayEmbeddingModel, rootLog.Server("memory.user"))
 	if err != nil {
 		return &Error{Event: "app.memory_user.init_failed", Message: "failed to initialize user memory store", Cause: err}
@@ -133,6 +170,8 @@ func run(ctx context.Context, cfg *config.Config, rootLog *config.Logger, stdout
 	if ctx.Err() != nil {
 		return nil
 	}
+	finishPhase()
+	finishPhase = phase("services")
 	bootstrapCommand, bootstrapCode, err := bootstrapcommands.New(accountLinkService)
 	if err != nil {
 		return &Error{Event: "app.bootstrap.init_failed", Message: "failed to initialize administrator bootstrap", Cause: err}
@@ -165,7 +204,7 @@ func run(ctx context.Context, cfg *config.Config, rootLog *config.Logger, stdout
 	}
 	formationService := formation.NewService(userMemStore, formationExtractor, cfg.LLMGatewayModel, rootLog)
 	cleanup.formation = formationService.Stop
-	compactor, err := compaction.NewLLMCompactor(llmClient, cfg.LLMGatewayModel, budget.ResponseReserve)
+	compactor, err := compaction.NewLLMCompactor(llmClient, cfg.LLMGatewayModel, budget.ResponseReserve, rootLog)
 	if err != nil {
 		return &Error{Event: "app.session_compactor.init_failed", Message: "failed to initialize background session compactor", Cause: err}
 	}
@@ -217,6 +256,8 @@ func run(ctx context.Context, cfg *config.Config, rootLog *config.Logger, stdout
 		Compaction:             compactionService,
 		RuntimeInvalidationBus: runtimeInvalidationBus,
 	}
+	finishPhase()
+	finishPhase = phase("gateways")
 	activeGateways, err := deps.newGateways(cfg, accountLinkService, runtimeDeps, rootLog)
 	if err != nil {
 		return &Error{Event: "app.gateways.init_failed", Message: "failed to initialize gateways", Cause: err}
@@ -228,32 +269,50 @@ func run(ctx context.Context, cfg *config.Config, rootLog *config.Logger, stdout
 	compactionService.SetLowPriorityGate(requestBroker)
 	formationService.Start(context.Background())
 	compactionService.Start(context.Background())
+	finishPhase()
 	log.Info("app.start", "starting application")
 	for _, gw := range activeGateways {
 		go func(g gateway.Service) {
 			if err := g.Start(requestBroker); err != nil {
-				log.Error("app.gateway.stopped", "gateway stopped", config.F("gateway", g.Name()), config.ErrorField(err))
+				name := "unknown"
+				switch g.Name() {
+				case "Discord", "discord":
+					name = "discord"
+				case "iMessage", "imessage":
+					name = "imessage"
+				case "Home Assistant", "homeassistant":
+					name = "homeassistant"
+				}
+				log.Error("app.gateway.stopped", "gateway stopped", config.F("gateway", name), config.ErrorField(err))
 			}
 		}(gw)
 	}
 
 	<-ctx.Done()
-	log.Info("app.shutdown", "shutting down application")
 	return nil
 }
 
 // Shutdown is deliberately not reverse acquisition order: maintenance stops
 // before broker drain, and all workers stop before MCP clients and stores close.
 type shutdown struct {
+	log                                               *config.Logger
 	maintenance, broker, formation, compaction, index func()
 	mcp, accounts, mcpStore, globalMemory, userMemory func()
 }
 
 func (s *shutdown) run() {
-	for _, stop := range []func(){s.maintenance, s.broker, s.formation, s.compaction, s.index,
+	names := []string{"maintenance", "broker", "formation", "compaction", "indexing", "mcp", "accounts", "mcp_store", "global_memory", "user_memory"}
+	for i, stop := range []func(){s.maintenance, s.broker, s.formation, s.compaction, s.index,
 		s.mcp, s.accounts, s.mcpStore, s.globalMemory, s.userMemory} {
 		if stop != nil {
+			started := time.Now()
+			if s.log != nil {
+				s.log.Info("app.cleanup.starting", "cleanup phase starting", config.F("phase", names[i]))
+			}
 			stop()
+			if s.log != nil {
+				s.log.Info("app.cleanup.completed", "cleanup phase completed", config.F("phase", names[i]), config.F("duration_ms", time.Since(started).Milliseconds()), config.F("status", "ok"))
+			}
 		}
 	}
 }

@@ -16,16 +16,17 @@ import (
 
 // Store manages speaker profiles, user memories, and session memory in SQLite.
 type Store struct {
-	db             *database.DB
-	sql            *sql.DB
-	log            *config.Logger
-	embedder       llm.Embedder
-	embedModel     string
-	indexNotify    func()
-	retention      config.RetentionPolicy
-	mutationMu     sync.Mutex
-	lastOptimizeAt time.Time
-	userLocks      map[string]*sync.Mutex
+	db                *database.DB
+	sql               *sql.DB
+	log               *config.Logger
+	embedder          llm.Embedder
+	embedModel        string
+	indexNotify       func()
+	retention         config.RetentionPolicy
+	mutationMu        sync.Mutex
+	lastOptimizeAt    time.Time
+	lastMaintenanceAt time.Time
+	userLocks         map[string]*sync.Mutex
 
 	formationFailpoint func(string) error
 	indexWriteHook     func(string)

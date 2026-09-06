@@ -13,14 +13,18 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 )
 
-func (g *Gateway) refreshBlueBubblesCapabilitiesWithRetry(maxAttempts int, delay time.Duration) bool {
+func (g *Gateway) refreshBlueBubblesCapabilitiesWithRetry(maxAttempts int, delay time.Duration, scoped ...*config.Logger) bool {
+	started := time.Now()
 	if maxAttempts <= 0 {
 		maxAttempts = 1
 	}
-	log := g.log()
+	log := g.log(scoped...)
+	var loaded bool
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		loaded, available := g.refreshBlueBubblesCapabilities()
+		var available bool
+		loaded, available = g.refreshBlueBubblesCapabilities(log)
 		if available {
+			log.Info("gateway.bluebubbles.capabilities", "resolved BlueBubbles capabilities", config.F("attempt_count", attempt), config.F("duration_ms", time.Since(started).Milliseconds()), config.F("is_private_api_enabled", true), config.F("is_helper_connected", true), config.F("status", "ok"))
 			return true
 		}
 		if attempt < maxAttempts && delay > 0 {
@@ -30,40 +34,44 @@ func (g *Gateway) refreshBlueBubblesCapabilitiesWithRetry(maxAttempts int, delay
 			log.Debug("gateway.bluebubbles.capabilities_retry", "BlueBubbles private API/helper not ready", config.F("attempt", attempt), config.F("attempt_count", maxAttempts), config.F("status", "degraded"))
 		}
 	}
-	log.Warn("gateway.bluebubbles.capabilities_unavailable", "BlueBubbles private API/helper unavailable after retries", config.F("attempt_count", maxAttempts), config.F("status", "degraded"))
+	reason := "probe_failed"
+	if loaded {
+		reason = "private_api_or_helper_unavailable"
+	}
+	log.Warn("gateway.bluebubbles.capabilities_unavailable", "BlueBubbles private API/helper unavailable after retries", config.F("attempt_count", maxAttempts), config.F("duration_ms", time.Since(started).Milliseconds()), config.F("is_probe_successful", loaded), config.F("reason_code", reason), config.F("status", "degraded"))
 	return false
 }
 
-func (g *Gateway) refreshBlueBubblesCapabilities() (bool, bool) {
-	log := g.log()
+func (g *Gateway) refreshBlueBubblesCapabilities(scoped ...*config.Logger) (bool, bool) {
+	log := g.log(scoped...)
 	endpoint, err := buildBlueBubblesEndpoint(g.BlueBubblesURL, "/api/v1/server/info", g.BlueBubblesPassword)
 	if err != nil {
-		log.Warn("gateway.bluebubbles.capabilities_failed", "failed to build BlueBubbles server info request", config.F("status", "degraded"), config.ErrorField(err))
+		log.Debug("gateway.bluebubbles.capabilities_failed", "failed to build BlueBubbles server info request", config.F("status", "degraded"), config.ErrorField(err))
 		return false, false
 	}
 
 	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
 	if err != nil {
-		log.Warn("gateway.bluebubbles.capabilities_failed", "failed to build BlueBubbles server info request", config.F("status", "degraded"), config.ErrorField(err))
+		log.Debug("gateway.bluebubbles.capabilities_failed", "failed to build BlueBubbles server info request", config.F("status", "degraded"), config.ErrorField(err))
 		return false, false
 	}
 
 	resp, err := g.httpClient().Do(req)
 	if err != nil {
-		log.Warn("gateway.bluebubbles.capabilities_failed", "failed to fetch BlueBubbles server info", config.F("status", "degraded"), config.ErrorField(err))
+		log.Debug("gateway.bluebubbles.capabilities_failed", "failed to fetch BlueBubbles server info", config.F("status", "degraded"), config.ErrorField(err))
 		return false, false
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		log.Warn("gateway.bluebubbles.capabilities_failed", "BlueBubbles server info failed", config.F("http_status", resp.StatusCode), config.F("response_bytes", len(body)), config.F("status", "degraded"))
+		log.Debug("gateway.bluebubbles.capabilities_failed", "BlueBubbles server info failed", config.F("http_status", resp.StatusCode), config.F("response_bytes", len(body)), config.F("status", "degraded"))
 		return false, false
 	}
 
 	var result serverInfoResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		log.Warn("gateway.bluebubbles.capabilities_failed", "failed to decode BlueBubbles server info", config.F("status", "degraded"), config.ErrorField(err))
+		log.Debug("gateway.bluebubbles.capabilities_failed", "failed to decode BlueBubbles server info", config.F("status", "degraded"), config.ErrorField(err))
 		return false, false
 	}
 
@@ -73,15 +81,15 @@ func (g *Gateway) refreshBlueBubblesCapabilities() (bool, bool) {
 	g.helperConnected = result.Data.HelperConnected
 	g.capabilityMu.Unlock()
 
-	log.Info("gateway.bluebubbles.capabilities", "resolved BlueBubbles capabilities", config.F("is_private_api_enabled", result.Data.PrivateAPI), config.F("is_helper_connected", result.Data.HelperConnected), config.F("status", "ok"))
+	log.Debug("gateway.bluebubbles.capabilities_probe", "probed BlueBubbles capabilities", config.F("is_private_api_enabled", result.Data.PrivateAPI), config.F("is_helper_connected", result.Data.HelperConnected), config.F("status", "ok"))
 	return true, result.Data.PrivateAPI && result.Data.HelperConnected
 }
 
-func (g *Gateway) blueBubblesPrivateAPIAvailable() bool {
+func (g *Gateway) blueBubblesPrivateAPIAvailable(scoped ...*config.Logger) bool {
 	g.capabilityMu.Lock()
 	if !g.capabilitiesLoaded {
 		g.capabilityMu.Unlock()
-		g.refreshBlueBubblesCapabilities()
+		g.refreshBlueBubblesCapabilitiesWithRetry(1, 0, scoped...)
 		g.capabilityMu.Lock()
 	}
 	available := g.privateAPIEnabled && g.helperConnected
@@ -90,13 +98,13 @@ func (g *Gateway) blueBubblesPrivateAPIAvailable() bool {
 }
 
 // startTyping enables the typing indicator for the given chat.
-func (g *Gateway) startTyping(chatGUID string) error {
-	return g.sendTypingRequest(chatGUID)
+func (g *Gateway) startTyping(chatGUID string, scoped ...*config.Logger) error {
+	return g.sendTypingRequest(chatGUID, scoped...)
 }
 
 // sendTypingRequest sends a BlueBubbles typing request for the given chat.
-func (g *Gateway) sendTypingRequest(chatGUID string) error {
-	if !g.blueBubblesPrivateAPIAvailable() {
+func (g *Gateway) sendTypingRequest(chatGUID string, scoped ...*config.Logger) error {
+	if !g.blueBubblesPrivateAPIAvailable(scoped...) {
 		return nil
 	}
 	endpoint, err := buildBlueBubblesChatActionEndpoint(g.BlueBubblesURL, chatGUID, "typing", g.BlueBubblesPassword)
@@ -114,55 +122,57 @@ func (g *Gateway) sendTypingRequest(chatGUID string) error {
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		g.log().Debug("gateway.typing.failed", "BlueBubbles typing request failed", config.F("chat_id", chatGUID), config.F("http_status", resp.StatusCode), config.F("response_bytes", len(body)), config.F("status", "degraded"))
+		g.log(scoped...).Debug("gateway.typing.failed", "BlueBubbles typing request failed", config.F("http_status", resp.StatusCode), config.F("response_bytes", len(body)), config.F("status", "degraded"))
 		return fmt.Errorf("BlueBubbles typing request failed with status %d", resp.StatusCode)
 	}
 	return nil
 }
 
 // markRead sends a read receipt for the given chat when BlueBubbles supports it.
-func (g *Gateway) markRead(chatGUID string) {
-	if !g.blueBubblesPrivateAPIAvailable() {
+func (g *Gateway) markRead(chatGUID string, scoped ...*config.Logger) {
+	log := g.log(scoped...)
+	if !g.blueBubblesPrivateAPIAvailable(log) {
 		return
 	}
 	endpoint, err := buildBlueBubblesChatActionEndpoint(g.BlueBubblesURL, chatGUID, "read", g.BlueBubblesPassword)
 	if err != nil {
-		g.log().Debug("gateway.read_receipt.failed", "failed to build BlueBubbles read receipt request", config.F("chat_id", chatGUID), config.F("status", "degraded"), config.ErrorField(err))
+		log.Debug("gateway.read_receipt.failed", "failed to build BlueBubbles read receipt request", config.F("status", "degraded"), config.ErrorField(err))
 		return
 	}
 	req, err := http.NewRequest(http.MethodPost, endpoint, nil)
 	if err != nil {
-		g.log().Debug("gateway.read_receipt.failed", "failed to build BlueBubbles read receipt request", config.F("chat_id", chatGUID), config.F("status", "degraded"), config.ErrorField(err))
+		log.Debug("gateway.read_receipt.failed", "failed to build BlueBubbles read receipt request", config.F("status", "degraded"), config.ErrorField(err))
 		return
 	}
 	resp, err := g.httpClient().Do(req)
 	if err != nil {
-		g.log().Debug("gateway.read_receipt.failed", "failed to send BlueBubbles read receipt", config.F("chat_id", chatGUID), config.F("status", "degraded"), config.ErrorField(err))
+		log.Debug("gateway.read_receipt.failed", "failed to send BlueBubbles read receipt", config.F("status", "degraded"), config.ErrorField(err))
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		g.log().Debug("gateway.read_receipt.failed", "BlueBubbles read receipt failed", config.F("chat_id", chatGUID), config.F("http_status", resp.StatusCode), config.F("response_bytes", len(body)), config.F("status", "degraded"))
+		log.Debug("gateway.read_receipt.failed", "BlueBubbles read receipt failed", config.F("http_status", resp.StatusCode), config.F("response_bytes", len(body)), config.F("status", "degraded"))
 	}
 }
 
 // sendTextReply sends a text reply, retrying with the fallback method if needed.
-func (g *Gateway) sendTextReply(chatGUID, text, selectedMessageGUID string, partIndex int) (string, error) {
-	if strings.TrimSpace(selectedMessageGUID) == "" || !g.blueBubblesPrivateAPIAvailable() {
-		return g.sendText(chatGUID, text, "", 0, "")
+func (g *Gateway) sendTextReply(chatGUID, text, selectedMessageGUID string, partIndex int, scoped ...*config.Logger) (string, error) {
+	log := g.log(scoped...)
+	if strings.TrimSpace(selectedMessageGUID) == "" || !g.blueBubblesPrivateAPIAvailable(log) {
+		return g.sendText(chatGUID, text, "", 0, "", log)
 	}
 
-	messageGUID, err := g.sendText(chatGUID, text, selectedMessageGUID, partIndex, defaultSendMethod)
+	messageGUID, err := g.sendText(chatGUID, text, selectedMessageGUID, partIndex, defaultSendMethod, log)
 	if err == nil {
 		return messageGUID, nil
 	}
-	g.log().Warn("gateway.send.retry", "retrying imessage send without private reply fields", config.F("chat_id", chatGUID), config.F("default_method", defaultSendMethod), config.F("status", "retry"), config.ErrorField(err))
-	return g.sendText(chatGUID, text, "", 0, "")
+	log.Warn("gateway.send.retry", "retrying imessage send without private reply fields", config.F("default_method", defaultSendMethod), config.F("status", "retry"), config.ErrorField(err))
+	return g.sendText(chatGUID, text, "", 0, "", log)
 }
 
 // sendText posts a text message to BlueBubbles and returns the created message GUID.
-func (g *Gateway) sendText(chatGUID, text, selectedMessageGUID string, partIndex int, method string) (string, error) {
+func (g *Gateway) sendText(chatGUID, text, selectedMessageGUID string, partIndex int, method string, scoped ...*config.Logger) (string, error) {
 	endpoint, err := buildBlueBubblesEndpoint(g.BlueBubblesURL, "/api/v1/message/text", g.BlueBubblesPassword)
 	if err != nil {
 		return "", err
@@ -198,7 +208,7 @@ func (g *Gateway) sendText(chatGUID, text, selectedMessageGUID string, partIndex
 		return "", fmt.Errorf("decode BlueBubbles send response: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		g.log().Warn("gateway.send.provider_failed", "BlueBubbles send failed", config.F("chat_id", chatGUID), config.F("method", method), config.F("http_status", resp.StatusCode), config.F("has_provider_error", result.Error != nil), config.F("status", "error"))
+		g.log(scoped...).Debug("gateway.send.provider_failed", "BlueBubbles send failed", config.F("http_status", resp.StatusCode), config.F("has_provider_error", result.Error != nil), config.F("status", "error"))
 		return "", fmt.Errorf("BlueBubbles send failed with status %d", resp.StatusCode)
 	}
 	return result.Data.GUID, nil

@@ -286,20 +286,30 @@ WHERE scope = ? AND COALESCE(owner_user_id, '') = ? AND name = ?
 	return cfg, err == nil, err
 }
 
-func (s *Store) Delete(ctx context.Context, scope, ownerUserID, name string) error {
-	_, err := s.db.SQL().ExecContext(ctx, `DELETE FROM mcp_servers WHERE scope = ? AND COALESCE(owner_user_id, '') = ? AND name = ?`, scope, strings.TrimSpace(ownerUserID), strings.TrimSpace(strings.ToLower(name)))
+// Delete removes a scoped configuration without decrypting it and reports whether it existed.
+func (s *Store) Delete(ctx context.Context, scope, ownerUserID, name string) (bool, error) {
+	result, err := s.db.SQL().ExecContext(ctx, `DELETE FROM mcp_servers WHERE scope = ? AND COALESCE(owner_user_id, '') = ? AND name = ?`, scope, strings.TrimSpace(ownerUserID), strings.TrimSpace(strings.ToLower(name)))
 	if err != nil {
-		return fmt.Errorf("delete MCP server config: %w", err)
+		return false, fmt.Errorf("delete MCP server config: %w", err)
 	}
-	return nil
+	count, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("count deleted MCP server configs: %w", err)
+	}
+	return count > 0, nil
 }
 
-func (s *Store) SetEnabled(ctx context.Context, scope, ownerUserID, name string, enabled bool) error {
-	_, err := s.db.SQL().ExecContext(ctx, `UPDATE mcp_servers SET enabled = ? WHERE scope = ? AND COALESCE(owner_user_id, '') = ? AND name = ?`, boolToInt(enabled), scope, strings.TrimSpace(ownerUserID), strings.TrimSpace(strings.ToLower(name)))
+// SetEnabled reports an actual scoped state change; absent and unchanged rows are no-ops.
+func (s *Store) SetEnabled(ctx context.Context, scope, ownerUserID, name string, enabled bool) (bool, error) {
+	result, err := s.db.SQL().ExecContext(ctx, `UPDATE mcp_servers SET enabled = ? WHERE scope = ? AND COALESCE(owner_user_id, '') = ? AND name = ? AND enabled != ?`, boolToInt(enabled), scope, strings.TrimSpace(ownerUserID), strings.TrimSpace(strings.ToLower(name)), boolToInt(enabled))
 	if err != nil {
-		return fmt.Errorf("update MCP server enabled state: %w", err)
+		return false, fmt.Errorf("update MCP server enabled state: %w", err)
 	}
-	return nil
+	count, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("count updated MCP server configs: %w", err)
+	}
+	return count > 0, nil
 }
 
 func (s *Store) scanConfigs(rows *sql.Rows) ([]ServerConfig, error) {

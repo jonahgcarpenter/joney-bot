@@ -84,8 +84,9 @@ func TestRunValidatesBeforeStorage(t *testing.T) {
 }
 
 func TestRunLifecycle(t *testing.T) {
-	for _, mode := range []string{"registry failure", "registry cancellation", "gateway failure", "gateway cancellation", "success", "gateway start failure"} {
+	for _, mode := range []string{"registry failure", "registry cancellation", "gateway failure", "gateway cancellation", "success", "gateway start failure", "Home Assistant start failure", "Discord start failure", "iMessage start failure"} {
 		t.Run(mode, func(t *testing.T) {
+			startFailure := strings.HasSuffix(mode, "start failure")
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			logs := &startupLogWriter{gatewayStopped: make(chan struct{}, 1)}
@@ -105,12 +106,16 @@ func TestRunLifecycle(t *testing.T) {
 			gw := &startupTestGateway{start: func(b *broker.Broker) error {
 				defer close(gatewayDone)
 				started <- b
-				if mode == "gateway start failure" {
+				if startFailure {
 					return cause
 				}
 				<-ctx.Done()
 				return nil
 			}}
+			gw.name = strings.TrimSuffix(mode, " start failure")
+			if mode == "gateway start failure" {
+				gw.name = "test"
+			}
 			deps := dependencies{
 				databasePath: filepath.Join(t.TempDir(), "oswald.db"),
 				newRegistry: func(_ *config.Config, m *memory.Store, g *global.Store, l *config.Logger) (*registry.Registry, error) {
@@ -154,7 +159,7 @@ func TestRunLifecycle(t *testing.T) {
 					}
 				}
 			})
-			active := mode == "success" || mode == "gateway start failure"
+			active := mode == "success" || startFailure
 			var startedBroker *broker.Broker
 			if active {
 				select {
@@ -165,7 +170,7 @@ func TestRunLifecycle(t *testing.T) {
 				case <-time.After(10 * time.Second):
 					t.Fatal("gateway did not start")
 				}
-				if mode == "gateway start failure" {
+				if startFailure {
 					select {
 					case <-logs.gatewayStopped:
 					case <-time.After(10 * time.Second):
@@ -244,11 +249,29 @@ func TestRunLifecycle(t *testing.T) {
 			if got := logs.hasEvent("app.start"); got != active {
 				t.Fatalf("app.start logged = %v, want %v", got, active)
 			}
-			if got := logs.hasEvent("app.shutdown"); got != active {
-				t.Fatalf("app.shutdown logged = %v, want %v", got, active)
+			if !logs.hasEvent("app.shutdown") || !logs.hasEvent("app.shutdown.complete") {
+				t.Fatal("missing ordered shutdown lifecycle logs")
 			}
-			if got := logs.hasEvent("app.gateway.stopped"); got != (mode == "gateway start failure") {
+			logs.mu.Lock()
+			cleanupEnd := bytes.LastIndex(logs.buf.Bytes(), []byte(`"event":"app.cleanup.completed"`))
+			shutdownEnd := bytes.LastIndex(logs.buf.Bytes(), []byte(`"event":"app.shutdown.complete"`))
+			logs.mu.Unlock()
+			if cleanupEnd < 0 || shutdownEnd <= cleanupEnd {
+				t.Fatal("shutdown completed before cleanup callbacks")
+			}
+			if got := logs.hasEvent("app.gateway.stopped"); got != startFailure {
 				t.Fatalf("gateway failure logged = %v", got)
+			}
+			if startFailure {
+				want := map[string]string{"test": "unknown", "Home Assistant": "homeassistant", "Discord": "discord", "iMessage": "imessage"}[gw.name]
+				logs.mu.Lock()
+				for _, line := range bytes.Split(logs.buf.Bytes(), []byte("\n")) {
+					var record map[string]any
+					if json.Unmarshal(line, &record) == nil && record["event"] == "app.gateway.stopped" && record["gateway"] != want {
+						t.Errorf("gateway=%v want=%s", record["gateway"], want)
+					}
+				}
+				logs.mu.Unlock()
 			}
 		})
 	}
@@ -261,9 +284,12 @@ func assertStartupClosed(t *testing.T, name string, err error) {
 	}
 }
 
-type startupTestGateway struct{ start func(*broker.Broker) error }
+type startupTestGateway struct {
+	start func(*broker.Broker) error
+	name  string
+}
 
-func (g *startupTestGateway) Name() string                 { return "test" }
+func (g *startupTestGateway) Name() string                 { return g.name }
 func (g *startupTestGateway) Start(b *broker.Broker) error { return g.start(b) }
 
 type startupLogWriter struct {

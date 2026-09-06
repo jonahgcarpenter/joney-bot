@@ -727,7 +727,7 @@ func (s *Store) cleanupRetiredIndexTables(ctx context.Context, now time.Time, re
 			continue
 		}
 		if _, err := s.sql.ExecContext(ctx, `DROP TABLE IF EXISTS `+item.table); err != nil {
-			return 0, err
+			return dropped, err
 		}
 		dropped++
 	}

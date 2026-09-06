@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory/global"
+	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
 )
 
 type handler struct {
@@ -31,8 +33,11 @@ func (h *handler) Definition() commands.Definition {
 }
 
 func (h *handler) Execute(ctx context.Context, req commands.Request) (commands.Result, error) {
-	if h.store == nil || len(req.Args) == 0 {
-		return commands.Result{Text: commands.UsageText(h.Definition())}, nil
+	if h.store == nil {
+		return commands.Result{}, fmt.Errorf("global memory is unavailable")
+	}
+	if len(req.Args) == 0 {
+		return commands.Result{Text: commands.UsageText(h.Definition()), Outcome: commands.Outcome{Status: "rejected", ReasonCode: "invalid_arguments"}}, nil
 	}
 	switch strings.ToLower(req.Args[0]) {
 	case "add":
@@ -42,38 +47,42 @@ func (h *handler) Execute(ctx context.Context, req commands.Request) (commands.R
 	case "forget":
 		return h.forget(ctx, req)
 	default:
-		return commands.Result{Text: commands.UsageText(h.Definition())}, nil
+		return commands.Result{Text: commands.UsageText(h.Definition()), Outcome: commands.Outcome{Status: "rejected", ReasonCode: "invalid_arguments"}}, nil
 	}
 }
 
 func (h *handler) add(ctx context.Context, req commands.Request) (commands.Result, error) {
 	text := strings.TrimSpace(strings.TrimPrefix(req.ArgsText, req.Args[0]))
 	if text == "" {
-		return commands.Result{Text: commands.UsageText(h.Definition())}, nil
+		return commands.Result{Text: commands.UsageText(h.Definition()), Outcome: commands.Outcome{Status: "rejected", ReasonCode: "invalid_arguments"}}, nil
+	}
+	normalized := global.NormalizeMemory(text)
+	if normalized == "" || utf8.RuneCountInString(normalized) > global.MaxMemoryRunes {
+		return commands.Result{Text: fmt.Sprintf("Could not add global memory: global memory must contain 1..%d characters", global.MaxMemoryRunes), Outcome: commands.Outcome{Status: "rejected", ReasonCode: "invalid_arguments"}}, nil
 	}
 	result, err := h.store.Add(ctx, text)
 	if err != nil {
-		return commands.Result{Text: fmt.Sprintf("Could not add global memory: %v", err)}, nil
+		return commands.Result{}, err
 	}
 	if result.Duplicate {
-		return commands.Result{Text: fmt.Sprintf("Global memory already exists as ID %d.", result.Memory.ID)}, nil
+		return commands.Result{Text: fmt.Sprintf("Global memory already exists as ID %d.", result.Memory.ID), Outcome: commands.Outcome{Status: "ok", ReasonCode: "no_op"}}, nil
 	}
 	if h.log != nil {
-		h.log.Info("global_memory.add.complete", "added global memory", config.F("request_id", req.RequestID), config.F("user_id", req.Principal.CanonicalUserID), config.F("global_memory_id", result.Memory.ID), config.F("status", "ok"))
+		h.log.With(requestctx.LogFields(ctx)...).Info("global_memory.add.complete", "added global memory", config.F("request_id", req.RequestID), config.F("actor_user_id", req.Principal.CanonicalUserID), config.F("global_memory_id", result.Memory.ID), config.F("status", "ok"))
 	}
 	return commands.Result{Text: fmt.Sprintf("Added global memory %d.", result.Memory.ID)}, nil
 }
 
 func (h *handler) list(ctx context.Context, req commands.Request) (commands.Result, error) {
 	if len(req.Args) > 2 {
-		return commands.Result{Text: commands.UsageText(h.Definition())}, nil
+		return commands.Result{Text: commands.UsageText(h.Definition()), Outcome: commands.Outcome{Status: "rejected", ReasonCode: "invalid_arguments"}}, nil
 	}
 	page := 1
 	if len(req.Args) == 2 {
 		var err error
 		page, err = positiveDecimal(req.Args[1])
 		if err != nil {
-			return commands.Result{Text: "Global memory page must be a positive decimal integer."}, nil
+			return commands.Result{Text: "Global memory page must be a positive decimal integer.", Outcome: commands.Outcome{Status: "rejected", ReasonCode: "invalid_arguments"}}, nil
 		}
 	}
 	result, err := h.store.List(ctx, page)
@@ -95,21 +104,21 @@ func (h *handler) list(ctx context.Context, req commands.Request) (commands.Resu
 
 func (h *handler) forget(ctx context.Context, req commands.Request) (commands.Result, error) {
 	if len(req.Args) != 2 {
-		return commands.Result{Text: commands.UsageText(h.Definition())}, nil
+		return commands.Result{Text: commands.UsageText(h.Definition()), Outcome: commands.Outcome{Status: "rejected", ReasonCode: "invalid_arguments"}}, nil
 	}
 	id, err := positiveDecimal64(req.Args[1])
 	if err != nil {
-		return commands.Result{Text: "Global memory ID must be a positive decimal integer."}, nil
+		return commands.Result{Text: "Global memory ID must be a positive decimal integer.", Outcome: commands.Outcome{Status: "rejected", ReasonCode: "invalid_arguments"}}, nil
 	}
 	forgotten, err := h.store.Forget(ctx, id)
 	if err != nil {
 		return commands.Result{}, err
 	}
 	if !forgotten {
-		return commands.Result{Text: fmt.Sprintf("Global memory %d was not found.", id)}, nil
+		return commands.Result{Text: fmt.Sprintf("Global memory %d was not found.", id), Outcome: commands.Outcome{Status: "rejected", ReasonCode: "not_found"}}, nil
 	}
 	if h.log != nil {
-		h.log.Info("global_memory.forget.complete", "forgot global memory", config.F("request_id", req.RequestID), config.F("user_id", req.Principal.CanonicalUserID), config.F("global_memory_id", id), config.F("status", "ok"))
+		h.log.With(requestctx.LogFields(ctx)...).Info("global_memory.forget.complete", "forgot global memory", config.F("request_id", req.RequestID), config.F("actor_user_id", req.Principal.CanonicalUserID), config.F("global_memory_id", id), config.F("status", "ok"))
 	}
 	return commands.Result{Text: fmt.Sprintf("Forgot global memory %d.", id)}, nil
 }

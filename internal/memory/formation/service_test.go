@@ -578,7 +578,7 @@ func TestServiceLeavesFailedJobRetryable(t *testing.T) {
 	if err := service.process(context.Background(), &job); err == nil {
 		t.Fatal("expected extraction failure")
 	}
-	if err := store.RetryFormationJob(context.Background(), job, "extractor", formationMaxAttempts); err != nil {
+	if _, err := store.RetryFormationJob(context.Background(), job, "extractor", formationMaxAttempts); err != nil {
 		t.Fatal(err)
 	}
 	state, err := store.FormationJobState(context.Background(), "user-1", job.ID)

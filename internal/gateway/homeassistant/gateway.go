@@ -5,8 +5,10 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -21,6 +23,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
+	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
 )
 
 var protocolIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
@@ -55,12 +58,20 @@ func (g *Gateway) Name() string { return "Home Assistant" }
 func (g *Gateway) Start(b *broker.Broker) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/homeassistant/ws", func(w http.ResponseWriter, r *http.Request) { g.handleConnection(w, r, b) })
+	listener, err := net.Listen("tcp", ":"+g.Port)
+	if err != nil {
+		return err
+	}
 	g.log().Info("gateway.listen", "home assistant gateway listening", config.F("port", g.Port), config.F("path", "/homeassistant/ws"))
-	return http.ListenAndServe(":"+g.Port, mux)
+	return http.Serve(listener, mux)
 }
 
 func (g *Gateway) handleConnection(w http.ResponseWriter, r *http.Request, b *broker.Broker) {
+	receivedAt := time.Now()
+	internalRequestID := config.NewRequestID()
+	log := g.log().With(config.F("request_id", internalRequestID))
 	if r.Method != http.MethodGet {
+		log.Info("gateway.request.rejected", "rejected home assistant request", config.F("reason_code", "invalid_method"), config.F("status", "rejected"))
 		w.Header().Set("Allow", http.MethodGet)
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
@@ -68,54 +79,82 @@ func (g *Gateway) handleConnection(w http.ResponseWriter, r *http.Request, b *br
 	if !g.authenticate(r) {
 		w.Header().Set("WWW-Authenticate", "Bearer")
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
-		g.log().Warn("gateway.authentication.failed", "home assistant authentication failed", config.F("status", "rejected"))
+		log.Info("gateway.authentication.failed", "home assistant authentication failed", config.F("reason_code", "invalid_credential"), config.F("status", "rejected"))
 		return
 	}
 	connection, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		g.log().Warn("gateway.connection.upgrade_failed", "home assistant websocket upgrade failed", config.ErrorField(err))
+		log.Warn("gateway.connection.upgrade_failed", "home assistant websocket upgrade failed", config.F("status", "rejected"), config.ErrorField(err))
 		return
 	}
 	defer connection.Close()
 	connection.SetReadLimit(128 << 10)
 	tracked := &trackedConnection{conn: connection}
+	write := func(message protocolMessage) {
+		if err := tracked.writeJSON(message); err != nil {
+			log.Debug("gateway.connection.write_failed", "home assistant protocol write failed", config.F("status", "degraded"), config.ErrorField(err))
+		}
+	}
 	if err := tracked.writeJSON(protocolMessage{Type: "ready", ProtocolVersion: protocolVersion}); err != nil {
+		log.Debug("gateway.connection.write_failed", "home assistant ready write failed", config.F("status", "degraded"), config.ErrorField(err))
 		return
 	}
 	_ = connection.SetReadDeadline(time.Now().Add(15 * time.Second))
 	messageType, payload, err := connection.ReadMessage()
 	if err != nil {
+		if gorilla.IsCloseError(err, gorilla.CloseNormalClosure, gorilla.CloseGoingAway, gorilla.CloseAbnormalClosure) || errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
+			log.Debug("gateway.connection.closed", "home assistant connection closed before request", config.F("reason_code", "peer_closed"), config.F("status", "ok"))
+		} else {
+			reason := "read_failed"
+			var networkError net.Error
+			if errors.Is(err, gorilla.ErrReadLimit) {
+				reason = "frame_too_large"
+			} else if errors.As(err, &networkError) && networkError.Timeout() {
+				reason = "first_message_timeout"
+			}
+			log.Warn("gateway.connection.read_failed", "home assistant request read failed", config.F("reason_code", reason), config.F("status", "rejected"), config.ErrorField(err))
+		}
 		return
 	}
 	_ = connection.SetReadDeadline(time.Time{})
 	if messageType != gorilla.TextMessage {
-		_ = tracked.writeJSON(protocolMessage{Type: "error", Code: "invalid_request", Message: "Only JSON text requests are supported."})
+		log.Info("gateway.request.rejected", "rejected home assistant frame", config.F("reason_code", "non_text_frame"), config.F("status", "rejected"))
+		write(protocolMessage{Type: "error", Code: "invalid_request", Message: "Only JSON text requests are supported."})
 		return
 	}
 	request, err := decodeRequest(payload)
 	if err != nil {
-		_ = tracked.writeJSON(protocolMessage{Type: "error", Code: "invalid_request", Message: "The request was invalid."})
+		log.Info("gateway.request.rejected", "rejected home assistant request", config.F("reason_code", "invalid_request"), config.F("status", "rejected"))
+		write(protocolMessage{Type: "error", Code: "invalid_request", Message: "The request was invalid."})
 		return
 	}
 	userID, err := accounts.NormalizeIdentifier("homeassistant", request.UserID)
 	if err != nil {
-		_ = tracked.writeJSON(protocolMessage{Type: "error", RequestID: request.RequestID, Code: "user_required", Message: "An authenticated Home Assistant user is required."})
+		log.Info("gateway.account.normalize_failed", "home assistant identity is invalid", config.F("reason_code", "invalid_identity"), config.F("status", "rejected"))
+		write(protocolMessage{Type: "error", RequestID: request.RequestID, Code: "user_required", Message: "An authenticated Home Assistant user is required."})
 		return
 	}
-	canonicalUserID, err := g.Links.EnsureAccount("homeassistant", userID, strings.TrimSpace(request.DisplayName))
+	ctx := requestctx.WithMetadata(r.Context(), requestctx.Metadata{RequestID: internalRequestID})
+	canonicalUserID, err := g.Links.EnsureAccount(ctx, "homeassistant", userID, strings.TrimSpace(request.DisplayName))
 	if err != nil {
-		_ = tracked.writeJSON(protocolMessage{Type: "error", RequestID: request.RequestID, Code: "service_unavailable", Message: "Oswald could not resolve the Home Assistant user."})
+		log.Error("gateway.account.resolve_failed", "failed to resolve home assistant account", config.F("status", "error"), config.ErrorField(err))
+		write(protocolMessage{Type: "error", RequestID: request.RequestID, Code: "service_unavailable", Message: "Oswald could not resolve the Home Assistant user."})
 		return
 	}
+	log = log.With(config.F("user_id", canonicalUserID))
 	g.track(userID, tracked)
 	defer g.untrack(userID, tracked)
 	currentOwner, ownerExists, err := g.Links.ResolveAccount("homeassistant", userID)
 	if err != nil || !ownerExists || currentOwner != canonicalUserID {
-		_ = tracked.writeJSON(protocolMessage{Type: "error", RequestID: request.RequestID, Code: "service_unavailable", Message: "The Home Assistant user is no longer available."})
+		if err != nil {
+			log.Error("gateway.account.resolve_failed", "failed to recheck home assistant account", config.F("status", "error"), config.ErrorField(err))
+		} else {
+			log.Info("gateway.request.rejected", "home assistant account owner changed", config.F("reason_code", "principal_mismatch"), config.F("status", "rejected"))
+		}
+		write(protocolMessage{Type: "error", RequestID: request.RequestID, Code: "service_unavailable", Message: "The Home Assistant user is no longer available."})
 		return
 	}
 
-	internalRequestID := config.NewRequestID()
 	sessionKey := "homeassistant:" + userID + ":" + request.ConversationID
 	firstChunk := true
 	stream := func(chunk agent.StreamChunk) {
@@ -123,14 +162,15 @@ func (g *Gateway) handleConnection(w http.ResponseWriter, r *http.Request, b *br
 			return
 		}
 		if firstChunk {
-			g.log().Debug("gateway.stream.started", "started home assistant stream", config.F("request_id", internalRequestID), config.F("stream_type", string(chunk.Type)))
+			log.Debug("gateway.stream.started", "started home assistant stream")
 			firstChunk = false
 		}
-		_ = tracked.writeJSON(protocolMessage{Type: string(chunk.Type), RequestID: request.RequestID, Text: chunk.Text, Tool: chunk.Tool})
+		write(protocolMessage{Type: string(chunk.Type), RequestID: request.RequestID, Text: chunk.Text, Tool: chunk.Tool})
 	}
 	principal := identity.Principal{CanonicalUserID: canonicalUserID, Gateway: "homeassistant", ExternalID: userID, Assurance: identity.AssuranceHomeAssistantToken}
 	gatewayruntime.Execute(gatewayruntime.Request{
-		RequestID: internalRequestID, ChatID: sessionKey, Principal: principal,
+		ReceivedAt: receivedAt,
+		RequestID:  internalRequestID, ChatID: sessionKey, Principal: principal,
 		DisplayName: strings.TrimSpace(request.DisplayName), SessionKey: sessionKey,
 		IsDirect: true, IsMention: true, Text: request.Text, StreamFunc: stream,
 	}, g.runtimeDependencies(b), &runtimeResponder{connection: tracked, requestID: request.RequestID})

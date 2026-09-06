@@ -160,8 +160,8 @@ func (g *Gateway) replyContextFromMessage(data messageLookupData, chatGUID, sess
 		} else {
 			ctx.SenderID = normalizedSenderID
 			ctx.DisplayName = normalizedSenderID
-			if resolvedName, err := g.lookupContactDisplayName(normalizedSenderID); err != nil {
-				log.Debug("gateway.reply_lookup.contact_failed", "imessage reply contact lookup failed", config.F("request_id", requestID), config.F("user_id", normalizedSenderID), config.F("status", "degraded"), config.ErrorField(err))
+			if resolvedName, err := g.lookupContactDisplayName(normalizedSenderID, log.With(config.F("request_id", requestID))); err != nil {
+				log.Debug("gateway.reply_lookup.contact_failed", "imessage reply contact lookup failed", config.F("request_id", requestID), config.F("status", "degraded"), config.ErrorField(err))
 			} else if resolvedName != "" {
 				ctx.DisplayName = resolvedName
 			}

@@ -258,6 +258,9 @@ WHERE id = ? AND job_kind = 'session_compaction'`, SessionCompactionModelSubmiss
 	if err != nil {
 		return SessionCompactionJob{}, err
 	}
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE((SELECT source_request_id FROM session_turns WHERE id = ? AND canonical_user_id = ? AND session_id = ? AND session_generation = ?), '')`, job.CoveredThroughTurnID, job.UserID, job.SessionID, job.SessionGeneration).Scan(&job.RequestID); err != nil {
+		return SessionCompactionJob{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return SessionCompactionJob{}, err
 	}
@@ -397,26 +400,26 @@ func (s *Store) CompleteSessionCompactionJob(ctx context.Context, job SessionCom
 	return nil
 }
 
-// RetrySessionCompactionJob releases a failed lease with bounded backoff.
-func (s *Store) RetrySessionCompactionJob(ctx context.Context, job SessionCompactionJob, code string) error {
+// RetrySessionCompactionJob releases an exactly owned failed lease with bounded
+// backoff. The returned retry/dead state comes from the persisted submission and
+// artifact state, not the caller's attempt count. The lease must still be live.
+func (s *Store) RetrySessionCompactionJob(ctx context.Context, job SessionCompactionJob, code string) (string, error) {
 	now := time.Now().UTC()
 	delay := time.Duration(1<<min(job.AttemptCount, 6)) * time.Second
-	result, err := s.sql.ExecContext(ctx, `
+	var state string
+	err := s.sql.QueryRowContext(ctx, `
 UPDATE durable_jobs
 SET state = CASE WHEN model_submission_count >= ? AND artifact_payload = '' THEN 'dead' ELSE 'retry' END,
 	available_at = ?, lease_owner = '', lease_until = NULL,
 	completed_at = CASE WHEN model_submission_count >= ? AND artifact_payload = '' THEN ? ELSE NULL END,
 	last_error_code = ?, updated_at = ?
-WHERE id = ? AND job_kind = 'session_compaction' AND canonical_user_id = ? AND state = 'running' AND lease_owner = ? AND julianday(lease_until) > julianday(?)`,
+WHERE id = ? AND job_kind = 'session_compaction' AND canonical_user_id = ? AND state = 'running' AND lease_owner = ? AND lease_until = ? AND julianday(lease_until) > julianday(?) RETURNING state`,
 		SessionCompactionModelSubmissionLimit, formatTime(now.Add(delay)), SessionCompactionModelSubmissionLimit, formatTime(now), safeErrorCode(code),
-		formatTime(now), job.ID, job.UserID, job.LeaseOwner, formatTime(now))
+		formatTime(now), job.ID, job.UserID, job.LeaseOwner, formatTime(job.LeaseUntil), formatTime(now)).Scan(&state)
 	if err != nil {
-		return fmt.Errorf("retry session compaction job: %w", err)
+		return "", fmt.Errorf("retry session compaction job: %w", err)
 	}
-	if count, _ := result.RowsAffected(); count != 1 {
-		return sql.ErrNoRows
-	}
-	return nil
+	return state, nil
 }
 
 // RetryInvalidSessionCompactionJob records a bounded reason-aware structured

@@ -2,6 +2,7 @@ package compaction
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -96,6 +97,10 @@ func (s *Service) MarkDeliveryFailed(ctx context.Context, userID string, turnID 
 
 func (s *Service) run(ctx context.Context) {
 	defer s.wg.Done()
+	if s.log != nil {
+		s.log.Server("session.compaction").Info("session.compaction.worker.started", "compaction worker started", config.F("workload", "compaction"))
+		defer s.log.Server("session.compaction").Info("session.compaction.worker.stopped", "compaction worker stopped", config.F("workload", "compaction"))
+	}
 	if _, err := s.store.ReconcileSessionCompactionJobs(ctx, s.model, SummaryGeneratorVersion); err != nil {
 		s.warn("session.compaction.job.reconcile_failed", "failed to reconcile session compaction jobs", err)
 	}
@@ -110,7 +115,7 @@ func (s *Service) run(ctx context.Context) {
 			return
 		case scope := <-s.planRequests:
 			if _, err := s.plan(ctx, scope.UserID, scope.SessionID, scope.Generation); err != nil {
-				s.warn("session.compaction.plan.failed", "failed to plan session compaction", err, config.F("user_id", scope.UserID), config.F("session_id", scope.SessionID))
+				s.warn("session.compaction.plan.failed", "failed to plan session compaction", err, config.F("user_id", scope.UserID))
 			}
 		case <-ticker.C:
 			ticks++
@@ -132,7 +137,7 @@ func (s *Service) planActiveSessions(ctx context.Context) {
 	}
 	for _, scope := range scopes {
 		if _, err := s.plan(ctx, scope.UserID, scope.SessionID, scope.Generation); err != nil {
-			s.warn("session.compaction.plan.failed", "failed to plan session compaction", err, config.F("user_id", scope.UserID), config.F("session_id", scope.SessionID))
+			s.warn("session.compaction.plan.failed", "failed to plan session compaction", err, config.F("user_id", scope.UserID))
 		}
 	}
 }
@@ -228,22 +233,42 @@ func (s *Service) drain(ctx context.Context) {
 			s.warn("session.compaction.job.claim_failed", "failed to claim session compaction job", err)
 			return
 		}
-		err = s.process(ctx, &job)
+		meta := requestctx.MetadataFromContext(ctx)
+		started := time.Now()
+		meta.ParentOperationID, meta.OperationID = meta.OperationID, rand.Text()
+		meta.Workload, meta.JobID, meta.Model, meta.RequestID = "compaction", job.ID, job.Model, job.RequestID
+		jobCtx := requestctx.WithMetadata(ctx, meta)
+		jobCtx = requestctx.WithPrincipal(jobCtx, identity.Principal{CanonicalUserID: job.UserID})
+		jobCtx = requestctx.WithUsageCollector(jobCtx, requestctx.NewUsageCollector())
+		worker := &Service{store: s.store, compactor: s.compactor, model: s.model, budget: s.budget, lease: s.lease, gate: s.gate, log: s.log}
+		if worker.log != nil {
+			worker.log = worker.log.With(requestctx.LogFields(jobCtx)...).With(config.F("job_kind", "session_compaction"), config.F("attempt_count", job.AttemptCount), config.F("model_submission_limit", memory.SessionCompactionModelSubmissionLimit), config.F("source_turn_id", job.CoveredThroughTurnID))
+			worker.log.Server("session.compaction").Info("session.compaction.job.started", "compaction job attempt started", config.F("model_submission_count", job.ModelSubmissionCount), config.F("status", "ok"))
+		}
+		s := worker
+		err = s.process(jobCtx, &job)
+		if s.log != nil {
+			s.log = s.log.With(config.F("duration_ms", time.Since(started).Milliseconds()), config.F("model_submission_count", job.ModelSubmissionCount), config.F("invalid_output_retry_count", job.InvalidOutputRetryCount))
+		}
 		if err != nil {
-			if errors.Is(err, errLowPriorityUnavailable) {
+			if errors.Is(err, errLowPriorityUnavailable) || errors.Is(err, context.Canceled) {
 				if deferErr := s.store.DeferSessionCompactionJob(context.Background(), job, time.Second); deferErr != nil {
 					s.warn("session.compaction.job.defer_failed", "failed to defer preempted session compaction job", deferErr, config.F("job_id", job.ID))
+				} else if s.log != nil {
+					s.log.Server("session.compaction").Info("session.compaction.job.deferred", "compaction work deferred", config.F("outcome", "deferred"), config.F("attempt_count", max(job.AttemptCount-1, 0)), config.F("model_submission_count", job.ModelSubmissionCount), config.F("status", "ok"))
 				}
 				return
 			}
 			if errors.Is(err, memory.ErrModelSubmissionBudgetExhausted) {
-				if retryErr := s.store.RetrySessionCompactionJob(context.Background(), job, "model_submission_budget_exhausted"); retryErr != nil {
+				if state, retryErr := s.store.RetrySessionCompactionJob(context.Background(), job, "model_submission_budget_exhausted"); retryErr != nil {
 					s.warn("session.compaction.job.retry_failed", "failed to terminally close exhausted session compaction job", retryErr, config.F("job_id", job.ID))
+				} else if s.log != nil {
+					s.log.Server("session.compaction").Info("session.compaction.job.budget_exhausted", "compaction submission budget exhausted", config.F("job_state", state), config.F("model_submission_count", job.ModelSubmissionCount), config.F("model_submission_limit", memory.SessionCompactionModelSubmissionLimit), config.F("status", "degraded"))
 				}
 				continue
 			}
 			code := compactionErrorCode(err)
-			fields := []config.Field{config.F("job_id", job.ID), config.F("user_id", job.UserID), config.F("session_id", job.SessionID), config.F("session_generation", job.SessionGeneration), config.F("model", job.Model), config.F("generator_version", job.GeneratorVersion), config.F("attempt_count", job.AttemptCount), config.F("invalid_output_retry_count", job.InvalidOutputRetryCount), config.F("model_submission_count", job.ModelSubmissionCount), config.F("error_code", code)}
+			fields := []config.Field{config.F("job_id", job.ID), config.F("attempt_count", job.AttemptCount), config.F("invalid_output_retry_count", job.InvalidOutputRetryCount), config.F("model_submission_count", job.ModelSubmissionCount), config.F("model_submission_limit", memory.SessionCompactionModelSubmissionLimit), config.F("reason_code", code)}
 			if errors.Is(err, errInvalidCompactionOutput) {
 				if job.InvalidOutputRetryCount < memory.SessionCompactionInvalidOutputRetryLimit && job.ModelSubmissionCount < memory.SessionCompactionModelSubmissionLimit {
 					if retryErr := s.store.RetryInvalidSessionCompactionJob(context.Background(), job, code); retryErr != nil {
@@ -268,22 +293,27 @@ func (s *Service) drain(ctx context.Context) {
 				}
 				continue
 			}
-			if retryErr := s.store.RetrySessionCompactionJob(context.Background(), job, code); retryErr != nil {
+			state, retryErr := s.store.RetrySessionCompactionJob(context.Background(), job, code)
+			if retryErr != nil {
 				s.warn("session.compaction.job.retry_failed", "failed to retry session compaction job", retryErr, fields...)
 				continue
 			}
-			if job.AttemptCount >= maximumCompactionAttempts {
+			fields = append(fields, config.F("job_state", state))
+			if state == "dead" {
 				s.warn("session.compaction.job.dead", "session compaction job exhausted immediate retries", err, append(fields, config.F("status", "degraded"))...)
 			} else {
 				s.warn("session.compaction.job.retry", "session compaction job will retry", err, append(fields, config.F("status", "retry"))...)
 			}
 			continue
 		}
-		_, _ = s.plan(ctx, job.UserID, job.SessionID, job.SessionGeneration)
+		if _, err := s.plan(ctx, job.UserID, job.SessionID, job.SessionGeneration); err != nil {
+			s.warn("session.compaction.continuation.failed", "checkpoint committed but continuation planning failed", err)
+		}
 	}
 }
 
 func (s *Service) process(ctx context.Context, job *memory.SessionCompactionJob) error {
+	started := time.Now()
 	artifact, err := s.store.SessionCompactionArtifact(ctx, *job)
 	if errors.Is(err, sql.ErrNoRows) {
 		artifact, err = s.generateArtifact(ctx, job)
@@ -304,7 +334,7 @@ func (s *Service) process(ctx context.Context, job *memory.SessionCompactionJob)
 		return err
 	}
 	if s.log != nil {
-		s.log.Server("session.compaction").Info("session.compaction.complete", "completed session compaction", config.F("job_id", job.ID), config.F("user_id", job.UserID), config.F("session_id", job.SessionID), config.F("covered_turn_count", len(summary.SourceTurnIDs)), config.F("model", job.Model), config.F("generator_version", job.GeneratorVersion), config.F("attempt_count", job.AttemptCount), config.F("invalid_output_retry_count", job.InvalidOutputRetryCount), config.F("model_submission_count", job.ModelSubmissionCount), config.F("status", "ok"))
+		s.log.Server("session.compaction").Info("session.compaction.complete", "completed session compaction", config.F("record_kind", "summary"), config.F("job_id", job.ID), config.F("job_kind", "session_compaction"), config.F("workload", "compaction"), config.F("user_id", job.UserID), config.F("covered_turn_count", len(summary.SourceTurnIDs)), config.F("model", job.Model), config.F("generator_version", job.GeneratorVersion), config.F("attempt_count", job.AttemptCount), config.F("invalid_output_retry_count", job.InvalidOutputRetryCount), config.F("model_submission_count", job.ModelSubmissionCount), config.F("model_submission_limit", memory.SessionCompactionModelSubmissionLimit), config.F("duration_ms", time.Since(started).Milliseconds()), config.F("job_state", "succeeded"), config.F("status", "ok"))
 	}
 	return nil
 }
@@ -339,8 +369,11 @@ func (s *Service) generateArtifact(ctx context.Context, job *memory.SessionCompa
 			return renewErr
 		},
 		func(workCtx context.Context) error {
-			compactCtx := requestctx.WithMetadata(workCtx, requestctx.Metadata{RequestID: fmt.Sprintf("session-compaction:%d", job.ID), SessionID: job.SessionID, SessionGeneration: job.SessionGeneration, Model: job.Model})
-			compactCtx = requestctx.WithPrincipal(compactCtx, identity.Principal{CanonicalUserID: job.UserID, Gateway: "session_compaction", ExternalID: job.UserID, Assurance: identity.AssuranceSelfAsserted})
+			meta := requestctx.MetadataFromContext(workCtx)
+			meta.SessionID, meta.SessionGeneration, meta.Model = job.SessionID, job.SessionGeneration, job.Model
+			meta.Workload, meta.JobID = "compaction", job.ID
+			compactCtx := requestctx.WithMetadata(workCtx, meta)
+			compactCtx = requestctx.WithPrincipal(compactCtx, identity.Principal{CanonicalUserID: job.UserID})
 			var compactErr error
 			count, reserveErr := s.store.ReserveSessionCompactionModelSubmission(workCtx, renewedJob)
 			if reserveErr != nil {
@@ -357,11 +390,17 @@ func (s *Service) generateArtifact(ctx context.Context, job *memory.SessionCompa
 	release()
 	release = func() {}
 	if wasPreempted {
+		if err != nil && !errors.Is(err, context.Canceled) {
+			s.warn("session.compaction.job.preemption_error", "independent compaction error during preemption", err)
+		}
 		if submissionReserved {
 			if refundErr := s.store.RefundSessionCompactionModelSubmission(context.Background(), renewedJob); refundErr != nil {
 				return memory.SummaryArtifact{}, refundErr
 			}
 			job.ModelSubmissionCount--
+			if s.log != nil {
+				s.log.Server("session.compaction").Info("session.compaction.submission.refunded", "preempted compaction submission refunded", config.F("refunded_submission_count", 1), config.F("model_submission_count", job.ModelSubmissionCount), config.F("status", "ok"))
+			}
 		}
 		return memory.SummaryArtifact{}, errLowPriorityUnavailable
 	}
@@ -397,6 +436,10 @@ func (s *Service) warn(event, message string, err error, fields ...config.Field)
 	if s.log == nil {
 		return
 	}
+	if errors.Is(err, context.Canceled) {
+		s.log.Server("session.compaction").Info("session.compaction.work.canceled", "compaction work canceled", append(fields, config.F("workload", "compaction"), config.F("outcome", "canceled"), config.F("status", "ok"))...)
+		return
+	}
 	hasStatus := false
 	for _, field := range fields {
 		if field.Key == "status" {
@@ -407,6 +450,6 @@ func (s *Service) warn(event, message string, err error, fields ...config.Field)
 	if !hasStatus {
 		fields = append(fields, config.F("status", "degraded"))
 	}
-	fields = append(fields, config.ErrorField(err))
+	fields = append(fields, config.F("workload", "compaction"), config.ErrorField(err))
 	s.log.Server("session.compaction").Warn(event, message, fields...)
 }

@@ -196,8 +196,10 @@ func TestCleanupExpiredSessionsRollsBackOnFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := store.cleanupExpiredSessions(context.Background(), now, normalizedMaintenancePolicy(config.RetentionPolicy{})); err == nil {
+	if counts, err := store.cleanupExpiredSessions(context.Background(), now, normalizedMaintenancePolicy(config.RetentionPolicy{})); err == nil {
 		t.Fatal("cleanup unexpectedly succeeded")
+	} else if counts != (SessionCleanupCounts{}) {
+		t.Fatalf("rolled back counts=%+v", counts)
 	}
 	assertCleanupRowCount(t, store, `SELECT COUNT(*) FROM session_turns WHERE canonical_user_id = 'user'`, 1)
 	assertCleanupRowCount(t, store, `SELECT COUNT(*) FROM sessions WHERE canonical_user_id = 'user' AND is_active = 1`, 1)

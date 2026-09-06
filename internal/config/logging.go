@@ -7,7 +7,9 @@ import (
 	"io"
 	"log"
 	"os"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -15,6 +17,7 @@ const serviceName = "oswald-ai"
 
 var reservedLogFields = map[string]struct{}{
 	"ts": {}, "level": {}, "service": {}, "log_type": {}, "component": {}, "event": {}, "msg": {},
+	"log_schema_version": {}, "instance_id": {},
 }
 
 var validLogStatuses = map[string]struct{}{
@@ -68,36 +71,42 @@ type Field struct {
 	Value any
 }
 
-// F creates a structured log field.
+// F creates a structured log field, not a blanket redaction guarantee. Callers
+// must use fixed operational labels and canonical/server-generated correlation
+// values, never user content. The output boundary filters keys and value types.
 func F(key string, value any) Field {
 	return Field{Key: key, Value: value}
 }
 
-// ErrorField creates the standard error field when err is non-nil.
+// ErrorField creates a fixed error_code field without invoking err.Error.
 func ErrorField(err error) Field {
 	if err == nil {
 		return Field{}
 	}
-	return F("error", SafeErrorText(err))
+	return F("error_code", ErrorCode(err))
 }
 
-// Logger emits structured JSON logs to stderr.
+// Logger emits structured JSON logs to stderr. Events, components, and messages
+// must be fixed developer-owned text, never interpolated inputs or errors.
+// Field filtering cannot prove the provenance of canonical IDs or model labels.
 type Logger struct {
-	level     Level
-	logger    *log.Logger
-	logType   string
-	component string
-	fields    []Field
-	agent     []Field
+	level      Level
+	logger     *log.Logger
+	logType    string
+	component  string
+	fields     []Field
+	agent      []Field
+	instanceID string
 }
 
 // NewLogger creates a Logger that writes JSON to stderr at the given minimum level.
 func NewLogger(level Level) *Logger {
 	return &Logger{
-		level:     level,
-		logger:    log.New(os.Stderr, "", 0),
-		logType:   "server",
-		component: "app",
+		level:      level,
+		logger:     log.New(os.Stderr, "", 0),
+		logType:    "server",
+		component:  "app",
+		instanceID: NewRequestID(),
 	}
 }
 
@@ -111,7 +120,7 @@ func (l *Logger) With(fields ...Field) *Logger {
 		}
 		merged = append(merged, field)
 	}
-	return &Logger{level: l.level, logger: l.logger, logType: l.logType, component: l.component, fields: merged, agent: l.agent}
+	return &Logger{level: l.level, logger: l.logger, logType: l.logType, component: l.component, fields: merged, agent: l.agent, instanceID: l.instanceID}
 }
 
 // SetOutput changes the destination used by this logger and its scoped children.
@@ -127,14 +136,13 @@ func (l *Logger) Server(component string, fields ...Field) *Logger {
 	return scoped
 }
 
-// Agent returns an agent-scoped logger with the full agent foundation attached.
-func (l *Logger) Agent(component, requestID, sessionID, userID, gateway, model string, fields ...Field) *Logger {
+// Agent attaches canonical correlation, never session or external identifiers.
+func (l *Logger) Agent(component, requestID, userID, gateway, model string, fields ...Field) *Logger {
 	scoped := l.With(fields...)
 	scoped.logType = "agent"
 	scoped.component = component
 	scoped.agent = []Field{
 		F("request_id", requestID),
-		F("session_id", sessionID),
 		F("user_id", userID),
 		F("gateway", gateway),
 		F("model", model),
@@ -148,46 +156,55 @@ func (l *Logger) log(level Level, event, msg string, fields ...Field) {
 	}
 
 	payload := map[string]any{
-		"ts":        time.Now().UTC().Format(time.RFC3339Nano),
-		"level":     level.String(),
-		"service":   serviceName,
-		"log_type":  l.logType,
-		"component": l.component,
-		"event":     event,
-		"msg":       msg,
+		"ts":                 time.Now().UTC().Format(time.RFC3339Nano),
+		"level":              level.String(),
+		"service":            serviceName,
+		"log_type":           l.logType,
+		"component":          safeLogLabel(l.component),
+		"event":              safeLogLabel(event),
+		"msg":                boundedLogString(msg, maxLogMessageBytes),
+		"log_schema_version": 1,
+		"instance_id":        l.instanceID,
+		"record_kind":        "event",
 	}
 
+	valid := true
 	for _, field := range l.fields {
 		if field.Key == "" || field.Value == nil || isReservedLogField(field.Key) {
 			continue
 		}
-		addLogField(payload, field)
+		valid = addLogField(payload, field) && valid
 	}
 	for _, field := range fields {
 		if field.Key == "" || field.Value == nil || isReservedLogField(field.Key) {
 			continue
 		}
-		addLogField(payload, field)
+		valid = addLogField(payload, field) && valid
 	}
 	for _, field := range l.agent {
-		payload[field.Key] = field.Value
+		valid = addLogField(payload, field) && valid
 	}
 
 	line, err := json.Marshal(payload)
-	if err != nil {
+	if err != nil || !valid || len(line) > maxLogRecordBytes {
 		fallback := map[string]any{
-			"ts":        time.Now().UTC().Format(time.RFC3339Nano),
-			"level":     "error",
-			"service":   serviceName,
-			"log_type":  l.logType,
-			"component": l.component,
-			"event":     "logger.marshal_failed",
-			"msg":       "failed to marshal log payload",
-			"status":    "error",
-			"error":     SafeErrorText(err),
+			"ts":                 time.Now().UTC().Format(time.RFC3339Nano),
+			"level":              "error",
+			"service":            serviceName,
+			"log_type":           l.logType,
+			"component":          safeLogLabel(l.component),
+			"event":              "logger.marshal_failed",
+			"msg":                "failed to marshal log payload",
+			"status":             "error",
+			"error_code":         "invalid_log_payload",
+			"log_schema_version": 1,
+			"instance_id":        l.instanceID,
+			"record_kind":        "event",
 		}
-		for _, field := range l.agent {
-			fallback[field.Key] = field.Value
+		for _, key := range correlationLogKeys {
+			if value, ok := payload[key]; ok {
+				fallback[key] = value
+			}
 		}
 		line, _ = json.Marshal(fallback)
 	}
@@ -198,21 +215,6 @@ func (l *Logger) log(level Level, event, msg string, fields ...Field) {
 func isReservedLogField(key string) bool {
 	_, reserved := reservedLogFields[key]
 	return reserved
-}
-
-func addLogField(payload map[string]any, field Field) {
-	if field.Key == "status" {
-		status, ok := field.Value.(string)
-		if !ok {
-			payload[field.Key] = "degraded"
-			return
-		}
-		if _, valid := validLogStatuses[status]; !valid {
-			payload[field.Key] = "degraded"
-			return
-		}
-	}
-	payload[field.Key] = field.Value
 }
 
 // Debug logs a message at DEBUG level.
@@ -245,7 +247,9 @@ func (l *Logger) Fatal(event, msg string, fields ...Field) {
 func NewRequestID() string {
 	b := make([]byte, 8)
 	if _, err := rand.Read(b); err != nil {
-		return "req_unknown"
+		return "req_" + strconv.FormatInt(time.Now().UnixNano(), 16) + "_" + strconv.FormatUint(requestIDFallback.Add(1), 16)
 	}
 	return "req_" + hex.EncodeToString(b)
 }
+
+var requestIDFallback atomic.Uint64

@@ -23,10 +23,10 @@ func (h *handler) Definition() commands.Definition {
 
 func (h *handler) Execute(ctx context.Context, req commands.Request) (commands.Result, error) {
 	if len(req.Args) != 0 {
-		return commands.Result{Text: commands.UsageText(h.Definition())}, nil
+		return commands.Result{Text: commands.UsageText(h.Definition()), Outcome: commands.Outcome{Status: "rejected", ReasonCode: "invalid_arguments"}}, nil
 	}
 	if !req.Principal.Authenticated() {
-		return commands.Result{Text: "Session reset requires an authenticated identity."}, nil
+		return commands.Result{Text: "Session reset requires an authenticated identity.", Outcome: commands.Outcome{Status: "rejected", ReasonCode: "authentication_required"}}, nil
 	}
 	if h.sessions == nil {
 		return commands.Result{}, fmt.Errorf("session reset is not configured")
@@ -34,5 +34,5 @@ func (h *handler) Execute(ctx context.Context, req commands.Request) (commands.R
 	if err := h.sessions.ResetSessionContext(ctx, req.Principal.CanonicalUserID, req.SessionKey); err != nil {
 		return commands.Result{}, err
 	}
-	return commands.Result{Text: "Conversation context reset. Your latest profile will be used from now on."}, nil
+	return commands.Result{Text: "Conversation context reset. Your latest profile will be used from now on.", Outcome: commands.Outcome{Status: "ok", Operation: "session.reset", IsChanged: true, AffectedCount: 1}}, nil
 }

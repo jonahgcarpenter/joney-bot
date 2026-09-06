@@ -455,8 +455,9 @@ func (s *Store) SkipFormationJob(ctx context.Context, job FormationJob, code str
 	return requireFormationLeaseMutation(result, err)
 }
 
-// RetryFormationJob releases a failed lease with bounded exponential backoff.
-func (s *Store) RetryFormationJob(ctx context.Context, job FormationJob, code string, maxAttempts int) error {
+// RetryFormationJob releases a failed lease with bounded exponential backoff,
+// returning the persisted retry/dead state only after a successful mutation.
+func (s *Store) RetryFormationJob(ctx context.Context, job FormationJob, code string, maxAttempts int) (string, error) {
 	now := time.Now().UTC()
 	state := "retry"
 	if job.ModelSubmissionCount >= DurableModelSubmissionLimit || (job.Purpose == FormationPurposeAgentSave && maxAttempts > 0 && job.AttemptCount >= maxAttempts) {
@@ -464,7 +465,10 @@ func (s *Store) RetryFormationJob(ctx context.Context, job FormationJob, code st
 	}
 	delay := time.Duration(1<<min(job.AttemptCount, 6)) * time.Second
 	result, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET state = ?, available_at = ?, lease_owner = '', lease_until = NULL, completed_at = CASE WHEN ? = 'dead' THEN ? ELSE NULL END, last_error_code = ?, updated_at = ? WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ? AND state = 'running' AND lease_owner = ? AND lease_until = ? `+formationSourceFenceSQL, state, formatTime(now.Add(delay)), state, formatTime(now), safeErrorCode(code), formatTime(now), job.ID, job.UserID, job.LeaseOwner, formatTime(job.LeaseUntil))
-	return requireFormationLeaseMutation(result, err)
+	if err := requireFormationLeaseMutation(result, err); err != nil {
+		return "", err
+	}
+	return state, nil
 }
 
 // RetryInvalidFormationJob records the one reason-aware structured-output retry.

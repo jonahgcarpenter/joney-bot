@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -93,7 +94,7 @@ func NewAgent(
 // Tool execution errors are handled gracefully — failures inject an error tool
 // response so the model can decide how to proceed. Provider errors are captured
 // into Response.Error rather than returned as Go errors.
-func (a *Agent) Process(ctx context.Context, request Request) (*Response, error) {
+func (a *Agent) Process(ctx context.Context, request Request) (response *Response, processErr error) {
 	if !request.Principal.Authenticated() {
 		return nil, fmt.Errorf("agent request has no authenticated principal")
 	}
@@ -106,7 +107,43 @@ func (a *Agent) Process(ctx context.Context, request Request) (*Response, error)
 	userImages := request.Images
 	streamCallback := request.StreamFunc
 	startedAt := time.Now()
-	reqLog := a.log.Agent("agent", requestID, sessionKey, senderID, gateway, a.model)
+	reqLog := a.log.Agent("agent", requestID, senderID, gateway, a.model)
+	modelIterations, toolExecutionCount, toolBlockedCount := 0, 0, 0
+	persistenceStatus := "not_attempted"
+	usage := requestctx.UsageCollectorFromContext(ctx)
+	usage.SetExecution(requestctx.ExecutionSnapshot{Model: a.model, PersistenceStatus: "unknown"})
+	defer func() {
+		kind, status := "answer", "ok"
+		if processErr != nil {
+			kind, status = "error", "error"
+		}
+		if errors.Is(processErr, context.Canceled) {
+			kind, status = "canceled", "ok"
+		}
+		if response != nil {
+			response.ToolExecutionCount, response.ToolBlockedCount = toolExecutionCount, toolBlockedCount
+			if response.Kind == "" {
+				response.Kind = "answer"
+			}
+			if response.Error != "" {
+				response.Kind = "provider_error"
+			}
+			kind = response.Kind
+			response.PersistenceStatus = persistenceStatus
+			if kind != "answer" {
+				status = "degraded"
+			}
+			if kind == "provider_error" {
+				status = "error"
+			}
+		}
+		usage.SetExecution(requestctx.ExecutionSnapshot{ToolExecutionCount: toolExecutionCount, BlockedCount: toolBlockedCount,
+			PersistenceStatus: persistenceStatus, ResponseKind: kind, Model: a.model, IsComplete: true})
+		reqLog.Info("agent.response.complete", "completed agent generation", config.F("iteration_count", modelIterations),
+			config.F("record_kind", "summary"), config.F("is_execution_complete", true), config.F("tool_blocked_count", toolBlockedCount),
+			config.F("tool_execution_count", toolExecutionCount), config.F("duration_ms", time.Since(startedAt).Milliseconds()),
+			config.F("response_kind", kind), config.F("persistence_status", persistenceStatus), config.F("status", status))
+	}()
 	reqLog.Debug("agent.request.start", "agent request started",
 		config.F("prompt_chars", len(userPrompt)),
 		config.F("image_count", len(userImages)),
@@ -125,12 +162,13 @@ func (a *Agent) Process(ctx context.Context, request Request) (*Response, error)
 	memoryStage := requestctx.NewMemoryStageCollector()
 	ctx = requestctx.WithMemoryStageCollector(ctx, memoryStage)
 	formationSourceText, _ := stripReplyContext(userPrompt)
-	ctx = requestctx.WithMetadata(ctx, requestctx.Metadata{
-		RequestID:       requestID,
-		SessionID:       sessionKey,
-		Model:           a.model,
-		CurrentUserText: formationSourceText,
-	})
+	inherited := requestctx.MetadataFromContext(ctx)
+	inherited.RequestID, inherited.SessionID, inherited.Model, inherited.CurrentUserText = requestID, sessionKey, a.model, formationSourceText
+	if inherited.Workload == "" {
+		inherited.Workload = "foreground"
+	}
+	ctx = requestctx.WithMetadata(ctx, inherited)
+	reqLog = reqLog.With(requestctx.LogFields(ctx)...)
 	contextImages := make([]requestctx.InputImage, 0, len(userImages))
 	for _, image := range userImages {
 		contextImages = append(contextImages, requestctx.InputImage{MIMEType: image.MimeType, Data: image.Data, Source: image.Source})
@@ -164,7 +202,6 @@ func (a *Agent) Process(ctx context.Context, request Request) (*Response, error)
 	if a.userMemory != nil {
 		profile, err := a.userMemory.ResolveSessionProfile(ctx, senderID, sessionKey, sessionTurnTTL)
 		if err != nil {
-			reqLog.Error("agent.profile.load_failed", "failed to load tenant profile", config.F("status", "error"), config.ErrorField(err))
 			return nil, fmt.Errorf("resolve tenant profile: %w", err)
 		} else {
 			speakerLine = profile.SpeakerIntro
@@ -317,7 +354,6 @@ func (a *Agent) Process(ctx context.Context, request Request) (*Response, error)
 	// appear in the final response turn (when no tool calls are made).
 	var accumulatedThinking strings.Builder
 	var accumulatedContent strings.Builder
-	toolExecutionCount := 0
 
 	// toolAnnotations collects brief notes about tools used this request.
 	// These are appended to the stored assistant message so future turns
@@ -392,6 +428,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (*Response, error)
 			config.F("tool_count", len(req.Tools)),
 		)
 
+		modelIterations++
 		resp, err, imageRetriesExhausted := a.chatWithImageRetries(ctx, req, chatCallback, reqLog)
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
@@ -409,14 +446,12 @@ func (a *Agent) Process(ctx context.Context, request Request) (*Response, error)
 					req.Messages = messages
 					reqLog.Warn("agent.context.provider_overflow_recovery", "retrying model call after provider context overflow",
 						config.F("iteration", iteration), config.F("compacted_unit_count", recoveryStats.DebtCount), config.F("status", "retry"))
+					modelIterations++
 					resp, err, imageRetriesExhausted = a.chatWithImageRetries(ctx, req, chatCallback, reqLog)
 				}
 			}
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return nil, ctxErr
-			}
-			if err != nil {
-				reqLog.Error("agent.model.error", "model call failed", config.F("iteration", iteration), config.ErrorField(err))
 			}
 			if err != nil && llm.IsContextLengthExceededError(err) {
 				useContextFallback()
@@ -424,6 +459,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (*Response, error)
 			}
 			if err == nil {
 				// Continue with the response recovered after compaction.
+				reqLog.Info("agent.model.context_retry_recovered", "model recovered after context compaction", config.F("status", "ok"))
 			} else if imageRetriesExhausted {
 				imageSizeFallbackUsed = true
 				resp = &llm.ChatResponse{Model: a.model, Message: llm.ChatMessage{Role: "assistant", Content: imageSizeFallback}}
@@ -438,19 +474,20 @@ func (a *Agent) Process(ctx context.Context, request Request) (*Response, error)
 					config.F("retry_attempt", 1),
 					config.F("status", "retry"),
 				)
+				modelIterations++
 				resp, err = a.chatClient.Chat(ctx, req, chatCallback)
 				if ctxErr := ctx.Err(); ctxErr != nil {
 					return nil, ctxErr
 				}
 				if err == nil {
-					reqLog.Warn("agent.model.temporary_parser_retry_recovered", "model call recovered after upstream tool parser failure",
+					reqLog.Info("agent.model.temporary_parser_retry_recovered", "model call recovered after upstream tool parser failure",
 						config.F("iteration", iteration),
 						config.F("retry_attempt", 1),
 						config.F("is_recovered", true),
 						config.F("status", "degraded"),
 					)
 				} else {
-					reqLog.Error("agent.model.temporary_parser_retry_failed", "model retry failed after upstream tool parser failure",
+					reqLog.Debug("agent.model.temporary_parser_retry_failed", "model retry failed after upstream tool parser failure",
 						config.F("iteration", iteration),
 						config.F("retry_attempt", 1),
 						config.F("is_recovered", false),
@@ -520,10 +557,6 @@ func (a *Agent) Process(ctx context.Context, request Request) (*Response, error)
 			if streamCallback != nil {
 				streamCallback(StreamChunk{Type: ChunkToolCall, Tool: toolStreamPayload(toolName, tc.Function.Arguments, "", 0, false)})
 			}
-			reqLog.Info("agent.tool.start", "starting tool execution",
-				config.F("iteration", iteration),
-				config.F("tool_name", toolName),
-			)
 
 			var toolContent string
 			var execErr error
@@ -534,10 +567,13 @@ func (a *Agent) Process(ctx context.Context, request Request) (*Response, error)
 				decision = toolGovernor.BeforeExecution(toolName, tc.Function.Arguments, policy, advertised)
 			}
 			if decision.Allowed {
-				result, execErr = a.executeTool(ctx, request.Principal, toolName, tc.Function.Arguments, toolExposure)
-				if ctxErr := ctx.Err(); ctxErr != nil {
-					return nil, ctxErr
-				}
+				toolExecutionCount++
+				usage.SetExecution(requestctx.ExecutionSnapshot{ToolExecutionCount: toolExecutionCount, BlockedCount: toolBlockedCount, PersistenceStatus: "unknown", Model: a.model})
+				toolMeta := requestctx.MetadataFromContext(ctx)
+				toolMeta.ParentOperationID = toolMeta.OperationID
+				toolMeta.OperationID = config.NewRequestID()
+				reqLog.Debug("agent.tool.start", "starting authorized tool execution", config.F("tool_name", toolName))
+				result, execErr = a.executeTool(requestctx.WithMetadata(ctx, toolMeta), request.Principal, toolName, tc.Function.Arguments, toolExposure)
 				if execErr == nil && len(result.Attachments) > 0 {
 					candidate := append(append([]media.OutputAttachment(nil), outputAttachments...), result.Attachments...)
 					if result.Outcome != governance.OutcomeProductive {
@@ -549,10 +585,37 @@ func (a *Agent) Process(ctx context.Context, request Request) (*Response, error)
 					}
 				}
 				toolGovernor.RecordResult(toolName, decision, result, execErr)
+				status, outcome := "ok", string(result.Outcome)
+				if result.IsDegraded {
+					status = "degraded"
+				}
+				if execErr != nil {
+					status, outcome = "error", "error"
+				}
+				if errors.Is(execErr, context.Canceled) {
+					status, outcome = "ok", "canceled"
+				}
+				scope := "mcp"
+				if a.registry.HasHandler(toolName) {
+					scope = "builtin"
+				}
+				reqLog.Info("agent.tool.complete", "completed tool execution", config.F("tool_name", toolName), config.F("scope", scope),
+					config.F("record_kind", "measurement"), config.F("reason_code", result.ReasonCode), config.ErrorField(execErr),
+					config.F("operation_id", toolMeta.OperationID), config.F("parent_operation_id", toolMeta.ParentOperationID),
+					config.F("duration_ms", time.Since(toolStartedAt).Milliseconds()), config.F("outcome", outcome), config.F("status", status))
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return nil, ctxErr
+				}
 			} else {
+				toolBlockedCount++
+				usage.SetExecution(requestctx.ExecutionSnapshot{ToolExecutionCount: toolExecutionCount, BlockedCount: toolBlockedCount, PersistenceStatus: "unknown", Model: a.model})
 				toolContent = governanceResultText(decision.ReasonCode)
-				reqLog.Warn("agent.tool.blocked", "blocked tool execution",
-					config.F("iteration", iteration), config.F("tool_name", toolName),
+				safeName := toolName
+				if !advertised {
+					safeName = "unadvertised"
+				}
+				reqLog.Info("agent.tool.blocked", "blocked tool execution",
+					config.F("iteration", iteration), config.F("tool_name", safeName),
 					config.F("reason_code", decision.ReasonCode), config.F("status", "rejected"))
 			}
 			if decision.Allowed && execErr != nil {
@@ -583,9 +646,6 @@ func (a *Agent) Process(ctx context.Context, request Request) (*Response, error)
 				// Keep the successful-name projection for MCP continuity and legacy turns.
 				toolAnnotations = append(toolAnnotations, toolName)
 			}
-			if decision.Allowed {
-				toolExecutionCount++
-			}
 			if streamCallback != nil {
 				var streamAttachments []media.OutputAttachment
 				if decision.Allowed && execErr == nil && len(result.Attachments) > 0 {
@@ -615,8 +675,12 @@ func (a *Agent) Process(ctx context.Context, request Request) (*Response, error)
 			// Active checkpoints need exact model-visible evidence, not durable-history redaction.
 			foregroundBatch.Calls = append(foregroundBatch.Calls, foregroundToolCall(tc, decision, result, execErr, toolContent, time.Now().UTC()))
 			stats := toolGovernor.Stats(toolName)
+			loggedToolName := toolName
+			if !advertised {
+				loggedToolName = "unadvertised"
+			}
 			reqLog.Debug("agent.tool.governance", "updated request-local tool governance",
-				config.F("tool_name", toolName),
+				config.F("tool_name", loggedToolName),
 				config.F("tool_attempt_count", stats.Attempts),
 				config.F("tool_execution_count", stats.Executions),
 				config.F("tool_productive_count", stats.Productive),
@@ -662,6 +726,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (*Response, error)
 				config.F("estimated_after", compactionStats.EstimatedAfter), config.F("prompt_budget", inputLimit), config.F("status", "ok"))
 		}
 
+		modelIterations++
 		resp, err, imageRetriesExhausted := a.chatWithImageRetries(ctx, finalReq, chatCallback, reqLog)
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
@@ -676,6 +741,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (*Response, error)
 				} else if recoveryStats.Compacted {
 					messages = preparedMessages
 					finalReq.Messages = messages
+					modelIterations++
 					resp, err, imageRetriesExhausted = a.chatWithImageRetries(ctx, finalReq, chatCallback, reqLog)
 				}
 			}
@@ -683,7 +749,6 @@ func (a *Agent) Process(ctx context.Context, request Request) (*Response, error)
 				return nil, ctxErr
 			}
 			if err != nil {
-				reqLog.Error("agent.model.error", "model finish failed after tool budget exhaustion", config.ErrorField(err))
 				if llm.IsContextLengthExceededError(err) {
 					useContextFallback()
 					goto finalize
@@ -702,7 +767,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (*Response, error)
 
 		lastResp = resp
 		reqLog.Debug("agent.loop.complete", "completed agent loop after disabling tools",
-			config.F("iteration_count", toolExecutionCount+1),
+			config.F("iteration_count", modelIterations),
 			config.F("reason_code", toolGovernanceStopReason),
 			config.F("status", "degraded"),
 		)
@@ -750,6 +815,7 @@ finalize:
 				config.F("thinking_chars", len(finalThinking)),
 				config.F("status", "retry"),
 			)
+			modelIterations++
 			retryResp, err, imageRetriesExhausted := a.chatWithImageRetries(ctx, retryReq, chatCallback, reqLog)
 			if err != nil {
 				if ctxErr := ctx.Err(); ctxErr != nil {
@@ -765,6 +831,7 @@ finalize:
 						messages = preparedMessages
 						retryMessages = append(append([]llm.ChatMessage{}, messages...), llm.ChatMessage{Role: "user", Content: emptyResponseRetryPrompt})
 						retryReq.Messages = retryMessages
+						modelIterations++
 						retryResp, err, imageRetriesExhausted = a.chatWithImageRetries(ctx, retryReq, chatCallback, reqLog)
 					}
 				}
@@ -798,6 +865,9 @@ finalize:
 				if retryResp.Message.Thinking != "" && !strings.Contains(finalThinking, retryResp.Message.Thinking) {
 					finalThinking += retryResp.Message.Thinking
 				}
+				if strings.TrimSpace(finalContent) != "" {
+					reqLog.Info("agent.response.empty_retry_recovered", "model recovered after empty response", config.F("status", "ok"))
+				}
 			}
 		}
 
@@ -820,10 +890,12 @@ finalize:
 	userMemoryContent := sessionMemoryUserContent(userPrompt, len(userImages))
 	stagedMemory := memoryStage.Candidates()
 	if len(stagedMemory) > 0 && (a.userMemory == nil || sessionGeneration <= 0) {
+		persistenceStatus = "failed"
 		return nil, fmt.Errorf("persist staged foreground memory: session storage is unavailable")
 	}
 	var storedTurn memory.StoredSessionTurn
 	if finalContent != "" && a.userMemory != nil && sessionGeneration > 0 {
+		persistenceStatus = "failed"
 		storedReplay := memory.SessionTurn{UserText: userMemoryContent, AssistantText: finalContent, ToolNames: uniqueToolNames(toolAnnotations), ToolHistory: toolHistory}
 		completedPressure := tokenbudget.EstimateCompletedRequest(promptContext.EstimatedBefore, storedReplay.UserText, memory.SessionTurnMessages(storedReplay))
 		var err error
@@ -836,14 +908,17 @@ finalize:
 		} else if len(stagedMemory) > 0 && storedTurn.ID == 0 {
 			return nil, fmt.Errorf("persist staged foreground memory: session turn was not stored")
 		}
+		if storedTurn.ID > 0 {
+			persistenceStatus = "pending"
+		}
 	}
 
 	responseStatus := "ok"
 	if temporaryParserFallback || imageSizeFallbackUsed || toolGovernanceStopReason != "" || finalContent == contextCompactionFallback {
 		responseStatus = "degraded"
 	}
-	reqLog.Info("agent.response.complete", "completed agent response",
-		config.F("iteration_count", toolExecutionCount+1),
+	reqLog.Debug("agent.response.detail", "completed agent response",
+		config.F("iteration_count", modelIterations),
 		config.F("response_chars", len(finalContent)),
 		config.F("thinking_chars", len(finalThinking)),
 		config.F("tool_call_count", toolExecutionCount),
@@ -851,7 +926,24 @@ finalize:
 		config.F("status", responseStatus),
 	)
 
+	responseKind := "answer"
+	if toolGovernanceStopReason != "" {
+		responseKind = "tool_limit"
+	}
+	if temporaryParserFallback {
+		responseKind = "parser_fallback"
+	}
+	if imageSizeFallbackUsed {
+		responseKind = "image_fallback"
+	}
+	if finalContent == contextCompactionFallback {
+		responseKind = "context_fallback"
+	}
+	if finalContent == emptyResponseFallback && !temporaryParserFallback {
+		responseKind = "empty_fallback"
+	}
 	return &Response{
+		Kind:              responseKind,
 		Model:             a.model,
 		Response:          finalContent,
 		Thinking:          finalThinking,

@@ -3,6 +3,7 @@ package compaction
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,8 +12,10 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/compaction/budget"
+	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
 )
 
 const (
@@ -33,10 +36,11 @@ type LLMCompactor struct {
 	model     string
 	tool      llm.Tool
 	maxTokens int
+	log       *config.Logger
 }
 
 // NewLLMCompactor constructs a structured session compactor.
-func NewLLMCompactor(client llm.Chatter, model string, maxTokens int) (*LLMCompactor, error) {
+func NewLLMCompactor(client llm.Chatter, model string, maxTokens int, log *config.Logger) (*LLMCompactor, error) {
 	if client == nil {
 		return nil, fmt.Errorf("session compaction LLM client is required")
 	}
@@ -47,7 +51,7 @@ func NewLLMCompactor(client llm.Chatter, model string, maxTokens int) (*LLMCompa
 	if maxTokens <= 0 {
 		return nil, fmt.Errorf("session compaction max output tokens must be positive")
 	}
-	return &LLMCompactor{client: client, model: model, tool: sessionSummarySaveTool(), maxTokens: maxTokens}, nil
+	return &LLMCompactor{client: client, model: model, tool: sessionSummarySaveTool(), maxTokens: maxTokens, log: log}, nil
 }
 
 // Compact summarizes prior reference data plus newly covered role-correct turns.
@@ -132,6 +136,10 @@ func (e *LLMCompactor) compact(ctx context.Context, previous *memory.SessionSumm
 // CompactForeground folds complete request-local units into the same summary
 // schema used by durable compaction without publishing an artifact.
 func (e *LLMCompactor) CompactForeground(ctx context.Context, previous *memory.SessionSummary, turns []memory.SessionTurn, inputLimit int) (memory.SummaryArtifact, error) {
+	meta := requestctx.MetadataFromContext(ctx)
+	meta.ParentOperationID, meta.OperationID = meta.OperationID, rand.Text()
+	meta.Workload = "compaction"
+	ctx = requestctx.WithMetadata(ctx, meta)
 	if e == nil || inputLimit <= 0 || len(turns) == 0 {
 		return memory.SummaryArtifact{}, fmt.Errorf("foreground session compaction input is unavailable")
 	}
@@ -180,6 +188,9 @@ func (e *LLMCompactor) CompactForeground(ctx context.Context, previous *memory.S
 			}
 			if submissions == foregroundAttemptLimit {
 				return memory.SummaryArtifact{}, fmt.Errorf("foreground session compaction exhausted retries: %w", err)
+			}
+			if e.log != nil {
+				e.log.Server("session.compaction").Info("session.compaction.foreground.retry", "retrying foreground compaction", append(requestctx.LogFields(ctx), config.F("model_submission_count", submissions), config.F("model_submission_limit", foregroundAttemptLimit), config.F("covered_turn_count", count), config.F("reason_code", compactionErrorCode(err)), config.F("status", "retry"))...)
 			}
 			delay := time.Duration(1<<(submissions-1)) * 100 * time.Millisecond
 			timer := time.NewTimer(delay)

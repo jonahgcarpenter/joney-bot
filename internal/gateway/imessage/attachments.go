@@ -16,11 +16,12 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 )
 
-func (g *Gateway) loadImages(attachments []attachment) ([]llm.InputImage, []string) {
-	return g.loadImagesLimit(attachments, media.MaxImagesPerRequest)
+func (g *Gateway) loadImages(attachments []attachment, scoped ...*config.Logger) ([]llm.InputImage, []string) {
+	return g.loadImagesLimit(attachments, media.MaxImagesPerRequest, scoped...)
 }
 
-func (g *Gateway) loadImagesLimit(attachments []attachment, maxImages int) ([]llm.InputImage, []string) {
+func (g *Gateway) loadImagesLimit(attachments []attachment, maxImages int, scoped ...*config.Logger) ([]llm.InputImage, []string) {
+	log := g.log(scoped...)
 	if len(attachments) == 0 {
 		return nil, nil
 	}
@@ -45,9 +46,9 @@ func (g *Gateway) loadImagesLimit(attachments []attachment, maxImages int) ([]ll
 			continue
 		}
 
-		image, err := g.fetchAttachmentImage(attachment)
+		image, err := g.fetchAttachmentImage(attachment, log)
 		if err != nil {
-			g.log().Debug("gateway.attachment.rejected", "rejected imessage attachment", config.F("attachment_id", attachment.GUID), config.F("declared_mime", strings.TrimSpace(attachment.MimeType)), config.F("status", "degraded"))
+			log.Debug("gateway.attachment.rejected", "rejected imessage attachment", config.F("status", "degraded"))
 			unsupported = append(unsupported, label)
 			continue
 		}
@@ -72,7 +73,8 @@ func attachmentLabels(attachments []attachment) []string {
 	return labels
 }
 
-func (g *Gateway) fetchAttachmentImage(attachment attachment) (llm.InputImage, error) {
+func (g *Gateway) fetchAttachmentImage(attachment attachment, scoped ...*config.Logger) (llm.InputImage, error) {
+	log := g.log(scoped...)
 	if strings.TrimSpace(attachment.GUID) == "" {
 		return llm.InputImage{}, nil
 	}
@@ -95,7 +97,7 @@ func (g *Gateway) fetchAttachmentImage(attachment attachment) (llm.InputImage, e
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		g.log().Warn("gateway.attachment.fetch_failed", "failed to fetch imessage attachment", config.F("attachment_id", attachment.GUID), config.F("declared_mime", strings.TrimSpace(attachment.MimeType)), config.F("http_status", resp.StatusCode), config.F("response_bytes", len(body)), config.F("status", "degraded"))
+		log.Debug("gateway.attachment.fetch_failed", "failed to fetch imessage attachment", config.F("http_status", resp.StatusCode), config.F("response_bytes", len(body)), config.F("status", "degraded"))
 		return llm.InputImage{}, fmt.Errorf("download BlueBubbles attachment failed with status %d", resp.StatusCode)
 	}
 
@@ -111,7 +113,7 @@ func (g *Gateway) fetchAttachmentImage(attachment attachment) (llm.InputImage, e
 	if err != nil {
 		return llm.InputImage{}, fmt.Errorf("attachment rejected: %w", err)
 	}
-	g.log().Debug("gateway.attachment.normalized", "normalized imessage attachment", config.F("attachment_id", attachment.GUID), config.F("declared_mime", strings.TrimSpace(attachment.MimeType)), config.F("detected_mime", result.DetectedMIME), config.F("normalized_mime", result.Image.MimeType), config.F("attachment_bytes", len(body)), config.F("original_width", result.OriginalWidth), config.F("original_height", result.OriginalHeight), config.F("width", result.Width), config.F("height", result.Height), config.F("is_resized", result.WasResized), config.F("normalized_bytes", result.NormalizedBytes), config.F("base64_chars", result.Base64Chars), config.F("preserved_alpha", result.PreservedAlpha), config.F("used_declared_mime", result.UsedDeclaredMIME))
+	log.Debug("gateway.attachment.normalized", "normalized imessage attachment", config.F("normalized_mime", result.Image.MimeType), config.F("attachment_bytes", len(body)), config.F("original_width", result.OriginalWidth), config.F("original_height", result.OriginalHeight), config.F("width", result.Width), config.F("height", result.Height), config.F("is_resized", result.WasResized), config.F("normalized_bytes", result.NormalizedBytes), config.F("base64_chars", result.Base64Chars), config.F("preserved_alpha", result.PreservedAlpha), config.F("used_declared_mime", result.UsedDeclaredMIME))
 
 	image := result.Image
 	return image, nil

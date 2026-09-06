@@ -256,6 +256,9 @@ func TestBraveClientLogsNoSensitiveRequestOrResultData(t *testing.T) {
 		t.Fatal(err)
 	}
 	logs := output.String()
+	if !strings.Contains(logs, `"event":"provider.web.search.complete"`) {
+		t.Fatalf("missing provider completion: %s", logs)
+	}
 	for _, forbidden := range []string{key, query, resultMarker, "private title", "private snippet"} {
 		if strings.Contains(logs, forbidden) {
 			t.Fatalf("logs contained sensitive value %q: %s", forbidden, logs)

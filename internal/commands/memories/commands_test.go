@@ -24,11 +24,11 @@ func TestMemoriesListAndForget(t *testing.T) {
 	defer memory.Close() // nolint:errcheck
 	accounts := accounts.NewService(path, memory, nil, log)
 	defer accounts.Close() // nolint:errcheck
-	userID, err := accounts.EnsureAccount("homeassistant", "actor", "Actor")
+	userID, err := accounts.EnsureAccount(context.Background(), "homeassistant", "actor", "Actor")
 	if err != nil {
 		t.Fatal(err)
 	}
-	otherID, err := accounts.EnsureAccount("homeassistant", "other", "Other")
+	otherID, err := accounts.EnsureAccount(context.Background(), "homeassistant", "other", "Other")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -67,9 +67,31 @@ type gatewayChoice struct {
 }
 
 type gatewayUsage struct {
-	PromptTokens     int `json:"prompt_tokens,omitempty"`
-	CompletionTokens int `json:"completion_tokens,omitempty"`
-	TotalTokens      int `json:"total_tokens,omitempty"`
+	reported                                          bool
+	promptReported, completionReported, totalReported bool
+	PromptTokens                                      int `json:"prompt_tokens,omitempty"`
+	CompletionTokens                                  int `json:"completion_tokens,omitempty"`
+	TotalTokens                                       int `json:"total_tokens,omitempty"`
+}
+
+func (u *gatewayUsage) UnmarshalJSON(data []byte) error {
+	type wireUsage gatewayUsage
+	var value wireUsage
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	*u = gatewayUsage(value)
+	for key, reported := range map[string]*bool{"prompt_tokens": &u.promptReported, "completion_tokens": &u.completionReported, "total_tokens": &u.totalReported} {
+		if raw, ok := fields[key]; ok && string(raw) != "null" {
+			*reported = true
+			u.reported = true
+		}
+	}
+	return nil
 }
 
 type gatewayErrorResponse struct {
@@ -90,6 +112,7 @@ type gatewayEmbeddingRequest struct {
 }
 
 type gatewayEmbeddingResponse struct {
+	Usage gatewayUsage            `json:"usage,omitempty"`
 	Model string                  `json:"model,omitempty"`
 	Data  []gatewayEmbeddingDatum `json:"data"`
 	Error *gatewayErrorResponse   `json:"error,omitempty"`

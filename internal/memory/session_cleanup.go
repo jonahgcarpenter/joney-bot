@@ -19,8 +19,12 @@ type SessionCleanupCounts struct {
 	CompactionJobsRetired   int64 `json:"CompactionJobsDeleted"`
 }
 
-func (s *Store) cleanupExpiredSessions(ctx context.Context, now time.Time, policy config.RetentionPolicy) (SessionCleanupCounts, error) {
-	var counts SessionCleanupCounts
+func (s *Store) cleanupExpiredSessions(ctx context.Context, now time.Time, policy config.RetentionPolicy) (counts SessionCleanupCounts, err error) {
+	defer func() {
+		if err != nil {
+			counts = SessionCleanupCounts{}
+		}
+	}()
 	if err := ctx.Err(); err != nil {
 		return counts, err
 	}

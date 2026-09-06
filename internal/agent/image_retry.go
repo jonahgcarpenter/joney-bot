@@ -44,7 +44,13 @@ func (a *Agent) chatWithImageRetries(ctx context.Context, req llm.ChatRequest, c
 		}
 
 		resp, err := a.chatClient.Chat(ctx, req, callback)
+		if ctx.Err() != nil {
+			return nil, ctx.Err(), false
+		}
 		if err == nil {
+			if attempt > 1 {
+				log.Info("agent.model.image_retry_recovered", "model recovered after image resize", config.F("attempt_count", attempt), config.F("status", "ok"))
+			}
 			return resp, nil, false
 		}
 		if imageCount == 0 || !llm.IsOllamaModelRunnerStoppedError(err) {
@@ -54,10 +60,9 @@ func (a *Agent) chatWithImageRetries(ctx context.Context, req llm.ChatRequest, c
 			firstErr = err
 		}
 		if attempt == maxImageModelAttempts {
-			log.Error("agent.model.image_retry_exhausted", "model runner stopped after resized image retries",
+			log.Warn("agent.model.image_retry_exhausted", "model runner stopped after resized image retries",
 				config.F("attempt_count", attempt), config.F("image_count", imageCount),
-				config.F("status", "error"), config.F("original_error", config.SafeErrorText(firstErr)),
-				config.F("last_error", config.SafeErrorText(err)))
+				config.F("status", "degraded"), config.ErrorField(err))
 			return nil, err, true
 		}
 		log.Warn("agent.model.image_retry", "retrying model call with smaller images",

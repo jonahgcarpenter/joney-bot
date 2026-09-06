@@ -17,11 +17,11 @@ import (
 func TestServiceEnsureLinkDisconnectAndSpeakerLine(t *testing.T) {
 	links := newTestService(t)
 
-	userID, err := links.EnsureAccount("discord", "123", "Alice")
+	userID, err := links.EnsureAccount(context.Background(), "discord", "123", "Alice")
 	if err != nil {
 		t.Fatalf("ensure discord: %v", err)
 	}
-	again, err := links.EnsureAccount("discord", "123", "Alice Updated")
+	again, err := links.EnsureAccount(context.Background(), "discord", "123", "Alice Updated")
 	if err != nil {
 		t.Fatalf("ensure existing discord: %v", err)
 	}
@@ -29,7 +29,7 @@ func TestServiceEnsureLinkDisconnectAndSpeakerLine(t *testing.T) {
 		t.Fatalf("expected same canonical user, got %q then %q", userID, again)
 	}
 
-	localID, err := links.EnsureAccount("homeassistant", "alice-local", "")
+	localID, err := links.EnsureAccount(context.Background(), "homeassistant", "alice-local", "")
 	if err != nil {
 		t.Fatalf("ensure websocket: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestServiceEnsureLinkDisconnectAndSpeakerLine(t *testing.T) {
 
 func TestClaimBootstrapAdminUsesAuthenticatedChatOwner(t *testing.T) {
 	links := newTestService(t)
-	userID, err := links.EnsureAccount("discord", "123", "Alice")
+	userID, err := links.EnsureAccount(context.Background(), "discord", "123", "Alice")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,18 +75,18 @@ func TestClaimBootstrapAdminUsesAuthenticatedChatOwner(t *testing.T) {
 		t.Fatalf("HasAdmin()=%t err=%v", hasAdmin, err)
 	}
 	principal := identity.Principal{CanonicalUserID: "stale-user", Gateway: "discord", ExternalID: "123", Assurance: identity.AssuranceDiscordGateway}
-	claimedID, claimed, err := links.ClaimBootstrapAdmin(principal)
+	claimedID, claimed, err := links.ClaimBootstrapAdmin(context.Background(), principal)
 	if err != nil || !claimed || claimedID != userID {
 		t.Fatalf("ClaimBootstrapAdmin() id=%q claimed=%t err=%v", claimedID, claimed, err)
 	}
 	if admin, err := links.IsAdmin(userID); err != nil || !admin {
 		t.Fatalf("IsAdmin()=%t err=%v", admin, err)
 	}
-	otherID, err := links.EnsureAccount("imessage", "+15555550100", "Bob")
+	otherID, err := links.EnsureAccount(context.Background(), "imessage", "+15555550100", "Bob")
 	if err != nil {
 		t.Fatal(err)
 	}
-	claimedID, claimed, err = links.ClaimBootstrapAdmin(identity.Principal{CanonicalUserID: otherID, Gateway: "imessage", ExternalID: "+15555550100", Assurance: identity.AssuranceBlueBubblesWebhook})
+	claimedID, claimed, err = links.ClaimBootstrapAdmin(context.Background(), identity.Principal{CanonicalUserID: otherID, Gateway: "imessage", ExternalID: "+15555550100", Assurance: identity.AssuranceBlueBubblesWebhook})
 	if err != nil || claimed || claimedID != "" {
 		t.Fatalf("second ClaimBootstrapAdmin() id=%q claimed=%t err=%v", claimedID, claimed, err)
 	}
@@ -94,11 +94,11 @@ func TestClaimBootstrapAdminUsesAuthenticatedChatOwner(t *testing.T) {
 
 func TestDisconnectRejectsStalePrincipalAndNonOwnedExactTarget(t *testing.T) {
 	links := newTestService(t)
-	userID, _ := links.EnsureAccount("discord", "702", "Owner")
-	localID, _ := links.EnsureAccount("homeassistant", "owner-local", "Owner Local")
+	userID, _ := links.EnsureAccount(context.Background(), "discord", "702", "Owner")
+	localID, _ := links.EnsureAccount(context.Background(), "homeassistant", "owner-local", "Owner Local")
 	principal := identity.Principal{CanonicalUserID: userID, Gateway: "discord", ExternalID: "702", Assurance: identity.AssuranceDiscordGateway}
 	connectTestAccounts(t, links, principal, identity.Principal{CanonicalUserID: localID, Gateway: "homeassistant", ExternalID: "owner-local", Assurance: identity.AssuranceHomeAssistantToken})
-	_, _ = links.EnsureAccount("imessage", "outsider@example.com", "Outsider")
+	_, _ = links.EnsureAccount(context.Background(), "imessage", "outsider@example.com", "Outsider")
 
 	stale := principal
 	stale.CanonicalUserID = "usr_stale"
@@ -121,11 +121,11 @@ func TestServicePersistsSQLiteAccounts(t *testing.T) {
 	memories := memorytest.NewStore(t, dbPath, log)
 
 	links := NewService(dbPath, memories, nil, log)
-	userID, err := links.EnsureAccount("discord", "123", "Alice")
+	userID, err := links.EnsureAccount(context.Background(), "discord", "123", "Alice")
 	if err != nil {
 		t.Fatalf("ensure account: %v", err)
 	}
-	localID, err := links.EnsureAccount("homeassistant", "alice-local", "")
+	localID, err := links.EnsureAccount(context.Background(), "homeassistant", "alice-local", "")
 	if err != nil {
 		t.Fatalf("ensure websocket: %v", err)
 	}
@@ -145,24 +145,24 @@ func TestServicePersistsSQLiteAccounts(t *testing.T) {
 
 func TestServiceAdminBanAndListUsers(t *testing.T) {
 	links := newTestService(t)
-	adminID, err := links.EnsureAccount("discord", "100", "Admin")
+	adminID, err := links.EnsureAccount(context.Background(), "discord", "100", "Admin")
 	if err != nil {
 		t.Fatalf("ensure admin: %v", err)
 	}
-	targetID, err := links.EnsureAccount("discord", "200", "Target")
+	targetID, err := links.EnsureAccount(context.Background(), "discord", "200", "Target")
 	if err != nil {
 		t.Fatalf("ensure target: %v", err)
 	}
 
 	admin := identity.Principal{CanonicalUserID: adminID, Gateway: "discord", ExternalID: "100", Assurance: identity.AssuranceDiscordGateway}
 	claimTestAdmin(t, links, admin)
-	if err := links.SetAdminAs(admin, adminID, false); err == nil || !strings.Contains(err.Error(), "cannot remove admin from yourself") {
+	if _, err := links.SetAdminAs(context.Background(), admin, adminID, false); err == nil || !strings.Contains(err.Error(), "cannot remove admin from yourself") {
 		t.Fatalf("expected self unadmin error, got %v", err)
 	}
-	if err := links.BanUserAs(admin, adminID, "bad"); err == nil || !strings.Contains(err.Error(), "cannot ban yourself") {
+	if err := links.BanUserAs(context.Background(), admin, adminID, "bad"); err == nil || !strings.Contains(err.Error(), "cannot ban yourself") {
 		t.Fatalf("expected self ban error, got %v", err)
 	}
-	if err := links.BanUserAs(admin, targetID, "spam"); err != nil {
+	if err := links.BanUserAs(context.Background(), admin, targetID, "spam"); err != nil {
 		t.Fatalf("ban target: %v", err)
 	}
 
@@ -195,7 +195,7 @@ func TestServiceAdminBanAndListUsers(t *testing.T) {
 		t.Fatalf("target not found in users: %+v", users)
 	}
 
-	if err := links.UnbanUserAs(admin, targetID); err != nil {
+	if _, err := links.UnbanUserAs(context.Background(), admin, targetID); err != nil {
 		t.Fatalf("unban target: %v", err)
 	}
 	isBanned, _, err = links.BanStatus(targetID)
@@ -222,12 +222,12 @@ func TestServiceAdminBanAndListUsers(t *testing.T) {
 
 func TestServiceAdminAuthorizationRebindsExternalAccountOwner(t *testing.T) {
 	links := newTestService(t)
-	adminID, err := links.EnsureAccount("discord", "810", "Admin")
+	adminID, err := links.EnsureAccount(context.Background(), "discord", "810", "Admin")
 	if err != nil {
 		t.Fatal(err)
 	}
 	claimTestAdmin(t, links, identity.Principal{CanonicalUserID: adminID, Gateway: "discord", ExternalID: "810", Assurance: identity.AssuranceDiscordGateway})
-	if _, err := links.EnsureAccount("discord", "811", "User"); err != nil {
+	if _, err := links.EnsureAccount(context.Background(), "discord", "811", "User"); err != nil {
 		t.Fatal(err)
 	}
 	stale := identity.Principal{CanonicalUserID: adminID, Gateway: "discord", ExternalID: "811", Assurance: identity.AssuranceDiscordGateway}
@@ -244,11 +244,11 @@ func TestServiceAdminAuthorizationRebindsExternalAccountOwner(t *testing.T) {
 
 func TestServiceVerifiedMergePreservesAdminState(t *testing.T) {
 	links := newTestService(t)
-	targetID, err := links.EnsureAccount("discord", "300", "Target")
+	targetID, err := links.EnsureAccount(context.Background(), "discord", "300", "Target")
 	if err != nil {
 		t.Fatalf("ensure target: %v", err)
 	}
-	sourceID, err := links.EnsureAccount("homeassistant", "source", "Source")
+	sourceID, err := links.EnsureAccount(context.Background(), "homeassistant", "source", "Source")
 	if err != nil {
 		t.Fatalf("ensure source: %v", err)
 	}
@@ -267,15 +267,15 @@ func TestServiceVerifiedMergePreservesAdminState(t *testing.T) {
 
 func TestServiceDeleteUserRemovesAccountsMemoryAndSessions(t *testing.T) {
 	links := newTestService(t)
-	adminID, err := links.EnsureAccount("discord", "400", "Admin")
+	adminID, err := links.EnsureAccount(context.Background(), "discord", "400", "Admin")
 	if err != nil {
 		t.Fatalf("ensure admin: %v", err)
 	}
-	targetID, err := links.EnsureAccount("discord", "500", "Target")
+	targetID, err := links.EnsureAccount(context.Background(), "discord", "500", "Target")
 	if err != nil {
 		t.Fatalf("ensure target: %v", err)
 	}
-	localID, err := links.EnsureAccount("homeassistant", "target-local", "Target Local")
+	localID, err := links.EnsureAccount(context.Background(), "homeassistant", "target-local", "Target Local")
 	if err != nil {
 		t.Fatalf("ensure websocket: %v", err)
 	}
@@ -300,10 +300,10 @@ func TestServiceDeleteUserRemovesAccountsMemoryAndSessions(t *testing.T) {
 		t.Fatalf("insert mcp server: %v", err)
 	}
 
-	if err := links.DeleteUserAs(admin, adminID); err == nil || !strings.Contains(err.Error(), "cannot delete yourself") {
+	if _, err := links.DeleteUserAs(context.Background(), admin, adminID); err == nil || !strings.Contains(err.Error(), "cannot delete yourself") {
 		t.Fatalf("expected self delete error, got %v", err)
 	}
-	if err := links.DeleteUserAs(admin, targetID); err != nil {
+	if _, err := links.DeleteUserAs(context.Background(), admin, targetID); err != nil {
 		t.Fatalf("delete user: %v", err)
 	}
 
@@ -325,7 +325,7 @@ func TestServiceDeleteUserRemovesAccountsMemoryAndSessions(t *testing.T) {
 	assertRowCount(t, db, `SELECT COUNT(*) FROM session_turns WHERE canonical_user_id = ?`, targetID, 0)
 	assertRowCount(t, db, `SELECT COUNT(*) FROM mcp_servers WHERE owner_user_id = ?`, targetID, 0)
 
-	recreatedID, err := links.EnsureAccount("discord", "500", "Target Recreated")
+	recreatedID, err := links.EnsureAccount(context.Background(), "discord", "500", "Target Recreated")
 	if err != nil {
 		t.Fatalf("recreate deleted account: %v", err)
 	}
@@ -361,7 +361,7 @@ func newTestService(t *testing.T) *Service {
 
 func claimTestAdmin(t *testing.T, links *Service, principal identity.Principal) {
 	t.Helper()
-	if owner, claimed, err := links.ClaimBootstrapAdmin(principal); err != nil || !claimed || owner != principal.CanonicalUserID {
+	if owner, claimed, err := links.ClaimBootstrapAdmin(context.Background(), principal); err != nil || !claimed || owner != principal.CanonicalUserID {
 		t.Fatalf("claim bootstrap admin: owner=%q claimed=%t err=%v", owner, claimed, err)
 	}
 }

@@ -180,18 +180,33 @@ func (dg *Gateway) listenLoop(conn *gorilla.Conn) error {
 				case "READY":
 					var ready ReadyEvent
 					if err := json.Unmarshal(p.D, &ready); err == nil {
+						if ready.User.ID == "" || ready.SessionID == "" {
+							dg.log().Warn("gateway.event.decode_failed", "invalid discord READY event", config.F("event_type", "READY"), config.F("reason_code", "missing_required_fields"), config.F("status", "rejected"))
+							continue
+						}
 						dg.BotID = ready.User.ID
 						dg.setReadySession(ready.SessionID, ready.ResumeGatewayURL)
 						dg.setHeartbeatAcked(true)
-						dg.log().Info("gateway.session.ready", "discord gateway ready", config.F("bot_id", dg.BotID), config.F("bot_username", ready.User.Username))
+						dg.log().Info("gateway.session.ready", "discord gateway ready")
+					} else {
+						dg.log().Warn("gateway.event.decode_failed", "invalid discord READY event", config.F("event_type", "READY"), config.F("status", "rejected"), config.ErrorField(err))
 					}
 				case "RESUMED":
 					dg.setHeartbeatAcked(true)
-					dg.log().Debug("gateway.session.resumed", "discord session resumed")
+					dg.log().Info("gateway.session.resumed", "discord session resumed")
 				case "MESSAGE_CREATE":
+					receivedAt := time.Now()
+					requestID := config.NewRequestID()
+					log := dg.log().With(config.F("request_id", requestID))
 					var msg MessageCreate
 					if err := json.Unmarshal(p.D, &msg); err == nil {
-						go dg.handleMessage(msg)
+						if msg.ID == "" || msg.ChannelID == "" || msg.Author.ID == "" {
+							log.Warn("gateway.event.decode_failed", "invalid discord MESSAGE_CREATE event", config.F("event_type", "MESSAGE_CREATE"), config.F("reason_code", "missing_required_fields"), config.F("status", "rejected"))
+							continue
+						}
+						go dg.handleReceivedMessage(msg, requestID, receivedAt)
+					} else {
+						log.Warn("gateway.event.decode_failed", "invalid discord MESSAGE_CREATE event", config.F("event_type", "MESSAGE_CREATE"), config.F("status", "rejected"), config.ErrorField(err))
 					}
 				}
 			}

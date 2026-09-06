@@ -43,7 +43,7 @@ func (h *handler) ResolveFenceTargets(ctx context.Context, req commands.Request)
 // Execute processes one account-link command.
 func (h *handler) Execute(ctx context.Context, req commands.Request) (commands.Result, error) {
 	if !req.Principal.Authenticated() {
-		return commands.Result{Text: "Account changes require an authenticated identity."}, nil
+		return commands.Result{Text: "Account changes require an authenticated identity.", Outcome: commands.Outcome{Status: "rejected", ReasonCode: "authentication_required"}}, nil
 	}
 	switch req.Name {
 	case "connect":
@@ -51,7 +51,7 @@ func (h *handler) Execute(ctx context.Context, req commands.Request) (commands.R
 	case "disconnect":
 		return h.handleDisconnect(ctx, req)
 	default:
-		return commands.Result{Text: "Unknown command: /" + req.Name}, nil
+		return commands.Result{Text: "Unknown command: /" + req.Name, Outcome: commands.Outcome{Status: "rejected", ReasonCode: "unknown_command"}}, nil
 	}
 }
 
@@ -64,7 +64,7 @@ func (h *handler) handleConnect(ctx context.Context, req commands.Request) (comm
 		return commands.Result{Text: fmt.Sprintf("On the other account, send:\n\n/connect %s\n\nThis code expires in 10 minutes and can be used once. Do not share it.", challenge.Code)}, nil
 	}
 	if len(req.Args) != 1 {
-		return commands.Result{Text: commands.UsageText(h.definition)}, nil
+		return commands.Result{Text: commands.UsageText(h.definition), Outcome: commands.Outcome{Status: "rejected", ReasonCode: "invalid_arguments"}}, nil
 	}
 	if strings.EqualFold(req.Args[0], "cancel") {
 		cancelled, err := h.links.CancelChallenge(ctx, req.Principal, req.RequestID)
@@ -72,7 +72,7 @@ func (h *handler) handleConnect(ctx context.Context, req commands.Request) (comm
 			return linkErrorResult(err)
 		}
 		if !cancelled {
-			return commands.Result{Text: "There is no active connection code to cancel."}, nil
+			return commands.Result{Text: "There is no active connection code to cancel.", Outcome: commands.Outcome{Status: "ok", ReasonCode: "no_op"}}, nil
 		}
 		return commands.Result{Text: "The active connection code was cancelled."}, nil
 	}
@@ -84,12 +84,17 @@ func (h *handler) handleConnect(ctx context.Context, req commands.Request) (comm
 		return commands.Result{Text: "These accounts are already connected and are now verified."}, nil
 	}
 	if result.Replayed {
-		return commands.Result{Text: "These accounts were already connected successfully."}, nil
+		return commands.Result{Text: "These accounts were already connected successfully.", Outcome: commands.Outcome{Status: "ok", ReasonCode: "no_op"}}, nil
 	}
 	return commands.Result{Text: "Accounts connected successfully. This account now uses the profile that created the connection code."}, nil
 }
 
-func linkErrorResult(err error) (commands.Result, error) {
+func linkErrorResult(err error) (result commands.Result, resultErr error) {
+	defer func() {
+		if reason, expected := accounts.PolicyReason(err); expected {
+			result.Outcome = commands.Outcome{Status: "rejected", ReasonCode: reason}
+		}
+	}()
 	switch {
 	case errors.Is(err, accounts.ErrChallengeInvalid):
 		return commands.Result{Text: "That connection code is invalid, expired, or has already been used. Start again with /connect on the account you want to keep."}, nil
@@ -115,12 +120,12 @@ func (h *handler) handleDisconnect(ctx context.Context, req commands.Request) (c
 		return h.startDisconnect(canonicalUserID)
 	}
 	if len(args) != 1 {
-		return commands.Result{Text: disconnectUsage(h.definition, canonicalUserID, h.links)}, nil
+		return disconnectUsage(h.definition, canonicalUserID, h.links)
 	}
 
 	selection, err := strconv.Atoi(args[0])
 	if err != nil {
-		return commands.Result{Text: disconnectUsage(h.definition, canonicalUserID, h.links)}, nil
+		return disconnectUsage(h.definition, canonicalUserID, h.links)
 	}
 
 	linkedAccounts, err := h.links.AccountsForUser(canonicalUserID)
@@ -128,16 +133,19 @@ func (h *handler) handleDisconnect(ctx context.Context, req commands.Request) (c
 		return commands.Result{}, err
 	}
 	if selection < 1 || selection > len(linkedAccounts) {
-		return commands.Result{Text: disconnectUsage(h.definition, canonicalUserID, h.links)}, nil
+		return disconnectUsage(h.definition, canonicalUserID, h.links)
 	}
 
 	account := linkedAccounts[selection-1]
 	descriptor, err := h.links.DisconnectAccountAs(ctx, req.Principal, account.Gateway, account.Identifier, req.RequestID)
 	if err != nil {
 		if errors.Is(err, accounts.ErrPrincipalMismatch) {
-			return commands.Result{Text: "Your account identity changed. Send the command again."}, nil
+			return commands.Result{Text: "Your account identity changed. Send the command again.", Outcome: commands.Outcome{Status: "rejected", ReasonCode: "principal_mismatch"}}, nil
 		}
-		return commands.Result{Text: fmt.Sprintf("Could not disconnect %s: %v", gatewayLabel(account.Gateway), err)}, nil
+		if reason, expected := accounts.PolicyReason(err); expected {
+			return commands.Result{Text: fmt.Sprintf("Could not disconnect %s: %v", gatewayLabel(account.Gateway), err), Outcome: commands.Outcome{Status: "rejected", ReasonCode: reason}}, nil
+		}
+		return commands.Result{}, err
 	}
 
 	remaining, err := h.links.AccountsForUser(canonicalUserID)
@@ -154,7 +162,7 @@ func (h *handler) startDisconnect(canonicalUserID string) (commands.Result, erro
 		return commands.Result{}, err
 	}
 	if len(accounts) <= 1 {
-		return commands.Result{Text: "You only have one linked account. Oswald will not disconnect the last account."}, nil
+		return commands.Result{Text: "You only have one linked account. Oswald will not disconnect the last account.", Outcome: commands.Outcome{Status: "rejected", ReasonCode: "last_account"}}, nil
 	}
 
 	var lines []string
@@ -191,14 +199,17 @@ func renderLinkedAccounts(accounts []database.LinkedAccount) string {
 	return strings.Join(lines, "\n")
 }
 
-func disconnectUsage(definition commands.Definition, canonicalUserID string, links *accounts.Service) string {
+func disconnectUsage(definition commands.Definition, canonicalUserID string, links *accounts.Service) (commands.Result, error) {
 	accounts, err := links.AccountsForUser(canonicalUserID)
-	if err != nil || len(accounts) == 0 {
-		return commands.UsageText(definition)
+	if err != nil {
+		return commands.Result{}, err
+	}
+	if len(accounts) == 0 {
+		return commands.Result{Text: commands.UsageText(definition), Outcome: commands.Outcome{Status: "rejected", ReasonCode: "invalid_arguments"}}, nil
 	}
 	lines := []string{definition.Summary, "Use: /disconnect <number>"}
 	for i, account := range accounts {
 		lines = append(lines, fmt.Sprintf("%d. %s: %s", i+1, gatewayLabel(account.Gateway), account.Identifier))
 	}
-	return strings.Join(lines, "\n")
+	return commands.Result{Text: strings.Join(lines, "\n"), Outcome: commands.Outcome{Status: "rejected", ReasonCode: "invalid_arguments"}}, nil
 }

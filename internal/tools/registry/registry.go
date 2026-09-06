@@ -118,13 +118,13 @@ func (r *Registry) LoadFromDirectory(dir string) error {
 		path := filepath.Join(dir, entry.Name())
 		data, err := os.ReadFile(path)
 		if err != nil {
-			r.log.Warn("tool.registry.definition_read_failed", "failed to read tool definition", config.F("file", path), config.F("status", "error"), config.ErrorField(err))
+			r.log.Warn("tool.registry.definition_read_failed", "failed to read tool definition", config.F("status", "degraded"), config.ErrorField(err))
 			continue
 		}
 
 		spec, err := parseToolMarkdown(string(data))
 		if err != nil {
-			r.log.Warn("tool.registry.definition_parse_failed", "failed to parse tool definition", config.F("file", path), config.F("status", "error"), config.ErrorField(err))
+			r.log.Warn("tool.registry.definition_parse_failed", "failed to parse tool definition", config.F("status", "degraded"), config.ErrorField(err))
 			continue
 		}
 

@@ -1,9 +1,8 @@
 package config
 
 import (
+	"encoding/json"
 	"errors"
-	"io"
-	"os"
 	"strings"
 	"testing"
 )
@@ -27,23 +26,15 @@ func TestSafeErrorTextFallback(t *testing.T) {
 }
 
 func TestErrorFieldLogRedactsCanariesAndPreservesStructure(t *testing.T) {
-	oldStderr := os.Stderr
-	reader, writer, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Stderr = writer
-	defer func() { os.Stderr = oldStderr }()
-
 	log := NewLogger(LevelDebug).Server("canary")
-	log.Error("canary.failed", "canary operation failed",
-		F("http_status", 502),
-		F("status", "error"),
-		ErrorField(errors.New("password=hunter2 user=alice@example.com token=abc123")),
-	)
-	_ = writer.Close()
-	output, err := io.ReadAll(reader)
-	_ = reader.Close()
+	record := captureLog(t, log, func() {
+		log.Error("canary.failed", "canary operation failed",
+			F("http_status", 502),
+			F("status", "error"),
+			ErrorField(errors.New("password=hunter2 user=alice@example.com token=abc123")),
+		)
+	})
+	output, err := json.Marshal(record)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,9 +44,12 @@ func TestErrorFieldLogRedactsCanariesAndPreservesStructure(t *testing.T) {
 			t.Fatalf("sensitive canary %q leaked in log: %s", forbidden, text)
 		}
 	}
-	for _, required := range []string{`"component":"canary"`, `"event":"canary.failed"`, `"http_status":502`, `"status":"error"`, `"error":"password=[redacted] user=[redacted-email] token=[redacted]"`} {
-		if !strings.Contains(text, required) {
-			t.Fatalf("structured field %q missing from log: %s", required, text)
+	for key, want := range map[string]any{"component": "canary", "event": "canary.failed", "http_status": float64(502), "status": "error", "error_code": "unknown_error"} {
+		if record[key] != want {
+			t.Fatalf("structured field %q missing from log: %s", key, text)
 		}
+	}
+	if _, ok := record["error"]; ok {
+		t.Fatal("raw error field emitted")
 	}
 }

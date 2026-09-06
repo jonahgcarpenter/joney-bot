@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -10,6 +11,8 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	mcpmanager "github.com/jonahgcarpenter/oswald-ai/internal/mcp"
 )
+
+var errAdminRequired = errors.New("You are not allowed to use admin commands.")
 
 // New returns the /mcp command handler.
 func New(store *mcpmanager.Store, manager *mcpmanager.Manager, auth commands.PrincipalAuthorizer) commands.Handler {
@@ -28,7 +31,7 @@ func (h handler) Definition() commands.Definition {
 
 func (h handler) Execute(ctx context.Context, req commands.Request) (commands.Result, error) {
 	if len(req.Args) == 0 {
-		return commands.Result{Text: commands.UsageText(h.Definition())}, nil
+		return commands.Result{Text: commands.UsageText(h.Definition()), Outcome: commands.Outcome{Status: "rejected", ReasonCode: "invalid_arguments"}}, nil
 	}
 	args := append([]string(nil), req.Args...)
 	actorID := req.Principal.CanonicalUserID
@@ -36,17 +39,20 @@ func (h handler) Execute(ctx context.Context, req commands.Request) (commands.Re
 	owner := actorID
 	if args[0] == "global" {
 		if err := h.requireAdmin(req.Principal); err != nil {
-			return commands.Result{Text: err.Error()}, nil
+			if errors.Is(err, errAdminRequired) {
+				return commands.Result{Text: err.Error(), Outcome: commands.Outcome{Status: "rejected", ReasonCode: "admin_required"}}, nil
+			}
+			return commands.Result{}, err
 		}
 		scope = mcpmanager.ScopeGlobal
 		owner = ""
 		args = args[1:]
 		if len(args) == 0 {
-			return commands.Result{Text: "Use: /mcp global servers|add|remove|enable|disable|test ..."}, nil
+			return commands.Result{Text: "Use: /mcp global servers|add|remove|enable|disable|test ...", Outcome: commands.Outcome{Status: "rejected", ReasonCode: "invalid_arguments"}}, nil
 		}
 	}
 	if h.store == nil || h.manager == nil {
-		return commands.Result{Text: "MCP configuration is unavailable."}, nil
+		return commands.Result{}, fmt.Errorf("MCP configuration is unavailable")
 	}
 	switch args[0] {
 	case "servers", "list":
@@ -62,20 +68,20 @@ func (h handler) Execute(ctx context.Context, req commands.Request) (commands.Re
 	case "test":
 		return h.test(ctx, actorID, scope, owner, args[1:])
 	default:
-		return commands.Result{Text: commands.UsageText(h.Definition())}, nil
+		return commands.Result{Text: commands.UsageText(h.Definition()), Outcome: commands.Outcome{Status: "rejected", ReasonCode: "invalid_arguments"}}, nil
 	}
 }
 
 func (h handler) requireAdmin(principal identity.Principal) error {
 	if h.auth == nil {
-		return fmt.Errorf("You are not allowed to use admin commands.")
+		return errAdminRequired
 	}
 	isAdmin, err := commands.IsPrincipalAdmin(h.auth, principal)
 	if err != nil {
 		return err
 	}
 	if !isAdmin {
-		return fmt.Errorf("You are not allowed to use admin commands.")
+		return errAdminRequired
 	}
 	return nil
 }
@@ -109,20 +115,20 @@ func (h handler) list(ctx context.Context, userID, scope string) (commands.Resul
 
 func (h handler) add(ctx context.Context, scope, owner string, args []string) (commands.Result, error) {
 	if len(args) < 3 {
-		return commands.Result{Text: addUsage(scope)}, nil
+		return commands.Result{Text: addUsage(scope), Outcome: commands.Outcome{Status: "rejected", ReasonCode: "invalid_arguments"}}, nil
 	}
 	name := args[0]
 	url := args[1]
 	headers, description, err := parseAddOptions(args[2:])
 	if err != nil {
-		return commands.Result{Text: err.Error()}, nil
+		return commands.Result{Text: err.Error(), Outcome: commands.Outcome{Status: "rejected", ReasonCode: "invalid_arguments"}}, nil
 	}
 	_, err = h.store.Save(ctx, mcpmanager.ServerConfig{Scope: scope, OwnerUserID: owner, Name: name, Description: description, Transport: mcpmanager.TransportStreamableHTTP, URL: url, Headers: headers, Enabled: true})
 	if err != nil {
 		return commands.Result{}, err
 	}
 	h.manager.Invalidate(scope, owner, strings.ToLower(name))
-	return commands.Result{Text: fmt.Sprintf("MCP server %q saved. URL and headers are encrypted at rest.", strings.ToLower(name))}, nil
+	return commands.Result{Text: fmt.Sprintf("MCP server %q saved. URL and headers are encrypted at rest.", strings.ToLower(name)), Outcome: commands.Outcome{Status: "ok", Operation: "mcp.save", IsChanged: true, AffectedCount: 1}}, nil
 }
 
 func addUsage(scope string) string {
@@ -154,20 +160,28 @@ func parseAddOptions(args []string) (map[string]string, string, error) {
 
 func (h handler) remove(ctx context.Context, scope, owner string, args []string) (commands.Result, error) {
 	if len(args) < 1 {
-		return commands.Result{Text: "Use: /mcp remove <name>"}, nil
+		return commands.Result{Text: "Use: /mcp remove <name>", Outcome: commands.Outcome{Status: "rejected", ReasonCode: "invalid_arguments"}}, nil
 	}
-	if err := h.store.Delete(ctx, scope, owner, args[0]); err != nil {
+	changed, err := h.store.Delete(ctx, scope, owner, args[0])
+	if err != nil {
 		return commands.Result{}, err
 	}
 	h.manager.Invalidate(scope, owner, strings.ToLower(args[0]))
-	return commands.Result{Text: fmt.Sprintf("MCP server %q removed.", strings.ToLower(args[0]))}, nil
+	outcome := commands.Outcome{Status: "ok", Operation: "mcp.remove", IsChanged: changed}
+	if changed {
+		outcome.AffectedCount = 1
+	} else {
+		outcome.ReasonCode = "no_op"
+	}
+	return commands.Result{Text: fmt.Sprintf("MCP server %q removed.", strings.ToLower(args[0])), Outcome: outcome}, nil
 }
 
 func (h handler) setEnabled(ctx context.Context, scope, owner string, args []string, enabled bool) (commands.Result, error) {
 	if len(args) < 1 {
-		return commands.Result{Text: "Use: /mcp enable <name>"}, nil
+		return commands.Result{Text: "Use: /mcp enable <name>", Outcome: commands.Outcome{Status: "rejected", ReasonCode: "invalid_arguments"}}, nil
 	}
-	if err := h.store.SetEnabled(ctx, scope, owner, args[0], enabled); err != nil {
+	changed, err := h.store.SetEnabled(ctx, scope, owner, args[0], enabled)
+	if err != nil {
 		return commands.Result{}, err
 	}
 	h.manager.Invalidate(scope, owner, strings.ToLower(args[0]))
@@ -175,13 +189,23 @@ func (h handler) setEnabled(ctx context.Context, scope, owner string, args []str
 	if enabled {
 		state = "enabled"
 	}
-	return commands.Result{Text: fmt.Sprintf("MCP server %q %s.", strings.ToLower(args[0]), state)}, nil
+	operation := "mcp.disable"
+	if enabled {
+		operation = "mcp.enable"
+	}
+	outcome := commands.Outcome{Status: "ok", Operation: operation, IsChanged: changed}
+	if outcome.IsChanged {
+		outcome.AffectedCount = 1
+	} else {
+		outcome.ReasonCode = "no_op"
+	}
+	return commands.Result{Text: fmt.Sprintf("MCP server %q %s.", strings.ToLower(args[0]), state), Outcome: outcome}, nil
 }
 
 func (h handler) test(ctx context.Context, userID, scope, owner string, args []string) (commands.Result, error) {
 	_ = owner
 	if len(args) < 1 {
-		return commands.Result{Text: "Use: /mcp test <name>"}, nil
+		return commands.Result{Text: "Use: /mcp test <name>", Outcome: commands.Outcome{Status: "rejected", ReasonCode: "invalid_arguments"}}, nil
 	}
 	lookupUser := userID
 	if scope == mcpmanager.ScopeGlobal {
@@ -193,9 +217,9 @@ func (h handler) test(ctx context.Context, userID, scope, owner string, args []s
 	}
 	if info.Status != "connected" {
 		if info.Reason != "" {
-			return commands.Result{Text: fmt.Sprintf("MCP server %q is %s: %s", info.Name, info.Status, info.Reason)}, nil
+			return commands.Result{Text: fmt.Sprintf("MCP server %q is %s: %s", info.Name, info.Status, info.Reason), Outcome: commands.Outcome{Status: "degraded", ReasonCode: "unavailable"}}, nil
 		}
-		return commands.Result{Text: fmt.Sprintf("MCP server %q is %s.", info.Name, info.Status)}, nil
+		return commands.Result{Text: fmt.Sprintf("MCP server %q is %s.", info.Name, info.Status), Outcome: commands.Outcome{Status: "degraded", ReasonCode: "unavailable"}}, nil
 	}
 	return commands.Result{Text: fmt.Sprintf("MCP server %q connected. Tools: %d.", info.Name, len(tools))}, nil
 }

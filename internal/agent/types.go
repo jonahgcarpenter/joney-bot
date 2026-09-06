@@ -18,12 +18,16 @@ type ModelMetrics struct {
 
 // Response is the final payload returned to the gateway after processing.
 type Response struct {
-	Model       string                   `json:"model"`
-	Response    string                   `json:"response,omitempty"`
-	Thinking    string                   `json:"thinking,omitempty"` // reasoning tokens emitted before the response
-	Error       string                   `json:"error,omitempty"`
-	Metrics     *ModelMetrics            `json:"metrics,omitempty"`
-	Attachments []media.OutputAttachment `json:"-"`
+	Kind               string                   `json:"-"`
+	PersistenceStatus  string                   `json:"-"`
+	ToolExecutionCount int                      `json:"-"`
+	ToolBlockedCount   int                      `json:"-"`
+	Model              string                   `json:"model"`
+	Response           string                   `json:"response,omitempty"`
+	Thinking           string                   `json:"thinking,omitempty"` // reasoning tokens emitted before the response
+	Error              string                   `json:"error,omitempty"`
+	Metrics            *ModelMetrics            `json:"metrics,omitempty"`
+	Attachments        []media.OutputAttachment `json:"-"`
 
 	SourceTurnID      int64 `json:"-"`
 	SessionGeneration int   `json:"-"`

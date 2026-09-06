@@ -19,11 +19,12 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 )
 
-func (dg *Gateway) loadImages(attachments []Attachment) ([]llm.InputImage, []string) {
-	return dg.loadImagesLimit(attachments, media.MaxImagesPerRequest)
+func (dg *Gateway) loadImages(attachments []Attachment, scoped ...*config.Logger) ([]llm.InputImage, []string) {
+	return dg.loadImagesLimit(attachments, media.MaxImagesPerRequest, scoped...)
 }
 
-func (dg *Gateway) loadImagesLimit(attachments []Attachment, maxImages int) ([]llm.InputImage, []string) {
+func (dg *Gateway) loadImagesLimit(attachments []Attachment, maxImages int, scoped ...*config.Logger) ([]llm.InputImage, []string) {
+	log := dg.log(scoped...)
 	if len(attachments) == 0 {
 		return nil, nil
 	}
@@ -48,9 +49,9 @@ func (dg *Gateway) loadImagesLimit(attachments []Attachment, maxImages int) ([]l
 			continue
 		}
 
-		image, err := dg.fetchAttachmentImage(attachment.ID, attachment.URL, attachment.ContentType, attachment.Filename)
+		image, err := dg.fetchAttachmentImage(attachment.ID, attachment.URL, attachment.ContentType, attachment.Filename, log)
 		if err != nil {
-			dg.log().Debug("gateway.attachment.rejected", "rejected discord attachment", config.F("attachment_id", attachment.ID), config.F("declared_mime", strings.TrimSpace(attachment.ContentType)), config.F("status", "degraded"))
+			log.Debug("gateway.attachment.rejected", "rejected discord attachment", config.F("status", "degraded"))
 			unsupported = append(unsupported, label)
 			continue
 		}
@@ -75,7 +76,8 @@ func discordAttachmentLabels(attachments []Attachment) []string {
 	return labels
 }
 
-func (dg *Gateway) loadEmbedImagesLimit(embeds []Embed, maxImages int) ([]llm.InputImage, []string) {
+func (dg *Gateway) loadEmbedImagesLimit(embeds []Embed, maxImages int, scoped ...*config.Logger) ([]llm.InputImage, []string) {
+	log := dg.log(scoped...)
 	if len(embeds) == 0 {
 		return nil, nil
 	}
@@ -104,17 +106,17 @@ func (dg *Gateway) loadEmbedImagesLimit(embeds []Embed, maxImages int) ([]llm.In
 			if err == nil {
 				err = fmt.Errorf("video extractor returned an empty image")
 			}
-			dg.log().Warn("gateway.embed.video_fallback", "failed to extract animated discord embed; using static preview",
-				config.F("embed_type", strings.TrimSpace(embed.Type)), config.F("status", "degraded"), config.ErrorField(err))
+			log.Warn("gateway.embed.video_fallback", "failed to extract animated discord embed; using static preview",
+				config.F("status", "degraded"), config.ErrorField(err))
 		}
 
 		assetURL := discordEmbedImageURL(embed)
 		if assetURL == "" {
 			continue
 		}
-		image, err := dg.fetchAttachmentImage("", assetURL, "", label)
+		image, err := dg.fetchAttachmentImage("", assetURL, "", label, log)
 		if err != nil {
-			dg.log().Debug("gateway.embed.rejected", "rejected discord embed image", config.F("embed_type", strings.TrimSpace(embed.Type)), config.F("status", "degraded"), config.ErrorField(err))
+			log.Debug("gateway.embed.rejected", "rejected discord embed image", config.F("status", "degraded"), config.ErrorField(err))
 			unsupported = append(unsupported, label)
 			continue
 		}
@@ -248,7 +250,8 @@ func (dg *Gateway) fetchEmbedVideo(rawURL, label string) (llm.InputImage, error)
 	return image, nil
 }
 
-func (dg *Gateway) fetchAttachmentImage(attachmentID, rawURL, declaredMIME, filename string) (llm.InputImage, error) {
+func (dg *Gateway) fetchAttachmentImage(attachmentID, rawURL, declaredMIME, filename string, scoped ...*config.Logger) (llm.InputImage, error) {
+	log := dg.log(scoped...)
 	if strings.TrimSpace(rawURL) == "" {
 		return llm.InputImage{}, nil
 	}
@@ -261,7 +264,7 @@ func (dg *Gateway) fetchAttachmentImage(attachmentID, rawURL, declaredMIME, file
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		dg.log().Warn("gateway.attachment.fetch_failed", "failed to fetch discord attachment", config.F("attachment_id", attachmentID), config.F("declared_mime", strings.TrimSpace(declaredMIME)), config.F("http_status", resp.StatusCode), config.F("response_bytes", len(body)), config.F("status", "degraded"))
+		log.Debug("gateway.attachment.fetch_failed", "failed to fetch discord attachment", config.F("http_status", resp.StatusCode), config.F("response_bytes", len(body)), config.F("status", "degraded"))
 		return llm.InputImage{}, fmt.Errorf("download attachment: unexpected status %d", resp.StatusCode)
 	}
 
@@ -277,7 +280,7 @@ func (dg *Gateway) fetchAttachmentImage(attachmentID, rawURL, declaredMIME, file
 	if err != nil {
 		return llm.InputImage{}, fmt.Errorf("attachment rejected: %w", err)
 	}
-	dg.log().Debug("gateway.attachment.normalized", "normalized discord attachment", config.F("attachment_id", attachmentID), config.F("declared_mime", strings.TrimSpace(declaredMIME)), config.F("detected_mime", result.DetectedMIME), config.F("normalized_mime", result.Image.MimeType), config.F("attachment_bytes", len(body)), config.F("original_width", result.OriginalWidth), config.F("original_height", result.OriginalHeight), config.F("width", result.Width), config.F("height", result.Height), config.F("is_resized", result.WasResized), config.F("normalized_bytes", result.NormalizedBytes), config.F("base64_chars", result.Base64Chars), config.F("preserved_alpha", result.PreservedAlpha), config.F("used_declared_mime", result.UsedDeclaredMIME))
+	log.Debug("gateway.attachment.normalized", "normalized discord attachment", config.F("normalized_mime", result.Image.MimeType), config.F("attachment_bytes", len(body)), config.F("original_width", result.OriginalWidth), config.F("original_height", result.OriginalHeight), config.F("width", result.Width), config.F("height", result.Height), config.F("is_resized", result.WasResized), config.F("normalized_bytes", result.NormalizedBytes), config.F("base64_chars", result.Base64Chars), config.F("preserved_alpha", result.PreservedAlpha), config.F("used_declared_mime", result.UsedDeclaredMIME))
 	return result.Image, nil
 }
 

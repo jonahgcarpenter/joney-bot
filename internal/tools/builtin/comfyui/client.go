@@ -26,6 +26,14 @@ import (
 
 const maxControlResponseBytes = 1 << 20
 
+type comfyHTTPError struct {
+	status  int
+	message string
+}
+
+func (e *comfyHTTPError) Error() string       { return e.message }
+func (e *comfyHTTPError) HTTPStatusCode() int { return e.status }
+
 // Client serializes ComfyUI generations, including best-effort VRAM cleanup.
 type Client struct {
 	base         *url.URL
@@ -53,15 +61,29 @@ func NewClient(rawURL string, timeout time.Duration) (*Client, error) {
 // Generate uploads an optional PNG, submits a workflow, polls its history, and downloads its first output.
 // cleanupFailed is meaningful when a valid image is returned.
 func (c *Client) Generate(ctx context.Context, workflow map[string]node, outputNode string, inputPNG []byte) (image GeneratedImage, cleanupFailed bool, err error) {
+	stageLog := generationStageLogger(ctx)
+	phase, started := "permit", time.Now()
+	defer func() {
+		if phase != "" {
+			stageLog(phase, started, err)
+		}
+	}()
 	select {
 	case c.permit <- struct{}{}:
 	case <-ctx.Done():
 		return GeneratedImage{}, false, ctx.Err()
 	}
+	stageLog(phase, started, nil)
+	phase, started = "upload", time.Now()
 	defer func() {
+		stageLog(phase, started, err)
+		phase = ""
+		cleanupStarted := time.Now()
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer cancel()
-		if cleanupErr := c.cleanup(cleanupCtx); cleanupErr != nil {
+		cleanupErr := c.cleanup(cleanupCtx)
+		stageLog("cleanup", cleanupStarted, cleanupErr)
+		if cleanupErr != nil {
 			cleanupFailed = true
 		}
 		<-c.permit
@@ -73,15 +95,21 @@ func (c *Client) Generate(ctx context.Context, workflow map[string]node, outputN
 		if err := c.upload(generationCtx, inputPNG); err != nil {
 			return GeneratedImage{}, false, err
 		}
+		stageLog(phase, started, nil)
 	}
+	phase, started = "submit", time.Now()
 	promptID, err := c.submit(generationCtx, workflow)
 	if err != nil {
 		return GeneratedImage{}, false, err
 	}
+	stageLog(phase, started, nil)
+	phase, started = "poll", time.Now()
 	descriptor, err := c.poll(generationCtx, promptID, outputNode)
 	if err != nil {
 		return GeneratedImage{}, false, err
 	}
+	stageLog(phase, started, nil)
+	phase, started = "download", time.Now()
 	generated, err := c.download(generationCtx, descriptor)
 	if err != nil {
 		return GeneratedImage{}, false, err
@@ -235,7 +263,7 @@ func (c *Client) download(ctx context.Context, descriptor outputDescriptor) (Gen
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return GeneratedImage{}, errors.New("ComfyUI image download returned an unsuccessful status")
+		return GeneratedImage{}, &comfyHTTPError{status: resp.StatusCode, message: "ComfyUI image download returned an unsuccessful status"}
 	}
 	if resp.ContentLength > media.MaxOutputAttachmentBytes {
 		return GeneratedImage{}, errors.New("ComfyUI image exceeds the size limit")
@@ -292,7 +320,7 @@ func (c *Client) cleanup(ctx context.Context) error {
 		if resp.StatusCode >= 500 && attempt == 0 {
 			continue
 		}
-		return errors.New("ComfyUI cleanup returned an unsuccessful status")
+		return &comfyHTTPError{status: resp.StatusCode, message: "ComfyUI cleanup returned an unsuccessful status"}
 	}
 	return errors.New("ComfyUI cleanup failed")
 }
@@ -304,7 +332,7 @@ func (c *Client) doJSON(req *http.Request, destination interface{}) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return errors.New("unsuccessful status")
+		return &comfyHTTPError{status: resp.StatusCode, message: "unsuccessful status"}
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxControlResponseBytes+1))
 	if err != nil || len(body) > maxControlResponseBytes {

@@ -1,14 +1,13 @@
 package llm
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -321,33 +320,20 @@ func TestGatewayClientProviderErrorsDoNotExposeResponseText(t *testing.T) {
 			if strings.Contains(logs, reflectedSoulCanary) {
 				t.Fatalf("provider logs exposed reflected content: %s", logs)
 			}
+			if !strings.Contains(logs, `"record_kind":"measurement"`) || !strings.Contains(logs, `.complete"`) {
+				t.Fatalf("missing provider completion: %s", logs)
+			}
 		})
 	}
 }
 
 func captureLogs(t *testing.T, run func(*config.Logger)) string {
 	t.Helper()
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("create log pipe: %v", err)
-	}
-	oldStderr := os.Stderr
-	os.Stderr = w
-	log := config.NewLogger(config.LevelError)
-	os.Stderr = oldStderr
-
+	var output bytes.Buffer
+	log := config.NewLogger(config.LevelDebug)
+	log.SetOutput(&output)
 	run(log)
-	if err := w.Close(); err != nil {
-		t.Fatalf("close log writer: %v", err)
-	}
-	output, err := io.ReadAll(r)
-	if err != nil {
-		t.Fatalf("read logs: %v", err)
-	}
-	if err := r.Close(); err != nil {
-		t.Fatalf("close log reader: %v", err)
-	}
-	return string(output)
+	return output.String()
 }
 
 func TestTemporaryOllamaToolParserErrorClassification(t *testing.T) {

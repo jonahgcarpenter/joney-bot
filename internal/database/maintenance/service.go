@@ -2,6 +2,7 @@ package maintenance
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -68,6 +69,10 @@ func (s *Service) Stop() {
 
 func (s *Service) run(ctx context.Context) {
 	defer s.wg.Done()
+	if s.log != nil {
+		s.log.Info("maintenance.worker.started", "maintenance worker started", config.F("workload", "maintenance"))
+		defer s.log.Info("maintenance.worker.stopped", "maintenance worker stopped", config.F("workload", "maintenance"))
+	}
 	s.sweep(ctx)
 	ticker := time.NewTicker(s.policy.MaintenanceInterval)
 	defer ticker.Stop()
@@ -91,25 +96,50 @@ func (s *Service) sweepAt(ctx context.Context, now time.Time) {
 	}
 	started := time.Now()
 	counts, err := s.sweeper.MaintenanceSweep(ctx, now, s.policy)
+	if s.log == nil {
+		return
+	}
+	// rows_changed counts committed operations, not distinct rows: a row can be
+	// updated in one phase and deleted in another. Phase counters are disjoint.
+	fields := []config.Field{
+		config.F("record_kind", "summary"), config.F("workload", "maintenance"), config.F("phase", counts.Phase),
+		config.F("rows_changed", counts.Changed()), config.F("duration_ms", time.Since(started).Milliseconds()), config.F("is_optimize_run", counts.OptimizeRun),
+		config.F("session_turn_deleted_count", counts.SessionCleanup.SessionTurnsDeleted),
+		config.F("session_deactivated_count", counts.SessionCleanup.SessionsDeactivated),
+		config.F("memory_expired_count", counts.SessionCleanup.MemoryEntriesExpired),
+		config.F("expiry_candidate_deleted_count", counts.SessionCleanup.CandidatesDeleted),
+		config.F("expiry_formation_job_deleted_count", counts.SessionCleanup.FormationJobsDeleted),
+		config.F("session_summary_deleted_count", counts.SessionCleanup.SessionSummariesDeleted),
+		config.F("compaction_job_retired_count", counts.SessionCleanup.CompactionJobsRetired),
+		config.F("pending_delivery_failed_count", counts.PendingDeliveriesFailed),
+		config.F("candidate_deleted_count", counts.CandidatesDeleted),
+		config.F("terminal_job_deleted_count", counts.FormationJobsDeleted+counts.CompactionJobsDeleted),
+		config.F("derived_index_job_deleted_count", counts.DerivedIndexJobsDeleted),
+		config.F("challenge_deleted_count", counts.ChallengesDeleted),
+		config.F("index_row_deleted_count", counts.IndexRowsDeleted),
+		config.F("index_revision_degraded_count", counts.IndexRevisionsDegraded),
+		config.F("index_table_dropped_count", counts.IndexTablesDropped),
+	}
 	if err != nil {
-		if s.log != nil && ctx.Err() == nil {
-			s.log.Warn("maintenance.sweep.failed", "periodic maintenance sweep failed", config.F("rows_changed", counts.Changed()), config.F("duration_ms", time.Since(started).Milliseconds()), config.F("status", "degraded"), config.ErrorField(err))
+		if s.log != nil {
+			fields = append(fields, config.F("partial_committed_count", counts.Changed()))
+			if errors.Is(err, context.Canceled) {
+				s.log.Info("maintenance.sweep.canceled", "maintenance sweep canceled", append(fields, config.F("outcome", "canceled"), config.F("status", "ok"))...)
+			} else {
+				s.log.Warn("maintenance.sweep.failed", "periodic maintenance sweep failed", append(fields, config.F("outcome", "partial"), config.F("status", "degraded"), config.ErrorField(err))...)
+			}
 		}
 		return
 	}
 	if s.log != nil {
-		s.log.Info("maintenance.sweep.complete", "periodic maintenance sweep completed",
-			config.F("rows_changed", counts.Changed()),
-			config.F("pending_delivery_failed_count", counts.PendingDeliveriesFailed),
-			config.F("candidate_deleted_count", counts.CandidatesDeleted),
-			config.F("terminal_job_deleted_count", counts.FormationJobsDeleted+counts.CompactionJobsDeleted),
-			config.F("derived_index_job_deleted_count", counts.DerivedIndexJobsDeleted),
-			config.F("challenge_deleted_count", counts.ChallengesDeleted),
-			config.F("index_row_deleted_count", counts.IndexRowsDeleted),
-			config.F("index_revision_degraded_count", counts.IndexRevisionsDegraded),
-			config.F("index_table_dropped_count", counts.IndexTablesDropped),
-			config.F("duration_ms", time.Since(started).Milliseconds()),
-			config.F("status", "ok"),
-		)
+		emit := s.log.Info
+		if counts.IndexRevisionsDegraded > 0 {
+			emit = s.log.Warn
+		}
+		status := "ok"
+		if counts.IndexRevisionsDegraded > 0 {
+			status = "degraded"
+		}
+		emit("maintenance.sweep.complete", "periodic maintenance sweep completed", append(fields, config.F("outcome", "committed"), config.F("status", status))...)
 	}
 }
