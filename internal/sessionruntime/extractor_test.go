@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 )
 
@@ -243,6 +244,36 @@ func TestLLMExtractorForegroundSubmissionBudgetSpansAllChunks(t *testing.T) {
 	_, err := newSummaryTestExtractor(t, client, 2048).CompactForeground(context.Background(), nil, turns, 100000)
 	if err == nil || !strings.Contains(err.Error(), "4-submission budget") || len(client.requests) != foregroundAttemptLimit {
 		t.Fatalf("error=%v request_count=%d", err, len(client.requests))
+	}
+}
+
+func TestLLMExtractorForegroundReservesCorrectivePromptBudget(t *testing.T) {
+	turns := []usermemory.SessionTurn{
+		{ID: 1, UserText: strings.Repeat("first marker ", 100), AssistantText: "answer"},
+		{ID: 2, UserText: strings.Repeat("second marker ", 100), AssistantText: "answer"},
+	}
+	messages, err := compactionMessages(nil, turns, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	limit := promptbudget.EstimateRequest(messages, []llm.Tool{sessionSummarySaveTool()})
+	valid := summaryRawToolResponse(sessionSummarySaveToolName, `{"narrative":"complete","open_tasks":[],"commitments":[],"entities":[],"decisions":[],"topic_tags":[],"candidates":[]}`)
+	client := &summarySequenceChatter{outcomes: []summarySequenceOutcome{
+		{response: summaryToolResponse()}, {response: valid}, {response: valid},
+	}}
+	if _, err := newSummaryTestExtractor(t, client, 2048).CompactForeground(context.Background(), nil, turns, limit); err != nil {
+		t.Fatal(err)
+	}
+	if len(client.requests) != 3 || messagesContainText(client.requests[0].Messages, "second marker") || !messagesContainText(client.requests[2].Messages, "second marker") {
+		t.Fatalf("unexpected chunk selection: %+v", client.requests)
+	}
+	for i, request := range client.requests {
+		if estimate := promptbudget.EstimateRequest(request.Messages, request.Tools); estimate > limit {
+			t.Fatalf("request %d estimate=%d limit=%d", i, estimate, limit)
+		}
+	}
+	if !strings.Contains(client.requests[1].Messages[0].Content, "STRUCTURED OUTPUT RETRY") {
+		t.Fatal("missing corrective retry")
 	}
 }
 

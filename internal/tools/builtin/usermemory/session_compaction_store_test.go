@@ -32,7 +32,7 @@ func TestSessionCompactionRangeAndEnqueueIdempotency(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if planned.TotalCount != 2 || len(planned.Turns) != 1 || planned.Turns[0].ID != first {
+	if planned.TotalCount != 2 || planned.NewestTurnID != second || len(planned.Turns) != 1 || planned.Turns[0].ID != first {
 		t.Fatalf("planned turns = %+v", planned)
 	}
 	ranged, err := store.DeliveredSessionTurnsRange(context.Background(), "user-a", "shared", generation, first, second)
@@ -205,7 +205,7 @@ func TestSessionCompactionDoesNotCrossUndeliveredTurn(t *testing.T) {
 		t.Fatal(err)
 	}
 	planned, err := store.DeliveredSessionTurnsAfter(context.Background(), "user", "session", generation, 0, 100)
-	if err != nil || planned.TotalCount != 1 || len(planned.Turns) != 1 || planned.Turns[0].ID != first {
+	if err != nil || planned.TotalCount != 1 || planned.NewestTurnID != first || len(planned.Turns) != 1 || planned.Turns[0].ID != first {
 		t.Fatalf("planned across delivery gap: %+v err=%v", planned, err)
 	}
 	if _, err := store.EnqueueSessionCompactionJob(context.Background(), "user", "session", generation, first, last, compactionTestModel, compactionTestGeneratorVersion); err == nil {
@@ -246,6 +246,41 @@ func TestRecentCompletedExchangesExcludePendingAndFailedTurns(t *testing.T) {
 	}
 	if len(turns) != 1 || turns[0].ID != delivered {
 		t.Fatalf("recent completed turns=%+v, pending=%d failed=%d", turns, pending.ID, failed.ID)
+	}
+}
+
+func TestAllDeliveredSessionTurnsAfterPagesAcrossPendingGap(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionCompactionTestStore(t)
+	seedAccountUsers(t, store, "user", "other")
+	generation := activateCompactionSession(t, store, "user", "session")
+	activateCompactionSession(t, store, "other", "session")
+	first := appendDeliveredCompactionTurn(t, store, "user", "session", generation, "first")
+	if _, err := store.AppendSessionTurnForGenerationResult(ctx, "session", "user", generation, "pending", "answer", nil, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	failed := appendDeliveredCompactionTurn(t, store, "user", "session", generation, "failed")
+	if _, err := store.sql.Exec(`UPDATE session_turns SET delivery_failed_at = created_at WHERE id = ?`, failed); err != nil {
+		t.Fatal(err)
+	}
+	appendDeliveredCompactionTurn(t, store, "other", "session", generation, "private")
+	last := appendDeliveredCompactionTurn(t, store, "user", "session", generation, "last")
+	boundary := int64(0)
+	for _, want := range []int64{first, last} {
+		page, err := store.AllDeliveredSessionTurnsAfter(ctx, "user", "session", generation, boundary, 1)
+		if err != nil || len(page) != 1 || page[0].ID != want {
+			t.Fatalf("boundary=%d page=%+v want=%d err=%v", boundary, page, want, err)
+		}
+		boundary = page[0].ID
+	}
+	if page, err := store.AllDeliveredSessionTurnsAfter(ctx, "user", "session", generation, boundary, 1); err != nil || len(page) != 0 {
+		t.Fatalf("final page=%+v err=%v", page, err)
+	}
+	if _, err := store.AllDeliveredSessionTurnsAfter(ctx, "user", "session", generation, -1, 1); err == nil {
+		t.Fatal("accepted negative boundary")
+	}
+	if _, err := store.AllDeliveredSessionTurnsAfter(ctx, "user", "session", generation+1, 0, 1); err == nil {
+		t.Fatal("accepted inactive generation")
 	}
 }
 

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -11,7 +12,9 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
+	"github.com/jonahgcarpenter/oswald-ai/internal/toolnames"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
@@ -177,6 +180,45 @@ func TestProcessRecoversProviderContextOverflowWithTransientCheckpoint(t *testin
 	}
 }
 
+func TestProcessCompactsDeliveredHistoryAcrossPendingGapAndPages(t *testing.T) {
+	chat := &fakeChatter{outcomes: []fakeChatOutcome{
+		{err: &llm.ChatHTTPError{StatusCode: 400, Body: "context length exceeded"}},
+		{response: &llm.ChatResponse{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "continued"}}},
+	}}
+	agent, store := newTestAgent(t, chat, nil, nil)
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+	profile, err := store.ResolveSessionProfile(ctx, "user-1", "session", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i <= foregroundDebtPageSize; i++ {
+		if i == 1 {
+			if _, err := store.AppendSessionTurnForGenerationResult(ctx, "session", "user-1", profile.Generation, "pending", "pending answer", nil, time.Hour); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := store.AppendSessionTurnForGeneration(ctx, "session", "user-1", profile.Generation, "delivered", "answer", nil, time.Hour); err != nil {
+			t.Fatal(err)
+		}
+	}
+	compactor := &fakeForegroundCompactor{artifact: usermemory.SummaryArtifact{Narrative: "Delivered conversation summarized."}}
+	agent.SetForegroundCompactor(compactor)
+	response, err := processAgent(agent, "gap-pages", "homeassistant", "session", "user-1", "User", "continue", nil, nil)
+	if err != nil || response.Response != "continued" || len(compactor.calls) != 1 {
+		t.Fatalf("response=%+v err=%v calls=%d", response, err, len(compactor.calls))
+	}
+	turns := compactor.calls[0].turns
+	if len(turns) != foregroundDebtPageSize+1 {
+		t.Fatalf("compacted %d turns, want %d", len(turns), foregroundDebtPageSize+1)
+	}
+	for i, turn := range turns {
+		if turn.UserText != "delivered" || (i > 0 && turn.ID <= turns[i-1].ID) {
+			t.Fatalf("unexpected compacted turn %d: %+v", i, turn)
+		}
+	}
+}
+
 func TestProcessPropagatesCancellationDuringForegroundCompaction(t *testing.T) {
 	chat := &fakeChatter{outcomes: []fakeChatOutcome{{err: &llm.ChatHTTPError{StatusCode: 400, Body: "context length exceeded"}}}}
 	agent, store := newTestAgent(t, chat, nil, nil)
@@ -263,4 +305,153 @@ func hasCompactionStatus(chunks []StreamChunk) bool {
 		}
 	}
 	return false
+}
+
+func TestProcessInitialCompactionUsesPressureBeforeHistoryOmission(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		t.Run(map[bool]string{false: "success", true: "failure"}[fail], func(t *testing.T) {
+			chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "continued"}}}}
+			a, store := newTestAgent(t, chat, nil, nil)
+			a.budget.PromptLimit = 1000
+			profile, err := store.ResolveSessionProfile(context.Background(), "user-1", "session", time.Hour)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.AppendSessionTurnForGeneration(context.Background(), "session", "user-1", profile.Generation, strings.Repeat("oversized history ", 2000), "answer", nil, time.Hour); err != nil {
+				t.Fatal(err)
+			}
+			compactor := &fakeForegroundCompactor{artifact: usermemory.SummaryArtifact{Narrative: "Prior context."}}
+			if fail {
+				compactor.err = errors.New("compaction failed")
+			}
+			a.SetForegroundCompactor(compactor)
+			response, err := processAgent(a, "initial-pressure", "discord", "session", "user-1", "User", "continue", nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(compactor.calls) != 1 || len(compactor.calls[0].turns) != 1 {
+				t.Fatalf("calls=%+v", compactor.calls)
+			}
+			if fail {
+				if response.Response != contextCompactionFallback || response.SourceTurnID == 0 || len(chat.requests) != 0 {
+					t.Fatalf("response=%+v requests=%d", response, len(chat.requests))
+				}
+			} else if len(chat.requests) != 1 || !messagesContain(chat.requests[0].Messages, "active_turn_summary") {
+				t.Fatalf("requests=%+v", chat.requests)
+			}
+		})
+	}
+}
+
+func TestProcessForegroundEvidenceAndFallbackPersistence(t *testing.T) {
+	for _, mode := range []string{"success", "preflight", "governance", "overflow"} {
+		t.Run(mode, func(t *testing.T) {
+			liveResult := strings.Repeat("private fetched evidence ", 1000)
+			liveURL := "https://example.com/" + strings.Repeat("private-path", 1000)
+			first := toolCallResponse("fetch", "test.fetch", map[string]interface{}{"url": liveURL})
+			first.Message.Thinking = "private reasoning"
+			first.Message.ToolCalls = append(first.Message.ToolCalls, llm.ToolCall{ID: "stage", Function: llm.ToolFunction{Name: toolnames.UserMemorySave, Arguments: map[string]interface{}{}}})
+			chat := &fakeChatter{outcomes: []fakeChatOutcome{{response: first}, {response: &llm.ChatResponse{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "continued"}}}}}
+			if mode == "overflow" {
+				chat.outcomes[1] = fakeChatOutcome{err: &llm.ChatHTTPError{StatusCode: 400, Body: "context length exceeded"}}
+			}
+			reg := registry.New(config.NewLogger(config.LevelError))
+			policy := testToolPolicy()
+			policy.History = governance.HistoryPolicy{Mode: governance.HistoryMetadata}
+			if err := reg.RegisterTool(registry.Spec{Name: "test.fetch", Description: "Fetch-like evidence"}, policy, func(context.Context, map[string]interface{}) (governance.Result, error) {
+				return governance.Result{Content: liveResult, Outcome: governance.OutcomeProductive, Attachments: []media.OutputAttachment{{Filename: "result.png", MIMEType: "image/png", Data: []byte("private attachment bytes")}}}, nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			a, store := newTestAgent(t, chat, nil, reg)
+			registerStagingTool(t, reg, store, false)
+			a.budget.PromptLimit = 1000
+			if mode == "overflow" {
+				a.budget.PromptLimit = 100000
+			}
+			if mode == "governance" {
+				a.toolPolicy.MaxExecutions = 2
+			}
+			compactor := &fakeForegroundCompactor{artifact: usermemory.SummaryArtifact{Narrative: "Transient checkpoint."}}
+			if mode != "success" {
+				compactor.err = errors.New("compaction failed")
+			}
+			a.SetForegroundCompactor(compactor)
+			response, err := processAgent(a, "evidence-"+mode, "discord", "session", "user-1", "User", "I prefer dark mode.", nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if response.SourceTurnID == 0 || response.SessionGeneration == 0 || len(response.Attachments) != 1 {
+				t.Fatalf("response=%+v", response)
+			}
+			if mode != "success" && response.Response != contextCompactionFallback {
+				t.Fatalf("response=%+v", response)
+			}
+			if len(compactor.calls) != 1 {
+				t.Fatalf("compactor calls=%d", len(compactor.calls))
+			}
+			call := compactor.calls[0].turns[0].ToolHistory.Batches[0].Calls[0]
+			if call.Arguments["url"] != liveURL || call.Result != liveResult || call.ArgumentsTruncated || call.ResultTruncated {
+				t.Fatal("live evidence was redacted or truncated")
+			}
+			encoded, _ := json.Marshal(compactor.calls[0].turns)
+			if strings.Contains(string(encoded), "private reasoning") || strings.Contains(string(encoded), "private attachment bytes") {
+				t.Fatal("compactor received reasoning or attachment bytes")
+			}
+			artifact, err := store.SessionTurnForegroundMemory(context.Background(), "user-1", response.SourceTurnID)
+			if err != nil || len(artifact.Candidates) != 1 {
+				t.Fatalf("artifact=%+v err=%v", artifact, err)
+			}
+			turns, err := store.RecentSessionTurns("user-1", "session", 1, 1)
+			if err != nil || len(turns) != 1 || turns[0].AssistantText != response.Response || len(turns[0].ToolHistory.Batches) != 1 || len(turns[0].ToolHistory.Batches[0].Calls) != 2 {
+				t.Fatalf("turns=%+v err=%v", turns, err)
+			}
+			encoded, _ = json.Marshal(turns)
+			for _, private := range []string{"private fetched evidence", "private-path", "private reasoning", "private attachment bytes", "Transient checkpoint."} {
+				if strings.Contains(string(encoded), private) {
+					t.Fatalf("persisted private evidence %q", private)
+				}
+			}
+		})
+	}
+}
+
+func TestProcessRetriesWhitespaceOnlyVisibleResponse(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(map[bool]string{false: "nonstream", true: "stream"}[stream], func(t *testing.T) {
+			chat := &fakeChatter{responses: []*llm.ChatResponse{
+				{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: " \n\t "}},
+				{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "visible answer"}},
+			}}
+			a, _ := newTestAgent(t, chat, nil, nil)
+			var callback func(StreamChunk)
+			if stream {
+				callback = func(StreamChunk) {}
+			}
+			response, err := processAgent(a, "whitespace", "discord", "session", "user-1", "User", "answer", nil, callback)
+			if err != nil || response.Response != "visible answer" || len(chat.requests) != 2 {
+				t.Fatalf("response=%+v err=%v requests=%d", response, err, len(chat.requests))
+			}
+			last := chat.requests[1]
+			if len(last.Tools) != 0 || last.Messages[len(last.Messages)-1].Content != emptyResponseRetryPrompt {
+				t.Fatalf("retry=%+v", last)
+			}
+		})
+	}
+}
+
+func TestForegroundToolEvidenceDoesNotUseHistoryBounds(t *testing.T) {
+	tc := llm.ToolCall{Function: llm.ToolFunction{Name: "test.lookup", Arguments: map[string]interface{}{"query": strings.Repeat("argument", 100)}}}
+	content := strings.Repeat("result", 100)
+	decision := governance.Decision{Allowed: true}
+	result := productiveResult(content)
+	live := foregroundToolCall(tc, decision, result, nil, content, time.Now())
+	policy := governance.HistoryPolicy{Mode: governance.HistoryFull, MaxArgumentBytes: 32, MaxResultRunes: 32}
+	stored := persistedToolCall(tc, policy, decision, result, nil, content, time.Now())
+	if !stored.ArgumentsTruncated || !stored.ResultTruncated {
+		t.Fatalf("stored history did not enforce bounds: %+v", stored)
+	}
+	if live.Arguments["query"] != tc.Function.Arguments["query"] || live.Result != content || live.ArgumentsTruncated || live.ResultTruncated {
+		t.Fatalf("live evidence inherited storage bounds: %+v", live)
+	}
 }

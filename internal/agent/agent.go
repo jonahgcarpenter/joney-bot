@@ -35,7 +35,7 @@ const (
 	emptyResponseRetryPrompt     = "Your previous completion contained no visible response. Answer the user's last request now using only visible response content."
 	emptyResponseFallback        = "I blanked on the actual answer. Try again and I'll take another shot."
 	imageSizeFallback            = "Your image is too big. Crop it and try again."
-	contextCompactionFallback    = "I ran out of context while working through that. Try splitting the task into smaller steps."
+	contextCompactionFallback    = "I cannot continue because I ran out of context. Any completed actions have not been undone. Try splitting the remaining task into smaller steps."
 	maxImageModelAttempts        = 5
 	imageRetryScale              = 0.75
 	imageInitialScaleMaxEdge     = 1920
@@ -483,17 +483,17 @@ func normalizeToolCallIDs(message *llm.ChatMessage, iteration int) {
 	}
 }
 
-func persistedToolCall(tc llm.ToolCall, policy governance.HistoryPolicy, decision governance.Decision, result governance.Result, execErr error, toolContent string, executedAt time.Time) usermemory.ToolHistoryCall {
+func foregroundToolCall(tc llm.ToolCall, decision governance.Decision, result governance.Result, execErr error, toolContent string, executedAt time.Time) usermemory.ToolHistoryCall {
 	call := usermemory.ToolHistoryCall{
-		Name:         strings.TrimSpace(tc.Function.Name),
-		HistoryMode:  string(policy.Mode),
-		Status:       "succeeded",
-		Outcome:      string(result.Outcome),
-		ReasonCode:   result.ReasonCode,
-		IsDegraded:   result.IsDegraded,
-		Result:       toolContent,
-		ExecutedAt:   executedAt.Format(time.RFC3339Nano),
-		SearchResult: policy.SearchResult,
+		Name:        strings.TrimSpace(tc.Function.Name),
+		HistoryMode: string(governance.HistoryFull),
+		Arguments:   tc.Function.Arguments,
+		Status:      "succeeded",
+		Outcome:     string(result.Outcome),
+		ReasonCode:  result.ReasonCode,
+		IsDegraded:  result.IsDegraded,
+		Result:      toolContent,
+		ExecutedAt:  executedAt.Format(time.RFC3339Nano),
 	}
 	if !decision.Allowed {
 		call.Status = "blocked"
@@ -504,6 +504,13 @@ func persistedToolCall(tc llm.ToolCall, policy governance.HistoryPolicy, decisio
 		call.Outcome = ""
 		call.ReasonCode = "execution_error"
 	}
+	return call
+}
+
+func persistedToolCall(tc llm.ToolCall, policy governance.HistoryPolicy, decision governance.Decision, result governance.Result, execErr error, toolContent string, executedAt time.Time) usermemory.ToolHistoryCall {
+	call := foregroundToolCall(tc, decision, result, execErr, toolContent, executedAt)
+	call.HistoryMode = string(policy.Mode)
+	call.SearchResult = policy.SearchResult
 	if policy.Mode == governance.HistoryMetadata {
 		call.Arguments = map[string]interface{}{}
 		call.Result = "Historical tool result omitted by policy."
@@ -868,6 +875,14 @@ func (a *Agent) Process(ctx context.Context, request Request) (*AgentResponse, e
 	toolGovernanceStopReason := ""
 	temporaryParserFallback := false
 	imageSizeFallbackUsed := false
+	useContextFallback := func() {
+		accumulatedContent.Reset()
+		accumulatedContent.WriteString(contextCompactionFallback)
+		lastResp = &llm.ChatResponse{Model: a.model, Message: llm.ChatMessage{Role: "assistant", Content: contextCompactionFallback}}
+		if streamCallback != nil {
+			streamCallback(StreamChunk{Type: ChunkContent, Text: contextCompactionFallback})
+		}
+	}
 
 	// Agentic loop: the model runs, may call tools, receives results, then runs again.
 	// The loop exits when the model stops issuing tool calls, the request context
@@ -880,17 +895,16 @@ func (a *Agent) Process(ctx context.Context, request Request) (*AgentResponse, e
 		catalog := a.toolsForRequest(ctx, request.Principal, toolExposure, toolGovernor)
 		req.Tools = catalog.Tools
 		req.ToolChoice = ""
-		preparedMessages, compactionStats, compactErr := foregroundCompaction.prepare(ctx, messages, req.Tools, false)
+		initialPressure := iteration == 1 && promptContext.EstimatedBefore*100 >= inputLimit*foregroundCompactionPercent
+		preparedMessages, compactionStats, compactErr := foregroundCompaction.prepare(ctx, messages, req.Tools, initialPressure)
 		if compactErr != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return nil, ctxErr
 			}
 			reqLog.Warn("agent.context.compaction_failed", "failed to compact active request context",
 				config.F("iteration", iteration), config.F("status", "degraded"), config.ErrorField(compactErr))
-			if streamCallback != nil {
-				streamCallback(StreamChunk{Type: ChunkContent, Text: contextCompactionFallback})
-			}
-			return &AgentResponse{Model: a.model, Response: contextCompactionFallback, Attachments: outputAttachments}, nil
+			useContextFallback()
+			goto finalize
 		}
 		messages = preparedMessages
 		req.Messages = messages
@@ -926,14 +940,15 @@ func (a *Agent) Process(ctx context.Context, request Request) (*AgentResponse, e
 					resp, err, imageRetriesExhausted = a.chatWithImageRetries(ctx, req, chatCallback, reqLog)
 				}
 			}
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
 			if err != nil {
 				reqLog.Error("agent.model.error", "model call failed", config.F("iteration", iteration), config.ErrorField(err))
 			}
 			if err != nil && llm.IsContextLengthExceededError(err) {
-				if streamCallback != nil {
-					streamCallback(StreamChunk{Type: ChunkContent, Text: contextCompactionFallback})
-				}
-				return &AgentResponse{Model: a.model, Response: contextCompactionFallback, Attachments: outputAttachments}, nil
+				useContextFallback()
+				goto finalize
 			}
 			if err == nil {
 				// Continue with the response recovered after compaction.
@@ -1128,12 +1143,8 @@ func (a *Agent) Process(ctx context.Context, request Request) (*AgentResponse, e
 			if historyPolicy.Mode != governance.HistoryNone {
 				historyBatch.Calls = append(historyBatch.Calls, persistedToolCall(tc, historyPolicy, decision, result, execErr, toolContent, time.Now().UTC()))
 			}
-			foregroundPolicy := historyPolicy
-			if foregroundPolicy.Mode == governance.HistoryNone {
-				foregroundPolicy.Mode = governance.HistoryMetadata
-				foregroundPolicy.SearchResult = false
-			}
-			foregroundBatch.Calls = append(foregroundBatch.Calls, persistedToolCall(tc, foregroundPolicy, decision, result, execErr, toolContent, time.Now().UTC()))
+			// Active checkpoints need exact model-visible evidence, not durable-history redaction.
+			foregroundBatch.Calls = append(foregroundBatch.Calls, foregroundToolCall(tc, decision, result, execErr, toolContent, time.Now().UTC()))
 			stats := toolGovernor.Stats(toolName)
 			reqLog.Debug("agent.tool.governance", "updated request-local tool governance",
 				config.F("tool_name", toolName),
@@ -1173,10 +1184,8 @@ func (a *Agent) Process(ctx context.Context, request Request) (*AgentResponse, e
 				return nil, ctxErr
 			}
 			reqLog.Warn("agent.context.compaction_failed", "failed to compact active request before final model call", config.F("status", "degraded"), config.ErrorField(compactErr))
-			if streamCallback != nil {
-				streamCallback(StreamChunk{Type: ChunkContent, Text: contextCompactionFallback})
-			}
-			return &AgentResponse{Model: a.model, Response: contextCompactionFallback, Attachments: outputAttachments}, nil
+			useContextFallback()
+			goto finalize
 		}
 		messages = preparedMessages
 		finalReq.Messages = messages
@@ -1209,10 +1218,8 @@ func (a *Agent) Process(ctx context.Context, request Request) (*AgentResponse, e
 			if err != nil {
 				reqLog.Error("agent.model.error", "model finish failed after tool failures", config.ErrorField(err))
 				if llm.IsContextLengthExceededError(err) {
-					resp = &llm.ChatResponse{Model: a.model, Message: llm.ChatMessage{Role: "assistant", Content: contextCompactionFallback}}
-					if streamCallback != nil {
-						streamCallback(StreamChunk{Type: ChunkContent, Text: contextCompactionFallback})
-					}
+					useContextFallback()
+					goto finalize
 				} else if imageRetriesExhausted {
 					imageSizeFallbackUsed = true
 					resp = &llm.ChatResponse{Model: a.model, Message: llm.ChatMessage{Role: "assistant", Content: imageSizeFallback}}
@@ -1235,6 +1242,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (*AgentResponse, e
 		)
 	}
 
+finalize:
 	// Extract the final response content. The LLM client already handles
 	// thinking-to-content promotion for non-streaming calls.
 	// For streaming, we tracked content separately via the callback above.
@@ -1248,6 +1256,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (*AgentResponse, e
 		finalThinking = lastResp.Message.Thinking
 	}
 	if strings.TrimSpace(finalContent) == "" {
+		finalContent = ""
 		retryMessages := append([]llm.ChatMessage{}, messages...)
 		retryMessages = append(retryMessages, llm.ChatMessage{Role: "user", Content: emptyResponseRetryPrompt})
 		preparedMessages, compactionStats, compactErr := foregroundCompaction.prepare(ctx, retryMessages, nil, false)
@@ -1364,7 +1373,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (*AgentResponse, e
 	}
 
 	responseStatus := "ok"
-	if temporaryParserFallback || imageSizeFallbackUsed || toolGovernanceStopReason != "" {
+	if temporaryParserFallback || imageSizeFallbackUsed || toolGovernanceStopReason != "" || finalContent == contextCompactionFallback {
 		responseStatus = "degraded"
 	}
 	reqLog.Info("agent.response.complete", "completed agent response",

@@ -117,14 +117,14 @@ func loadForegroundDeliveredDebt(ctx context.Context, store *usermemory.Store, u
 	var debt []usermemory.SessionTurn
 	boundary := afterTurnID
 	for {
-		page, err := store.DeliveredSessionTurnsAfter(ctx, userID, sessionID, generation, boundary, foregroundDebtPageSize)
+		page, err := store.AllDeliveredSessionTurnsAfter(ctx, userID, sessionID, generation, boundary, foregroundDebtPageSize)
 		if err != nil {
 			return nil, err
 		}
-		debt = append(debt, page.Turns...)
-		if len(page.Turns) < foregroundDebtPageSize {
+		debt = append(debt, page...)
+		if len(page) == 0 {
 			return debt, nil
 		}
-		boundary = page.Turns[len(page.Turns)-1].ID
+		boundary = page[len(page)-1].ID
 	}
 }

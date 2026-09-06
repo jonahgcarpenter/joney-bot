@@ -473,6 +473,37 @@ func TestServiceCampaignContinuesAfterFirstChunk(t *testing.T) {
 	}
 }
 
+func TestServiceCampaignTargetExceedsPlannerPage(t *testing.T) {
+	ctx := context.Background()
+	store := newSessionRuntimeStore(t)
+	profile, err := seedCompactionRuntimeTurns(t, store, "session-1", 1001)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newest, err := store.LatestDeliveredSessionPromptPressure(ctx, "user-1", "session-1", profile.Generation, promptPressureVersion("model", 100000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A pending gap still bounds the target even when later turns are delivered.
+	if _, err := store.AppendSessionTurnForGenerationResult(ctx, "session-1", "user-1", profile.Generation, "pending", "answer", nil, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := appendDeliveredPressureTurn(store, "session-1", "user-1", profile.Generation, "after gap", "answer", 70000, 100000); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(store, &fakeSummaryExtractor{}, "model", promptbudget.ContextBudget{PromptLimit: 100000}, config.NewLogger(config.LevelError))
+	if id, err := service.plan(ctx, "user-1", "session-1", profile.Generation); err != nil || id == 0 {
+		t.Fatalf("plan=%d err=%v", id, err)
+	}
+	job, err := store.ClaimSessionCompactionJob(ctx, service.owner, time.Minute, "model", SummaryGeneratorVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.TargetTurnID != newest.TurnID || job.CoveredThroughTurnID >= job.TargetTurnID {
+		t.Fatalf("job=%+v want target=%d", job, newest.TurnID)
+	}
+}
+
 func TestServiceRecordsUncompactableCompleteExchangeWithoutProviderCall(t *testing.T) {
 	store, db := newSessionRuntimeStoreWithDB(t)
 	profile, err := store.ResolveSessionProfile(context.Background(), "user-1", "session-1", time.Hour)

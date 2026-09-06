@@ -169,11 +169,7 @@ func (s *Service) plan(ctx context.Context, userID, sessionID string, generation
 		if pressure.Tokens*100 < pressure.Limit*compactionTriggerPercent {
 			return 0, nil
 		}
-		if available.TotalCount > len(available.Turns) {
-			target = available.Turns[len(available.Turns)-1].ID
-		} else {
-			target = available.Turns[len(available.Turns)-1].ID
-		}
+		target = available.NewestTurnID
 	}
 	coverCount := 0
 	for _, turn := range available.Turns {

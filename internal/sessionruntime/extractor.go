@@ -149,7 +149,7 @@ func (e *LLMExtractor) CompactForeground(ctx context.Context, previous *usermemo
 			count = foregroundChunkLimit
 		}
 		for count > 0 {
-			messages, err := compactionMessages(current, remaining[:count], "")
+			messages, err := compactionMessages(current, remaining[:count], "invalid_argument_shape")
 			if err != nil {
 				return usermemory.SummaryArtifact{}, err
 			}

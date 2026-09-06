@@ -157,10 +157,11 @@ type CompactionCandidateArtifact struct {
 }
 
 // SessionCompactionTurns gives a planner chronological delivered turns and the
-// total number available after the requested boundary.
+// unbounded count and newest eligible ID before the first pending delivery.
 type SessionCompactionTurns struct {
-	Turns      []SessionTurn
-	TotalCount int
+	Turns        []SessionTurn
+	TotalCount   int
+	NewestTurnID int64
 }
 
 // ActiveSessionScope identifies one currently active tenant session generation.
@@ -348,8 +349,28 @@ ORDER BY created_at DESC, id DESC LIMIT ?`, userID, sessionID, generation, after
 	return turns, rows.Err()
 }
 
-// DeliveredSessionTurnsAfter returns delivered turns in chronological order
-// after an exclusive turn boundary and reports the unbounded available count.
+// AllDeliveredSessionTurnsAfter pages delivered turns by ascending ID after an
+// exclusive boundary, skipping pending and failed deliveries without a barrier.
+// Advance the boundary to the last returned ID to load the next page.
+func (s *Store) AllDeliveredSessionTurnsAfter(ctx context.Context, userID, sessionID string, generation int, afterTurnID int64, limit int) ([]SessionTurn, error) {
+	if err := validateSessionScope(userID, sessionID, generation); err != nil {
+		return nil, err
+	}
+	if afterTurnID < 0 {
+		return nil, fmt.Errorf("delivered session turns: invalid boundary")
+	}
+	if err := s.requireActiveSessionGeneration(ctx, userID, sessionID, generation); err != nil {
+		return nil, err
+	}
+	if limit <= 0 || limit > 1000 {
+		limit = 100
+	}
+	return s.deliveredSessionTurnsRange(ctx, userID, sessionID, generation, afterTurnID, 0, limit, false)
+}
+
+// DeliveredSessionTurnsAfter returns chronological delivered turns after an
+// exclusive boundary, stopping before the first pending delivery. Count and
+// newest eligible ID are independent of the page limit.
 func (s *Store) DeliveredSessionTurnsAfter(ctx context.Context, userID, sessionID string, generation int, afterTurnID int64, limit int) (SessionCompactionTurns, error) {
 	if err := validateSessionScope(userID, sessionID, generation); err != nil {
 		return SessionCompactionTurns{}, err
@@ -365,14 +386,14 @@ func (s *Store) DeliveredSessionTurnsAfter(ctx context.Context, userID, sessionI
 	}
 	var result SessionCompactionTurns
 	err := s.sql.QueryRowContext(ctx, `
-SELECT COUNT(*) FROM session_turns
+SELECT COUNT(*), COALESCE(MAX(id), 0) FROM session_turns
 WHERE canonical_user_id = ? AND session_id = ? AND session_generation = ?
 	AND delivered_at IS NOT NULL AND delivery_failed_at IS NULL AND id > ?
 	AND id < COALESCE((
 		SELECT MIN(blocked.id) FROM session_turns blocked
 		WHERE blocked.canonical_user_id = ? AND blocked.session_id = ?
 			AND blocked.session_generation = ? AND blocked.id > ? AND blocked.delivered_at IS NULL AND blocked.delivery_failed_at IS NULL
-	), 9223372036854775807)`, userID, sessionID, generation, afterTurnID, userID, sessionID, generation, afterTurnID).Scan(&result.TotalCount)
+	), 9223372036854775807)`, userID, sessionID, generation, afterTurnID, userID, sessionID, generation, afterTurnID).Scan(&result.TotalCount, &result.NewestTurnID)
 	if err != nil {
 		return SessionCompactionTurns{}, fmt.Errorf("count delivered session turns: %w", err)
 	}
