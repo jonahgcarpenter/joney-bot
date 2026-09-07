@@ -30,8 +30,6 @@ Personal memories use two write paths after a response is delivered. The primary
 
 Use `/reset` to start a new conversation without deleting personal memory. Use `/memories` to list or forget personal memories. Administrators manage shared facts with the `/global-memory` commands.
 
-In Discord channels/threads and iMessage groups, transcript search can recall other participants' public prompts and Oswald's delivered final replies from the same chat. Only newly recorded group exchanges are shared; older transcripts are not backfilled. Ambient messages, hidden tool calls/results, and injected private context are not included. Each participant's source session must still be active and unexpired; resetting a session removes its source exchanges from search. DM search remains scoped to your own current session, and personal memory remains private. Group sharing does not turn conversation history or summaries into shared sessions.
-
 ## Usage
 
 ### Discord/iMessage Bot
