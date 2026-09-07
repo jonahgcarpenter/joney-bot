@@ -194,6 +194,9 @@ func TestRunLifecycle(t *testing.T) {
 			select {
 			case err = <-done:
 				completed = true
+				if want := active || mode == "gateway cancellation"; gw.outboundStopped != want {
+					t.Fatalf("outbound stopped=%t want=%t", gw.outboundStopped, want)
+				}
 			case <-time.After(10 * time.Second):
 				t.Fatal("Run did not return")
 			}
@@ -285,9 +288,12 @@ func assertStartupClosed(t *testing.T, name string, err error) {
 }
 
 type startupTestGateway struct {
-	start func(*broker.Broker) error
-	name  string
+	start           func(*broker.Broker) error
+	name            string
+	outboundStopped bool
 }
+
+func (g *startupTestGateway) StopOutbound() { g.outboundStopped = true }
 
 func (g *startupTestGateway) Name() string                 { return g.name }
 func (g *startupTestGateway) Start(b *broker.Broker) error { return g.start(b) }

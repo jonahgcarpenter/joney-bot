@@ -2,6 +2,7 @@ package discord
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -129,7 +130,7 @@ func (dg *Gateway) doMessageJSON(method, url string, payload interface{}) (creat
 		if body != nil {
 			requestBody = bytes.NewReader(body)
 		}
-		req, err := http.NewRequest(method, url, requestBody)
+		req, err := http.NewRequestWithContext(dg.restContext(), method, url, requestBody)
 		if err != nil {
 			return createMessageResponse{}, err
 		}
@@ -144,23 +145,24 @@ func (dg *Gateway) doMessageJSON(method, url string, payload interface{}) (creat
 		}
 		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 		_ = resp.Body.Close()
+		if resp.StatusCode == http.StatusTooManyRequests {
+			retryAfter := discordRetryAfter(resp, respBody)
+			if readErr == nil && dg.deliveryContext == nil && attempt == 0 && retryAfter > 0 && retryAfter <= 5*time.Second {
+				time.Sleep(retryAfter)
+				continue
+			}
+			return createMessageResponse{}, discordRateLimitError{retryAfter: retryAfter}
+		}
 		if readErr != nil {
 			return createMessageResponse{}, readErr
 		}
 
-		if resp.StatusCode == http.StatusTooManyRequests && attempt == 0 {
-			retryAfter := discordRetryAfter(resp, respBody)
-			if retryAfter > 0 && retryAfter <= 5*time.Second {
-				time.Sleep(retryAfter)
-				continue
-			}
-		}
-		if resp.StatusCode >= 500 && attempt == 0 {
+		if dg.deliveryContext == nil && resp.StatusCode >= 500 && attempt == 0 {
 			time.Sleep(100 * time.Millisecond)
 			continue
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return createMessageResponse{}, fmt.Errorf("discord %s request returned status %d", method, resp.StatusCode)
+			return createMessageResponse{}, discordHTTPError(resp.StatusCode)
 		}
 
 		var result createMessageResponse
@@ -174,17 +176,25 @@ func (dg *Gateway) doMessageJSON(method, url string, payload interface{}) (creat
 	return createMessageResponse{}, fmt.Errorf("discord %s request exhausted retries", method)
 }
 
+func (dg *Gateway) restContext() context.Context {
+	if dg.deliveryContext != nil {
+		return dg.deliveryContext
+	}
+	return context.Background()
+}
+
 func discordRetryAfter(resp *http.Response, body []byte) time.Duration {
 	if value := strings.TrimSpace(resp.Header.Get("Retry-After")); value != "" {
 		if seconds, err := strconv.ParseFloat(value, 64); err == nil && seconds > 0 {
-			return time.Duration(seconds * float64(time.Second))
+			// No delivery entry can outlive five minutes; cap before conversion to avoid overflow.
+			return time.Duration(min(seconds, 300) * float64(time.Second))
 		}
 	}
 	var payload struct {
 		RetryAfter float64 `json:"retry_after"`
 	}
 	if json.Unmarshal(body, &payload) == nil && payload.RetryAfter > 0 {
-		return time.Duration(payload.RetryAfter * float64(time.Second))
+		return time.Duration(min(payload.RetryAfter, 300) * float64(time.Second))
 	}
 	return 0
 }

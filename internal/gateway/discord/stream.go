@@ -3,6 +3,7 @@ package discord
 import (
 	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"strconv"
 	"strings"
@@ -136,7 +137,7 @@ func (s *discordResponseStream) run() {
 				continue
 			}
 			if event.response != nil {
-				event.result <- state.finish(event.response)
+				event.result <- s.responder.gateway.deliverFinal(&state, event.response)
 				return
 			}
 			if event.abort {
@@ -154,6 +155,9 @@ func (s *discordResponseStream) run() {
 }
 
 type discordStreamState struct {
+	rest            *Gateway
+	sendNonce       string
+	attachmentNonce string
 	stream          *discordResponseStream
 	active          strings.Builder
 	thinking        string
@@ -651,65 +655,59 @@ func truncateDiscordText(value string, limit int) string {
 	return result.String() + "..."
 }
 
-func (s *discordStreamState) finish(response *agent.Response) error {
+func (s *discordStreamState) finish(response *agent.Response) (resultErr error) {
+	if transientDelivery(s.attachmentErr) {
+		s.attachmentErr = nil
+	}
 	attachmentErr := s.deliverRemainingAttachments(response.Attachments)
+	if transientDelivery(attachmentErr) {
+		return attachmentErr
+	}
+	// A permanently failed attachment must not suppress the authoritative text.
+	// Put text errors first so a transient text failure still retries with its progress intact.
+	defer func() { resultErr = errors.Join(resultErr, attachmentErr) }()
 	responseText := response.Response
 	chunks := splitMessage(responseText, 2000)
 	log := s.stream.responder.gateway.log()
 	log.Debug("gateway.response.prepared", "prepared discord response", config.F("request_id", s.stream.responder.requestID), config.F("chunk_count", len(chunks)), config.F("response_chars", len(responseText)), config.F("model", response.Model))
 
-	if len(chunks) == 0 {
-		return errors.Join(attachmentErr, s.discardLifecycleMessages())
-	}
-
-	sentCount := 0
-	var lifecycleErr error
-	finalizedCount := min(len(s.messages), len(chunks))
-	var finalEditErr error
-	for i := 0; i < finalizedCount; i++ {
-		if s.messages[i].lastDisplay == chunks[i] {
-			continue
+	for i, chunk := range chunks {
+		if i == len(s.messages) {
+			s.messages = append(s.messages, discordLifecycleMessage{})
 		}
-		if err := s.stream.responder.gateway.editMessage(s.stream.responder.channelID, s.messages[i].id, chunks[i]); err != nil {
-			finalEditErr = fmt.Errorf("edit lifecycle message %d: %w", i+1, err)
-			break
-		}
-		s.messages[i].lastDisplay = chunks[i]
-	}
-	if finalEditErr != nil {
-		if deleteErr := s.discardLifecycleMessages(); deleteErr != nil {
-			lifecycleErr = fmt.Errorf("finalize discord lifecycle messages: %v; delete failed: %w", finalEditErr, deleteErr)
-		}
-		finalizedCount = 0
-		log.Debug("gateway.stream.final_edit_failed", "discord final lifecycle edit failed; sending authoritative response separately", config.F("request_id", s.stream.responder.requestID), config.F("status", "degraded"), config.ErrorField(finalEditErr))
-	} else {
-		for i := len(s.messages) - 1; i >= len(chunks); i-- {
-			if err := s.delete(s.messages[i].id, true); err != nil {
-				lifecycleErr = errors.Join(lifecycleErr, fmt.Errorf("delete surplus discord lifecycle message %d: %w", i+1, err))
+		message := &s.messages[i]
+		if message.id != "" && message.lastDisplay != chunk {
+			err := s.restGateway().editMessage(s.stream.responder.channelID, message.id, chunk)
+			if errors.Is(err, discordHTTPError(404)) {
+				if message.id == s.replyMessageID {
+					s.replyUsed, s.replyMessageID = false, ""
+				}
+				message.id = ""
+			} else if err != nil {
+				return err
 			}
 		}
-		if len(s.messages) > len(chunks) {
-			s.messages = s.messages[:len(chunks)]
+		if message.id == "" {
+			id, err := s.send(chunk)
+			if err != nil {
+				return err
+			}
+			message.id = id
 		}
-		for i := 0; i < finalizedCount; i++ {
-			s.remember(s.messages[i].id, chunks[i])
-			sentCount++
+		message.lastDisplay = chunk
+		s.remember(message.id, chunk)
+	}
+	for i := len(s.messages) - 1; i >= len(chunks); i-- {
+		if err := s.delete(s.messages[i].id, true); err != nil {
+			return err
 		}
+		s.messages = s.messages[:i]
 	}
-
-	for i, chunk := range chunks[finalizedCount:] {
-		messageID, err := s.send(chunk)
-		if err != nil {
-			log.Debug("gateway.send.failed", "failed to send discord response chunk", config.F("request_id", s.stream.responder.requestID), config.F("chunk_index", finalizedCount+i+1), config.ErrorField(err))
-			return errors.Join(attachmentErr, err)
-		}
-		s.remember(messageID, chunk)
-		sentCount++
+	status := "ok"
+	if attachmentErr != nil {
+		status = "degraded"
 	}
-	if err := errors.Join(attachmentErr, lifecycleErr); err != nil {
-		return err
-	}
-	log.Debug("gateway.response.sent", "sent discord response", config.F("request_id", s.stream.responder.requestID), config.F("chunk_count", sentCount), config.F("status", "ok"))
+	log.Debug("gateway.response.sent", "sent discord response", config.F("request_id", s.stream.responder.requestID), config.F("chunk_count", len(chunks)), config.F("status", status))
 	return nil
 }
 
@@ -739,37 +737,25 @@ func (s *discordStreamState) deliverAttachments(attachments []media.OutputAttach
 		if !s.replyUsed {
 			replyToID = s.stream.responder.replyToID
 		}
-		if _, err := s.stream.responder.gateway.sendCommandAttachment(s.stream.responder.channelID, commands.Result{Attachments: attachments[i : i+1]}, replyToID); err != nil {
+		if s.attachmentNonce == "" {
+			s.attachmentNonce = discordNonce()
+		}
+		if _, err := s.restGateway().sendAttachmentNonce(s.stream.responder.channelID, commands.Result{Attachments: attachments[i : i+1]}, replyToID, s.attachmentNonce); err != nil {
 			s.attachmentErr = err
 			return err
 		}
 		s.replyUsed = true
+		s.attachmentNonce = ""
 		s.attachmentCount++
 	}
 	return nil
 }
 
 func (s *discordStreamState) fail(text string) error {
-	var lifecycleErr error
-	if len(s.messages) > 0 {
-		if err := s.stream.responder.gateway.editMessage(s.stream.responder.channelID, s.messages[0].id, text); err == nil {
-			for i := len(s.messages) - 1; i > 0; i-- {
-				if deleteErr := s.delete(s.messages[i].id, true); deleteErr != nil {
-					lifecycleErr = errors.Join(lifecycleErr, fmt.Errorf("delete surplus discord lifecycle message %d: %w", i+1, deleteErr))
-				}
-			}
-			s.remember(s.messages[0].id, text)
-			return lifecycleErr
-		} else if deleteErr := s.discardLifecycleMessages(); deleteErr != nil {
-			lifecycleErr = fmt.Errorf("replace discord lifecycle message with error: edit failed: %v; delete failed: %w", err, deleteErr)
-		}
-	}
-	messageID, err := s.send(text)
-	if err != nil {
-		return err
-	}
-	s.remember(messageID, text)
-	return lifecycleErr
+	// This is a new text-only error response, not the final attachment inventory
+	// for the interrupted generation. Keep message/reply progress, not attachment failures.
+	s.attachmentCount, s.attachmentErr, s.attachmentNonce = 0, nil, ""
+	return s.stream.responder.gateway.deliverFinal(s, &agent.Response{Response: text})
 }
 
 func (s *discordStreamState) discardLifecycleMessages() error {
@@ -812,8 +798,25 @@ func (s *discordStreamState) send(content string) (string, error) {
 	if !s.replyUsed {
 		replyToID = s.stream.responder.replyToID
 	}
-	messageID, err := s.stream.responder.gateway.sendMessage(s.stream.responder.channelID, content, replyToID, s.stream.responder.gateway.log().With(config.F("request_id", s.stream.responder.requestID)))
+	if s.sendNonce == "" {
+		s.sendNonce = discordNonce()
+	}
+	dg := s.restGateway()
+	payload := map[string]any{"content": content, "nonce": s.sendNonce, "enforce_nonce": true}
+	if replyToID != "" {
+		payload["message_reference"] = map[string]string{"message_id": replyToID}
+	}
+	created, err := dg.doMessageJSON("POST", fmt.Sprintf("%s/channels/%s/messages", dg.apiBaseURL(), s.stream.responder.channelID), payload)
+	messageID := created.ID
+	if err == nil && messageID == "" {
+		err = io.ErrUnexpectedEOF
+	}
+	// An ambiguous preview create may have succeeded with different content.
+	if err == nil && s.previewDisabled {
+		err = dg.editMessage(s.stream.responder.channelID, messageID, content)
+	}
 	if err == nil {
+		s.sendNonce = ""
 		if !s.replyUsed {
 			s.replyMessageID = messageID
 		}
@@ -823,12 +826,22 @@ func (s *discordStreamState) send(content string) (string, error) {
 }
 
 func (s *discordStreamState) delete(messageID string, releaseReply bool) error {
-	err := s.stream.responder.gateway.deleteMessage(s.stream.responder.channelID, messageID)
+	err := s.restGateway().deleteMessage(s.stream.responder.channelID, messageID)
+	if errors.Is(err, discordHTTPError(404)) {
+		err = nil
+	}
 	if err == nil && releaseReply && messageID == s.replyMessageID {
 		s.replyUsed = false
 		s.replyMessageID = ""
 	}
 	return err
+}
+
+func (s *discordStreamState) restGateway() *Gateway {
+	if s.rest != nil {
+		return s.rest
+	}
+	return s.stream.responder.gateway
 }
 
 func (s *discordStreamState) remember(messageID, text string) {

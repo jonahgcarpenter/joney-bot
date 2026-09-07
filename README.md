@@ -34,6 +34,8 @@ You can correct memories naturally in conversation, inspect what Oswald remember
 
 ### Discord/iMessage Bot
 
+Discord retries transient outbound failures in a bounded in-memory FIFO: at most 20 pending responses and 80 MiB of attachments, with a five-minute deadline per response including time waiting behind others. Later final responses wait behind the backlog while agent generation can continue. Successful chunks are retained rather than resent; failed previews are not replayed. Pending delivery is lost on restart, and already delivered partial messages are not rolled back when recovery expires. Discord's recent-nonce deduplication reduces duplicates after ambiguous sends but is not an exactly-once guarantee.
+
 In DMs or direct chats, send any message:
 
 ```text
