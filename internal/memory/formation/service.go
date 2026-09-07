@@ -85,7 +85,9 @@ func (s *Service) Enqueue(ctx context.Context, userID string, source memory.Form
 	}
 	_, _, agentSaveErr := s.store.EnqueueAgentSaveFormationJob(ctx, source, userID)
 	var backgroundErr error
-	if _, ok := s.extractor.(PatternExtractor); ok {
+	if _, ok := s.extractor.(AssessmentExtractor); ok {
+		_, _, backgroundErr = s.store.EnqueueAssessmentFormationJob(ctx, source, userID)
+	} else if _, ok := s.extractor.(PatternExtractor); ok {
 		_, _, backgroundErr = s.store.EnqueuePatternFormationJob(ctx, source, userID)
 	} else {
 		_, backgroundErr = s.store.EnqueueFormationJob(ctx, source, userID)
@@ -130,7 +132,9 @@ func (s *Service) reconcile(ctx context.Context) {
 	}
 	var count int64
 	var err error
-	if _, ok := s.extractor.(PatternExtractor); ok {
+	if _, ok := s.extractor.(AssessmentExtractor); ok {
+		count, err = s.store.ReconcileAssessmentFormationJobs(ctx, s.model)
+	} else if _, ok := s.extractor.(PatternExtractor); ok {
 		count, err = s.store.ReconcilePatternFormationJobs(ctx, s.model)
 	} else {
 		count, err = s.store.ReconcileFormationJobs(ctx, s.model, memory.FormationExtractorVersion)
@@ -255,6 +259,9 @@ func (s *Service) process(ctx context.Context, job *memory.FormationJob) error {
 	if job.Purpose == memory.FormationPurposeAgentSave {
 		return s.processAgentSave(ctx, job, turn)
 	}
+	if job.ExtractorVersion == memory.AssessmentExtractorVersion {
+		return s.processAssessment(ctx, job)
+	}
 	if job.ExtractorVersion == memory.PatternExtractorVersion {
 		return s.processPattern(ctx, job)
 	}
@@ -289,9 +296,12 @@ func (s *Service) process(ctx context.Context, job *memory.FormationJob) error {
 		}
 		defer release()
 		renewedJob := *job
+		var jobMu sync.Mutex
 		submissionReserved := false
 		err = lease.Run(extractParent, s.jobLease,
 			func(renewCtx context.Context) error {
+				jobMu.Lock()
+				defer jobMu.Unlock()
 				leaseUntil, renewErr := s.store.RenewFormationJobLease(renewCtx, renewedJob, s.jobLease)
 				if renewErr == nil {
 					renewedJob.LeaseUntil = leaseUntil
@@ -305,13 +315,16 @@ func (s *Service) process(ctx context.Context, job *memory.FormationJob) error {
 				extractCtx := requestctx.WithMetadata(workCtx, meta)
 				extractCtx = requestctx.WithPrincipal(extractCtx, identity.Principal{CanonicalUserID: job.UserID})
 				var extractErr error
+				jobMu.Lock()
 				count, reserveErr := s.store.ReserveFormationModelSubmission(workCtx, renewedJob)
 				if reserveErr != nil {
+					jobMu.Unlock()
 					return reserveErr
 				}
 				renewedJob.ModelSubmissionCount = count
+				jobMu.Unlock()
 				submissionReserved = true
-				extracted, extractErr = s.extractor.Extract(extractCtx, turn, renewedJob.CorrectiveErrorCode)
+				extracted, extractErr = s.extractor.Extract(extractCtx, turn, job.CorrectiveErrorCode)
 				return extractErr
 			},
 		)
@@ -413,8 +426,11 @@ func (s *Service) processPattern(ctx context.Context, job *memory.FormationJob) 
 		}
 		defer release()
 		renewedJob := *job
+		var jobMu sync.Mutex
 		submissionReserved := false
 		err = lease.Run(extractParent, s.jobLease, func(renewCtx context.Context) error {
+			jobMu.Lock()
+			defer jobMu.Unlock()
 			leaseUntil, renewErr := s.store.RenewFormationJobLease(renewCtx, renewedJob, s.jobLease)
 			if renewErr == nil {
 				renewedJob.LeaseUntil = leaseUntil
@@ -427,13 +443,16 @@ func (s *Service) processPattern(ctx context.Context, job *memory.FormationJob) 
 			extractCtx := requestctx.WithMetadata(workCtx, meta)
 			extractCtx = requestctx.WithPrincipal(extractCtx, identity.Principal{CanonicalUserID: job.UserID})
 			var extractErr error
+			jobMu.Lock()
 			count, reserveErr := s.store.ReserveFormationModelSubmission(workCtx, renewedJob)
 			if reserveErr != nil {
+				jobMu.Unlock()
 				return reserveErr
 			}
 			renewedJob.ModelSubmissionCount = count
+			jobMu.Unlock()
 			submissionReserved = true
-			extracted, extractErr = patternExtractor.ExtractPatterns(extractCtx, window.Turns, renewedJob.CorrectiveErrorCode)
+			extracted, extractErr = patternExtractor.ExtractPatterns(extractCtx, window.Turns, job.CorrectiveErrorCode)
 			return extractErr
 		})
 		*job = renewedJob
@@ -570,6 +589,14 @@ func (s *Service) processAgentSave(ctx context.Context, job *memory.FormationJob
 	artifact, err := s.store.SessionTurnForegroundMemory(ctx, job.UserID, job.TurnID)
 	if err != nil {
 		return errors.Join(errPermanentExtraction, err)
+	}
+	if artifact.Version == 3 {
+		result, err := s.store.ApplyForegroundAssessment(ctx, *job, artifact)
+		if err != nil {
+			return err
+		}
+		s.resultFields = append(assessmentResultFields(result), config.F("input_turn_count", 1), config.F("candidate_count", len(artifact.Candidates)))
+		return nil
 	}
 	proposed, approved, rejected, invalid, published, existing := 0, 0, 0, 0, 0, 0
 	for index, candidate := range artifact.Candidates {

@@ -22,3 +22,8 @@ type Extractor interface {
 type PatternExtractor interface {
 	ExtractPatterns(context.Context, []memory.StoredSessionTurn, string) (memory.MemoryPatternBatch, error)
 }
+
+// AssessmentExtractor assesses one delivered anchor against its frozen evidence.
+type AssessmentExtractor interface {
+	ExtractAssessment(context.Context, memory.AssessmentInput, string) (memory.AssessmentBatch, error)
+}

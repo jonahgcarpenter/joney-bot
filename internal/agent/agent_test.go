@@ -156,7 +156,7 @@ func TestProcessPersistsStagedForegroundMemoryWithFinalTurn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(artifact.Candidates) != 1 || artifact.Candidates[0].ClaimValue != "dark mode" {
+	if len(artifact.Candidates) != 1 || artifact.Candidates[0].ClaimValue != "dark_mode" {
 		t.Fatalf("artifact=%+v", artifact)
 	}
 	turns, err := store.RecentSessionTurns("user-1", "session", 1, 1)

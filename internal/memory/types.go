@@ -44,8 +44,11 @@ type CandidateProposal struct {
 	TargetMemoryID       int64
 	SupersedesStatement  string
 	RequireCorroboration bool
-	FormationJob         *FormationJob
-	CompactionJob        *SessionCompactionJob
+	// Cardinality is set only by the versioned assessment path; empty retains legacy slot rules.
+	Cardinality   string
+	Correction    bool
+	FormationJob  *FormationJob
+	CompactionJob *SessionCompactionJob
 }
 
 // FormationCandidate is a persisted memory proposal.
@@ -106,6 +109,10 @@ type StoredSessionTurn struct {
 	SessionID  string
 	Generation int
 	UserText   string
+	// CreatedAt is the trusted source timestamp, not extraction time.
+	CreatedAt time.Time
+	// AssistantResponse is interpretation context only, never memory evidence.
+	AssistantResponse string
 }
 
 const (
@@ -241,7 +248,12 @@ var ValidCategories = []string{"identity", "communication_preferences", "durable
 
 // MemoryEntry is a single short-term or long-term user memory.
 type MemoryEntry struct {
-	ID              int64
+	Context          string
+	RetiredAt        time.Time
+	RetirementReason string
+	ID               int64
+	// Revision is the canonical optimistic-concurrency token, not an index revision.
+	Revision        int64
 	UserID          string
 	Scope           string
 	Category        string

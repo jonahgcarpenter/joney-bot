@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -10,6 +11,117 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory/policy"
 	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
 )
+
+func TestForegroundMemoryV3AssessmentContract(t *testing.T) {
+	base := ForegroundMemoryCandidate{Statement: "The user wants pancakes now.", Evidence: "I want pancakes now.", Category: policy.CategoryNotes, ClaimSlot: "notes.desire", ClaimValue: "pancakes", EvidenceType: "direct_statement", Provenance: policy.ProvenanceUserStatement, Confidence: .99, Retention: "observation", Intent: "automatic", Context: "Current breakfast only.", Cardinality: "multiple"}
+	if err := ValidateForegroundMemoryCandidate(&base, false); err != nil || base.TTLDays != 7 {
+		t.Fatalf("observation defaults: %+v %v", base, err)
+	}
+	out, err := base.Evaluate(base.Evidence)
+	if err != nil || out.Approval != policy.ApprovalProposed || out.TTL != 7*24*time.Hour || out.Confidence != .99 {
+		t.Fatalf("observation became active: %+v %v", out, err)
+	}
+	encoded, err := EncodeForegroundMemory("user", []requestctx.StagedMemoryCandidate{{CanonicalUserID: "user", Candidate: out, Retention: base.Retention, Intent: base.Intent, Context: base.Context, Cardinality: base.Cardinality, TTLDays: base.TTLDays, TargetMemoryID: 17, ExpectedRevision: 4}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact, err := DecodeForegroundMemory(encoded)
+	if err != nil || artifact.Version != 3 || artifact.Candidates[0].Context != base.Context || artifact.Candidates[0].ExpectedRevision != 4 || artifact.Candidates[0].TTLDays != 7 || artifact.Candidates[0].Cardinality != "multiple" {
+		t.Fatalf("round trip: %+v %v", artifact, err)
+	}
+	for name, mutate := range map[string]func(*ForegroundMemoryCandidate){
+		"ttl":              func(c *ForegroundMemoryCandidate) { c.TTLDays = 31 },
+		"durable ttl":      func(c *ForegroundMemoryCandidate) { c.Retention = "durable" },
+		"context":          func(c *ForegroundMemoryCandidate) { c.Context = strings.Repeat("x", 501) },
+		"control":          func(c *ForegroundMemoryCandidate) { c.Context = "\x00" },
+		"cardinality":      func(c *ForegroundMemoryCandidate) { c.Cardinality = "many" },
+		"retire no target": func(c *ForegroundMemoryCandidate) { c.Intent = "retire" },
+		"correction no revision": func(c *ForegroundMemoryCandidate) {
+			c.Intent = "correction"
+			c.Retention = "durable"
+			c.TTLDays = 0
+			c.TargetMemoryID = 17
+		},
+		"correction statement only": func(c *ForegroundMemoryCandidate) {
+			c.Intent = "correction"
+			c.Retention = "durable"
+			c.TTLDays = 0
+			c.SupersedesStatement = "Old fact"
+		},
+		"retire inference": func(c *ForegroundMemoryCandidate) {
+			c.Intent = "retire"
+			c.TargetMemoryID = 2
+			c.EvidenceType = "model_inference"
+			c.Provenance = policy.ProvenanceModelInference
+		},
+		"revision no target": func(c *ForegroundMemoryCandidate) { c.ExpectedRevision = 2 },
+		"source refs":        func(c *ForegroundMemoryCandidate) { c.SourceObservationIDs = []int64{1} },
+		"unknown category":   func(c *ForegroundMemoryCandidate) { c.Category = "unknown"; c.ClaimSlot = "unknown.fact" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := base
+			mutate(&c)
+			if err := ValidateForegroundMemoryCandidate(&c, false); err == nil {
+				t.Fatal("invalid candidate accepted")
+			}
+		})
+	}
+	for _, ids := range [][]int64{{1, 2, 3, 4, 5}, {1, 1}, {0}, {-1}, {1, 2, 3, 4, 5, 6}} {
+		c := base
+		c.SourceObservationIDs = ids
+		err := ValidateForegroundMemoryCandidate(&c, true)
+		if (err == nil) != (len(ids) == 5) {
+			t.Fatalf("source refs %v: %v", ids, err)
+		}
+	}
+	c := base
+	c.Intent, c.TargetMemoryID, c.ExpectedRevision, c.Confidence = "retire", 17, 4, .4
+	out, err = c.Evaluate(c.Evidence)
+	if err != nil || out.Approval != policy.ApprovalProposed || out.Confidence != .4 {
+		t.Fatalf("retirement: %+v %v", out, err)
+	}
+	c.Intent, c.Retention, c.TTLDays = "correction", "durable", 0
+	out, err = c.Evaluate(c.Evidence)
+	if err != nil || out.Approval != policy.ApprovalApproved || out.Confidence != .4 {
+		t.Fatalf("correction imposed confidence increase: %+v %v", out, err)
+	}
+}
+
+func TestForegroundMemoryV2RetainsOriginalSemantics(t *testing.T) {
+	c := ForegroundMemoryCandidate{Statement: "The user uses C++.", Evidence: "I use C++.", Category: policy.CategoryEnvironment, ClaimSlot: "environment.language", ClaimValue: "C++", EvidenceType: "direct_statement", Provenance: policy.ProvenanceUserStatement, Confidence: .9}
+	for _, version := range []int{2, 3} {
+		raw, err := json.Marshal(ForegroundMemoryArtifact{Version: version, Candidates: []ForegroundMemoryCandidate{c}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		artifact, err := DecodeForegroundMemory(string(raw))
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, err := artifact.Candidates[0].Evaluate("I use C++.")
+		want := "c++"
+		if version == 2 {
+			want = "c"
+		}
+		if err != nil || out.ClaimValue != want {
+			t.Fatalf("version %d: %+v %v", version, out, err)
+		}
+		out, err = artifact.Candidates[0].Evaluate("I  use C++.")
+		if err != nil || (out.Approval == policy.ApprovalApproved) != (version == 2) {
+			t.Fatalf("version %d evidence semantics: %+v %v", version, out, err)
+		}
+	}
+	for _, field := range []string{`"retention":""`, `"context":null`, `"expected_revision":0`, `"source_observation_ids":[]`} {
+		raw, err := json.Marshal(ForegroundMemoryArtifact{Version: 2, Candidates: []ForegroundMemoryCandidate{c}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		encoded := strings.Replace(string(raw), `"statement":`, field+`,"statement":`, 1)
+		if _, err := DecodeForegroundMemory(encoded); err == nil {
+			t.Fatalf("v2 accepted new field %s", field)
+		}
+	}
+}
 
 func TestForegroundMemoryRoundTripOnSessionTurn(t *testing.T) {
 	store := newTestStore(t.TempDir()+"/oswald.db", config.NewLogger(config.LevelError))

@@ -29,6 +29,13 @@ type foregroundMemorySaveItem struct {
 	EvidenceType       string  `json:"evidence_type"`
 	Confidence         float64 `json:"confidence"`
 	ReinforcesMemoryID int64   `json:"reinforces_memory_id,omitempty"`
+	TargetMemoryID     int64   `json:"target_memory_id,omitempty"`
+	Retention          string  `json:"retention,omitempty"`
+	Intent             string  `json:"intent,omitempty"`
+	Context            string  `json:"context,omitempty"`
+	TTLDays            int     `json:"ttl_days,omitempty"`
+	Cardinality        string  `json:"cardinality,omitempty"`
+	ExpectedRevision   int64   `json:"expected_revision,omitempty"`
 }
 
 type foregroundMemorySaveResult struct {
@@ -68,6 +75,9 @@ func authenticatedPrincipal(ctx context.Context, toolName string) (identity.Prin
 // Durable publication is intentionally left to the successful-delivery path.
 func NewSaveHandler(log *config.Logger) func(ctx context.Context, args map[string]interface{}) (governance.Result, error) {
 	return func(ctx context.Context, args map[string]interface{}) (governance.Result, error) {
+		if err := ctx.Err(); err != nil {
+			return governance.Result{}, err
+		}
 		principal, err := authenticatedPrincipal(ctx, toolnames.UserMemorySave)
 		if err != nil {
 			return governance.Result{}, err
@@ -94,13 +104,33 @@ func NewSaveHandler(log *config.Logger) func(ctx context.Context, args map[strin
 			if item.EvidenceType == "model_inference" {
 				provenance = policy.ProvenanceModelInference
 			}
-			output, err := policy.Evaluate(policy.CandidateInput{
-				SourceUserText: sourceText, Statement: item.Statement, Evidence: item.Evidence,
-				Provenance: provenance, ClaimedAuthority: memory.AuthorityForForegroundProvenance(provenance),
-				Sensitivity: policy.SensitivityLow, Mode: policy.ModeAgentSave, Scope: policy.ScopeLongTerm,
-				Category: policy.Category(item.Category), Context: policy.ContextDirectAssertion,
-				Confidence: item.Confidence, Importance: 3, ClaimSlot: item.ClaimSlot, ClaimValue: item.ClaimValue,
-			})
+			targetID := item.TargetMemoryID
+			if targetID == 0 {
+				targetID = item.ReinforcesMemoryID
+			}
+			candidate := memory.ForegroundMemoryCandidate{
+				Statement: item.Statement, Evidence: item.Evidence, Category: policy.Category(item.Category),
+				ClaimSlot: item.ClaimSlot, ClaimValue: item.ClaimValue, EvidenceType: item.EvidenceType,
+				Provenance: provenance, Confidence: item.Confidence, TargetMemoryID: targetID,
+				SupersedesStatement: item.Supersedes, Retention: item.Retention, Intent: item.Intent,
+				Context: item.Context, TTLDays: item.TTLDays, Cardinality: item.Cardinality, ExpectedRevision: item.ExpectedRevision,
+			}
+			if err := memory.ValidateForegroundMemoryCandidate(&candidate, false); err != nil {
+				rejected++
+				hasRetryable = true
+				result := foregroundMemorySaveItemResult{Index: index, Status: "rejected", ReasonCode: "invalid_candidate", Reason: "check retention, intent, target, revision, TTL, cardinality and category-compatible claim identity", Retryable: true}
+				if (candidate.Intent == "correction" || candidate.Intent == "retire") && (candidate.TargetMemoryID <= 0 || candidate.ExpectedRevision <= 0) {
+					result.ReasonCode = "missing_target_revision"
+					result.Reason = "Use user_memory_search or user_memory_list to obtain the target memory ID, revision and claim slot, then retry with target_memory_id and expected_revision. Never invent them; supersedes alone is insufficient."
+				}
+				if !policy.AssessmentClaimSlotCompatible(candidate.Category, candidate.ClaimSlot) {
+					result.ReasonCode = "invalid_claim_slot"
+					result.AllowedClaimSlotPrefixes = foregroundClaimSlotPrefixes(item.Category)
+				}
+				results = append(results, result)
+				continue
+			}
+			output, err := candidate.Evaluate(sourceText)
 			if err != nil {
 				rejected++
 				hasRetryable = true
@@ -118,14 +148,23 @@ func NewSaveHandler(log *config.Logger) func(ctx context.Context, args map[strin
 				results = append(results, result)
 				continue
 			}
-			staged = append(staged, requestctx.StagedMemoryCandidate{CanonicalUserID: principal.CanonicalUserID, Candidate: output, TargetMemoryID: item.ReinforcesMemoryID, SupersedesStatement: strings.TrimSpace(item.Supersedes)})
+			staged = append(staged, requestctx.StagedMemoryCandidate{CanonicalUserID: principal.CanonicalUserID, Candidate: output, TargetMemoryID: targetID, SupersedesStatement: strings.TrimSpace(item.Supersedes), Retention: candidate.Retention, Intent: candidate.Intent, Context: candidate.Context, TTLDays: candidate.TTLDays, Cardinality: candidate.Cardinality, ExpectedRevision: candidate.ExpectedRevision})
 			status := "staged_active"
 			if output.Approval == policy.ApprovalProposed {
 				status = "staged_candidate"
 			}
+			if candidate.Retention == "observation" {
+				status = "staged_observation"
+			}
+			if candidate.Intent == "retire" {
+				status = "staged_retirement"
+			}
 			results = append(results, foregroundMemorySaveItemResult{Index: index, Status: status, ReasonCode: "pending_delivery", Reason: output.Reason})
 		}
 		if len(staged) > 0 {
+			if err := ctx.Err(); err != nil {
+				return governance.Result{}, err
+			}
 			if err := collector.Stage(staged); err != nil {
 				return governance.Result{}, fmt.Errorf("%s: %w", toolnames.UserMemorySave, err)
 			}
@@ -133,7 +172,7 @@ func NewSaveHandler(log *config.Logger) func(ctx context.Context, args map[strin
 		response := foregroundMemorySaveResult{
 			Status: map[bool]string{true: "staged", false: "rejected"}[len(staged) > 0], Publication: "pending_successful_delivery",
 			StagedCount: len(staged), RejectedCount: rejected, Results: results,
-			Message: "Accepted memories are staged and will be published only after successful response delivery. Rejected memories were not staged.",
+			Message: "Assessments are pending successful response delivery and durable reconciliation, not a promise of active memory. Observations are temporary evidence, not active durable facts. Rejected items were not staged.",
 		}
 		if hasRetryable {
 			response.RequiredAction = "Retry only retryable rejected items once using corrected arguments grounded in the same current user message. Do not resubmit staged items or claim rejected items were saved."
@@ -148,7 +187,7 @@ func NewSaveHandler(log *config.Logger) func(ctx context.Context, args map[strin
 		if len(staged) == 0 {
 			outcome = governance.OutcomeUnproductive
 		}
-		requestLog(log, ctx).Debug("agent.tool.user_memory.staged", "staged foreground user memory", config.F("tool_name", toolnames.UserMemorySave), config.F("staged_count", len(staged)), config.F("rejected_count", rejected))
+		requestLog(log, ctx).Info("agent.tool.user_memory.staged", "staged foreground user memory", config.F("tool_name", toolnames.UserMemorySave), config.F("staged_count", len(staged)), config.F("rejected_count", rejected))
 		return governance.Result{Content: string(content), Outcome: outcome, ReasonCode: map[bool]string{true: "", false: "policy_rejected"}[len(staged) > 0]}, nil
 	}
 }
@@ -220,7 +259,7 @@ func decodeForegroundMemorySave(args map[string]interface{}) ([]foregroundMemory
 			return nil, fmt.Errorf("memories[%d] must be an object", i)
 		}
 		var fields map[string]json.RawMessage
-		if err := json.Unmarshal(encoded, &fields); err != nil || fields == nil || (len(fields) != 8 && len(fields) != 9) {
+		if err := json.Unmarshal(encoded, &fields); err != nil || fields == nil {
 			return nil, fmt.Errorf("memories[%d] must contain exactly the required fields", i)
 		}
 		for _, field := range []string{"statement", "evidence", "category", "claim_slot", "claim_value", "supersedes", "evidence_type", "confidence"} {
@@ -233,6 +272,9 @@ func decodeForegroundMemorySave(args map[string]interface{}) ([]foregroundMemory
 		var item foregroundMemorySaveItem
 		if err := decoder.Decode(&item); err != nil {
 			return nil, fmt.Errorf("memories[%d]: %w", i, err)
+		}
+		if item.TargetMemoryID < 0 || item.ExpectedRevision < 0 || (item.TargetMemoryID != 0 && item.ReinforcesMemoryID != 0 && item.TargetMemoryID != item.ReinforcesMemoryID) {
+			return nil, fmt.Errorf("memories[%d] contains invalid or conflicting target IDs", i)
 		}
 		if err := decoder.Decode(&struct{}{}); err != io.EOF {
 			return nil, fmt.Errorf("memories[%d] has trailing JSON", i)

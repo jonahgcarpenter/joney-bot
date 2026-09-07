@@ -17,6 +17,7 @@ type SessionCleanupCounts struct {
 	FormationJobsDeleted    int64
 	SessionSummariesDeleted int64
 	CompactionJobsRetired   int64 `json:"CompactionJobsDeleted"`
+	ObservationsDeleted     int64 `json:"ObservationsDeleted,omitempty"`
 }
 
 func (s *Store) cleanupExpiredSessions(ctx context.Context, now time.Time, policy config.RetentionPolicy) (counts SessionCleanupCounts, err error) {
@@ -41,6 +42,9 @@ func (s *Store) cleanupExpiredSessions(ctx context.Context, now time.Time, polic
 		return counts, fmt.Errorf("begin expired session cleanup: %w", err)
 	}
 	defer tx.Rollback() // nolint:errcheck
+	if counts.ObservationsDeleted, err = execAffected(ctx, tx, `DELETE FROM memory_observations WHERE id IN (SELECT id FROM memory_observations WHERE julianday(expires_at)<=julianday(?) ORDER BY expires_at,id LIMIT ?)`, nowText, batch); err != nil {
+		return counts, err
+	}
 	expiringMemories, err := memoryIDsTx(tx, `SELECT id FROM memory_entries WHERE status = 'active' AND expires_at IS NOT NULL AND expires_at <= ? ORDER BY expires_at, id LIMIT ?`, nowText, batch)
 	if err != nil {
 		return counts, fmt.Errorf("enumerate expiring memories: %w", err)

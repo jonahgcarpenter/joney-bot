@@ -202,6 +202,7 @@ func run(ctx context.Context, cfg *config.Config, rootLog *config.Logger, stdout
 	if err != nil {
 		return &Error{Event: "app.memory_extractor.init_failed", Message: "failed to initialize background user-memory extractor", Cause: err}
 	}
+	formationExtractor.SetAssessmentBudget(budget)
 	formationService := formation.NewService(userMemStore, formationExtractor, cfg.LLMGatewayModel, rootLog)
 	cleanup.formation = formationService.Stop
 	compactor, err := compaction.NewLLMCompactor(llmClient, cfg.LLMGatewayModel, budget.ResponseReserve, rootLog)

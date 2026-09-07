@@ -145,18 +145,22 @@ func (s *Store) activeEntries(userID, scope, category string) ([]MemoryEntry, er
 }
 
 const memoryEntrySelect = `SELECT memory.id, memory.canonical_user_id, memory.scope, memory.category, memory.statement,
-	COALESCE((SELECT candidate.evidence FROM memory_candidates candidate WHERE candidate.canonical_user_id = memory.canonical_user_id AND candidate.published_memory_id = memory.id AND candidate.evidence != '' ORDER BY CASE candidate.provenance_type WHEN 'user_statement' THEN 3 WHEN 'model_inference' THEN 2 ELSE 1 END DESC, candidate.confidence DESC, candidate.id LIMIT 1), ''),
+	COALESCE((SELECT candidate.evidence FROM memory_candidates candidate WHERE candidate.canonical_user_id = memory.canonical_user_id AND candidate.published_memory_id = memory.id AND candidate.evidence != '' AND (memory.assessed_source_turn_id=0 OR candidate.source_turn_id=memory.assessed_source_turn_id) ORDER BY CASE candidate.provenance_type WHEN 'user_statement' THEN 3 WHEN 'model_inference' THEN 2 ELSE 1 END DESC, candidate.confidence DESC, candidate.id LIMIT 1), ''),
 	memory.confidence, memory.importance, memory.status, memory.created_at, memory.updated_at, memory.expires_at, COALESCE(memory.supersedes_id, 0),
 	memory.provenance_type, memory.sensitivity, memory.claim_slot, memory.claim_value,
-	(SELECT COUNT(*) FROM memory_candidates candidate WHERE candidate.canonical_user_id = memory.canonical_user_id AND candidate.published_memory_id = memory.id)
+	(SELECT COUNT(*) FROM memory_candidates candidate WHERE candidate.canonical_user_id = memory.canonical_user_id AND candidate.published_memory_id = memory.id), memory.revision,memory.assessment_context,memory.retired_at,memory.retirement_reason
 FROM memory_entries memory`
 
 func scanMemoryEntry(rows interface{ Scan(...any) error }) (MemoryEntry, error) {
 	var entry MemoryEntry
 	var created, updated string
 	var expires sql.NullString
-	if err := rows.Scan(&entry.ID, &entry.UserID, &entry.Scope, &entry.Category, &entry.Statement, &entry.Evidence, &entry.Confidence, &entry.Importance, &entry.Status, &created, &updated, &expires, &entry.SupersedesID, &entry.ProvenanceType, &entry.Sensitivity, &entry.ClaimSlot, &entry.ClaimValue, &entry.EvidenceCount); err != nil {
+	var retired sql.NullString
+	if err := rows.Scan(&entry.ID, &entry.UserID, &entry.Scope, &entry.Category, &entry.Statement, &entry.Evidence, &entry.Confidence, &entry.Importance, &entry.Status, &created, &updated, &expires, &entry.SupersedesID, &entry.ProvenanceType, &entry.Sensitivity, &entry.ClaimSlot, &entry.ClaimValue, &entry.EvidenceCount, &entry.Revision, &entry.Context, &retired, &entry.RetirementReason); err != nil {
 		return MemoryEntry{}, fmt.Errorf("failed to scan memory entry: %w", err)
+	}
+	if retired.Valid {
+		entry.RetiredAt = parseTime(retired.String)
 	}
 	entry.CreatedAt = parseTime(created)
 	entry.UpdatedAt = parseTime(updated)
@@ -172,7 +176,7 @@ func scanMemoryEntryWithDistance(rows interface{ Scan(...any) error }) (MemoryEn
 	var created, updated string
 	var expires sql.NullString
 	var distance float64
-	if err := rows.Scan(&entry.ID, &entry.UserID, &entry.Scope, &entry.Category, &entry.Statement, &entry.Evidence, &entry.Confidence, &entry.Importance, &entry.Status, &created, &updated, &expires, &entry.SupersedesID, &entry.ProvenanceType, &entry.Sensitivity, &entry.ClaimSlot, &entry.ClaimValue, &entry.EvidenceCount, &distance); err != nil {
+	if err := rows.Scan(&entry.ID, &entry.UserID, &entry.Scope, &entry.Category, &entry.Statement, &entry.Evidence, &entry.Confidence, &entry.Importance, &entry.Status, &created, &updated, &expires, &entry.SupersedesID, &entry.ProvenanceType, &entry.Sensitivity, &entry.ClaimSlot, &entry.ClaimValue, &entry.EvidenceCount, &entry.Revision, &entry.Context, &distance); err != nil {
 		return MemoryEntry{}, 0, fmt.Errorf("failed to scan memory vector result: %w", err)
 	}
 	entry.CreatedAt = parseTime(created)

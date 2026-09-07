@@ -198,7 +198,11 @@ type renderedRecallProvenance struct {
 }
 
 type renderedRecallEntry struct {
+	Context             string                     `json:"assessment_context,omitempty"`
 	ID                  int64                      `json:"id"`
+	Revision            int64                      `json:"revision"`
+	ClaimSlot           string                     `json:"claim_slot"`
+	ClaimValue          string                     `json:"claim_value"`
 	Scope               string                     `json:"scope"`
 	Category            string                     `json:"category"`
 	Topic               string                     `json:"topic,omitempty"`
@@ -240,6 +244,10 @@ func RenderDurableMemoryRecall(results []RecallResult, maxChars int) string {
 			EpistemicStatus:     recallEpistemicStatus(result.Authority, result.Entry.Confidence),
 			Sensitivity:         normalizeProfileToken(result.Entry.Sensitivity),
 			EvidenceCount:       result.Entry.EvidenceCount,
+			Context:             normalizeProfileText(result.Entry.Context),
+			Revision:            result.Entry.Revision,
+			ClaimSlot:           result.Entry.ClaimSlot,
+			ClaimValue:          result.Entry.ClaimValue,
 		}
 		if record.Text == "" {
 			continue
@@ -351,6 +359,17 @@ func diversifyRecallResults(ranked []RecallResult) []RecallResult {
 func nearDuplicateRecallText(a, b string) bool {
 	aTokens := recallTokens(a)
 	bTokens := recallTokens(b)
+	// Negation and punctuation-bearing identifiers can reverse a claim's meaning
+	// even when almost all its ordinary words overlap.
+	for _, pair := range [][2]map[string]struct{}{{aTokens, bTokens}, {bTokens, aTokens}} {
+		for token := range pair[0] {
+			if token == "not" || token == "no" || token == "never" || token == "without" || token == "cannot" || token == "neither" || token == "nor" || strings.ContainsAny(token, "+#.-'") {
+				if _, ok := pair[1][token]; !ok {
+					return false
+				}
+			}
+		}
+	}
 	if len(aTokens) == 0 || len(bTokens) == 0 {
 		return duplicateRecallText(a) == duplicateRecallText(b)
 	}
@@ -365,22 +384,26 @@ func nearDuplicateRecallText(a, b string) bool {
 }
 
 func duplicateRecallText(value string) string {
-	var b strings.Builder
-	for _, r := range strings.ToLower(normalizeProfileText(value)) {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) {
-			b.WriteRune(r)
-		}
+	tokens := recallTokens(value)
+	ordered := make([]string, 0, len(tokens))
+	for token := range tokens {
+		ordered = append(ordered, token)
 	}
-	return b.String()
+	sort.Strings(ordered)
+	return strings.Join(ordered, " ")
 }
 
 func recallTokens(value string) map[string]struct{} {
+	value = strings.ReplaceAll(value, "\u2019", "'")
 	fields := strings.FieldsFunc(strings.ToLower(normalizeProfileText(value)), func(r rune) bool {
-		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r) && !strings.ContainsRune("+#.-'", r)
 	})
 	tokens := make(map[string]struct{}, len(fields))
 	for _, field := range fields {
-		tokens[field] = struct{}{}
+		field = strings.Trim(field, ".-'")
+		if field != "" {
+			tokens[field] = struct{}{}
+		}
 	}
 	return tokens
 }

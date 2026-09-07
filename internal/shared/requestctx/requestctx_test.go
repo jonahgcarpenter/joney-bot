@@ -72,6 +72,25 @@ func TestToolExposerRoundTrip(t *testing.T) {
 	}
 }
 
+func TestMemoryStageRetainsAssessmentAndRejectsBackgroundReferences(t *testing.T) {
+	c := StagedMemoryCandidate{CanonicalUserID: "user", Candidate: policy.CandidateOutput{Approval: policy.ApprovalProposed}, Retention: "observation", Intent: "correction", Context: "task only", TTLDays: 7, Cardinality: "multiple", TargetMemoryID: 17, ExpectedRevision: 4}
+	collector := NewMemoryStageCollector()
+	if err := collector.Stage([]StagedMemoryCandidate{c}); err != nil {
+		t.Fatal(err)
+	}
+	got := collector.Candidates()[0]
+	if got.Retention != c.Retention || got.Intent != c.Intent || got.Context != c.Context || got.TTLDays != 7 || got.Cardinality != "multiple" || got.ExpectedRevision != 4 {
+		t.Fatalf("lost assessment: %+v", got)
+	}
+	c.SourceObservationIDs = []int64{1}
+	if err := collector.Stage([]StagedMemoryCandidate{c}); err == nil {
+		t.Fatal("background references accepted in foreground stage")
+	}
+	if len(collector.Candidates()) != 1 {
+		t.Fatal("rejected batch mutated stage")
+	}
+}
+
 func TestInputImagesUseDefensiveCopies(t *testing.T) {
 	images := []InputImage{{MIMEType: "image/png", Data: "encoded", Source: "source"}}
 	ctx := WithInputImages(context.Background(), images)

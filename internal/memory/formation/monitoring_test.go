@@ -78,7 +78,9 @@ func TestFormationCompletionLogRequiresCommittedJob(t *testing.T) {
 				}
 				if record["event"] == "user_memory.formation.job.complete" {
 					completed++
-					if record["record_kind"] != "summary" || record["is_replay"] != (purpose == "replay") || record["input_turn_count"] != float64(1) {
+					// Local v3 results do not expose a replay flag; zero committed counts
+					// alone cannot distinguish replay from an unchanged assessment.
+					if record["record_kind"] != "summary" || purpose != "agent_save" && record["is_replay"] != (purpose == "replay") || record["input_turn_count"] != float64(1) {
 						t.Fatalf("missing result metrics: %s", line)
 					}
 					wantCandidates := float64(0)

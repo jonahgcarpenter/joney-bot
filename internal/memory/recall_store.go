@@ -7,7 +7,6 @@ import (
 	"sort"
 	"strings"
 	"time"
-	"unicode"
 )
 
 const (
@@ -151,7 +150,7 @@ SELECT e.id, e.canonical_user_id, e.scope, e.category, e.statement, COALESCE((SE
 	e.updated_at, e.expires_at, COALESCE(e.supersedes_id, 0),
 	e.provenance_type, e.sensitivity,
 	e.claim_slot, e.claim_value, (SELECT COUNT(*) FROM memory_candidates candidate WHERE candidate.canonical_user_id = e.canonical_user_id AND candidate.published_memory_id = e.id),
-	bm25(` + table + `, 0.0, 1.0, 0.5)
+	e.revision, e.assessment_context, bm25(` + table + `, 0.0, 1.0, 0.5)
 FROM ` + table + `
 JOIN memory_entries e ON e.id = ` + table + `.rowid
 WHERE ` + table + ` MATCH ?
@@ -182,10 +181,9 @@ WHERE ` + table + ` MATCH ?
 		if err != nil {
 			return nil, err
 		}
-		rank := len(candidates)
 		candidates = append(candidates, RecallCandidate{
 			Entry: entry, Source: RecallSourceLexical,
-			Relevance: lexicalRecallCoverage(entry.Statement+" "+entry.Evidence, terms) / (1 + 0.05*float64(rank)),
+			Relevance: max(lexicalRecallCoverage(entry.Statement, terms), lexicalRecallCoverage(entry.Evidence, terms)),
 			Authority: recallAuthorityForEntry(entry),
 		})
 	}
@@ -211,7 +209,7 @@ SELECT e.id, e.canonical_user_id, e.scope, e.category, e.statement, COALESCE((SE
 	e.confidence, e.importance, e.status, e.created_at,
 	e.updated_at, e.expires_at, COALESCE(e.supersedes_id, 0),
 	e.provenance_type, e.sensitivity,
-	e.claim_slot, e.claim_value, (SELECT COUNT(*) FROM memory_candidates candidate WHERE candidate.canonical_user_id = e.canonical_user_id AND candidate.published_memory_id = e.id), v.distance
+	e.claim_slot, e.claim_value, (SELECT COUNT(*) FROM memory_candidates candidate WHERE candidate.canonical_user_id = e.canonical_user_id AND candidate.published_memory_id = e.id), e.revision, e.assessment_context, v.distance
 FROM ` + revision.TableName + ` v
 JOIN memory_entries e ON e.id = v.rowid
 WHERE v.embedding MATCH ? AND v.k = ?
@@ -255,12 +253,10 @@ WHERE v.embedding MATCH ? AND v.k = ?
 }
 
 func ftsRecallTerms(value string) []string {
-	fields := strings.FieldsFunc(value, func(r rune) bool {
-		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
-	})
+	fields := recallTokens(value)
 	terms := make([]string, 0, len(fields))
 	seen := make(map[string]struct{}, len(fields))
-	for _, field := range fields {
+	for field := range fields {
 		field = strings.ToLower(strings.TrimSpace(field))
 		if field == "" || recallStopWords[field] {
 			continue
@@ -271,6 +267,7 @@ func ftsRecallTerms(value string) []string {
 		seen[field] = struct{}{}
 		terms = append(terms, field)
 	}
+	sort.Strings(terms)
 	return terms
 }
 
@@ -305,11 +302,11 @@ func lexicalRecallCoverage(text string, terms []string) float64 {
 	if len(terms) == 0 {
 		return 0
 	}
-	tokens := make(map[string]struct{})
-	for _, token := range strings.FieldsFunc(strings.ToLower(text), func(r rune) bool {
-		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
-	}) {
-		tokens[token] = struct{}{}
+	tokens := recallTokens(text)
+	for token := range tokens {
+		if recallStopWords[token] {
+			delete(tokens, token)
+		}
 	}
 	matched := 0
 	for _, term := range terms {
@@ -317,7 +314,16 @@ func lexicalRecallCoverage(text string, terms []string) float64 {
 			matched++
 		}
 	}
-	return float64(matched) / float64(len(terms))
+	queryCoverage := float64(matched) / float64(len(terms))
+	// Long conversational queries dilute a concise fact. Allow strong fact-side
+	// coverage, but never boost a lone distractor term or weak partial overlap.
+	if matched >= 2 && len(tokens) > 0 {
+		factCoverage := float64(matched) / float64(len(tokens))
+		if factCoverage >= 0.75 {
+			return max(queryCoverage, 0.85*factCoverage)
+		}
+	}
+	return queryCoverage
 }
 
 var recallStopWords = map[string]bool{

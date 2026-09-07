@@ -15,20 +15,20 @@ It combines tools, private long-term memory, conversation continuity, image unde
 - Remember your preferences, projects, and other useful details across conversations
 - Keep continuity in long conversations and search earlier conversation details
 - Link your accounts so your personal memory follows you across gateways
-- List or forget your stored personal memories
+- Inspect stated and inferred memories, correct them conversationally, or prevent a claim from being learned again
 
 ## Memory
 
 Oswald uses four memory layers:
 
-- **Soul:** Operator-managed personality and policy loaded from `data/memory/soul/soul.md`.
-- **Global memory:** Administrator-curated facts about Oswald that the model searches when relevant.
-- **Personal memory:** Private preferences, projects, relationships, and other durable facts shared across your linked accounts.
-- **Conversation memory:** Recent exchanges and summaries that preserve continuity within the current conversation.
+- **Soul:** Operator-managed personality and policy.
+- **Global memory:** Administrator-curated facts about Oswald.
+- **Personal memory:** Private facts and preferences shared across your linked accounts.
+- **Conversation memory:** Recent exchanges and summaries for continuity.
 
-Personal memories use two write paths after a response is delivered. The primary agent can stage a small number of model-assessed observations from the current user message, while a private background extractor looks for repeated implicit patterns across delivered turns. Structurally grounded observations are retained, confidence controls activation and later reinforcement, and all recalled or profile memory remains lower-authority user context.
+Oswald learns automatically after successful response delivery, distinguishing lasting facts from temporary observations and keeping inferred memories explicitly qualified. Observations normally expire after seven days, while relevant evidence across conversations can support durable memories.
 
-Use `/reset` to start a new conversation without deleting personal memory. Use `/memories` to list or forget personal memories. Administrators manage shared facts with the `/global-memory` commands.
+You can correct memories naturally in conversation, inspect what Oswald remembers, or delete and suppress unwanted memories. Memory controls are listed in the Commands section below. Stored memories never grant permissions or tool access.
 
 ## Usage
 
@@ -86,7 +86,9 @@ In Discord servers and iMessage groups, slash commands must mention Oswald
 | `/disconnect`  | `/disconnect [account_number]`                                                            | List or disconnect linked accounts. The final account cannot be removed.                                   |
 | `/reset`       | `/reset`                                                                                  | Clear the current conversation history and load the latest user profile.                                   |
 | `/stop`        | `/stop`                                                                                   | Stop the currently running response in this conversation without removing queued prompts.                  |
-| `/memories`    | `/memories list`, `/memories forget <id\|all>`                                            | List or forget your personal memories.                                                                     |
+| `/memories`    | `/memories list`, `/memories observations`                                               | Inspect durable memories or temporary observations.                                                        |
+| `/memories`    | `/memories forget <id\|all>`                                                            | Delete one durable memory or clear learned/conversation data.                                              |
+| `/memories`    | `/memories suppress <id>`, `/memories suppressions`, `/memories unsuppress <rule-id>`      | Manage persistent do-not-relearn rules for identified claims.                                               |
 | `/mcp servers` | `/mcp servers`                                                                            | List your user-scoped MCP servers and their model-visible descriptions.                                    |
 | `/mcp add`     | `/mcp add <name> <https-url> [auth-bearer=<token>] [header:<name>=<value>] <description>` | Add or update a server with a required description. URLs and headers, but not descriptions, are encrypted. |
 | `/mcp remove`  | `/mcp remove <name>`                                                                      | Remove one of your MCP servers.                                                                            |

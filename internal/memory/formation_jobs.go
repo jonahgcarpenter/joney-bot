@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -20,6 +21,15 @@ func (s *Store) EnqueueFormationJob(ctx context.Context, source FormationSource,
 // EnqueuePatternFormationJob freezes the newest eligible window ending at the
 // anchor turn. A one-turn session intentionally produces no background job.
 func (s *Store) EnqueuePatternFormationJob(ctx context.Context, source FormationSource, userID string) (int64, bool, error) {
+	return s.enqueueWindowFormationJob(ctx, source, userID, PatternExtractorVersion)
+}
+
+// EnqueueAssessmentFormationJob freezes source membership independently of later observations.
+func (s *Store) EnqueueAssessmentFormationJob(ctx context.Context, source FormationSource, userID string) (int64, bool, error) {
+	return s.enqueueWindowFormationJob(ctx, source, userID, AssessmentExtractorVersion)
+}
+
+func (s *Store) enqueueWindowFormationJob(ctx context.Context, source FormationSource, userID, version string) (int64, bool, error) {
 	if source.TurnID <= 0 || strings.TrimSpace(userID) == "" {
 		return 0, false, fmt.Errorf("pattern job requires tenant and anchor turn")
 	}
@@ -45,7 +55,23 @@ func (s *Store) EnqueuePatternFormationJob(ctx context.Context, source Formation
 	if source.RequestID != storedRequestID || source.SessionID != anchor.SessionID || source.SessionGeneration != anchor.Generation {
 		return 0, false, fmt.Errorf("pattern anchor scope does not match persisted turn")
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT id FROM session_turns WHERE canonical_user_id = ? AND session_id = ? AND session_generation = ? AND id <= ? AND delivered_at IS NOT NULL AND delivery_failed_at IS NULL ORDER BY id DESC LIMIT ?`, userID, anchor.SessionID, anchor.Generation, source.TurnID, MaxPatternContextTurns)
+	if version == AssessmentExtractorVersion {
+		var applied bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM memory_assessment_receipts WHERE canonical_user_id=? AND source_turn_id=? AND purpose='background_pattern')`, userID, anchor.ID).Scan(&applied); err != nil {
+			return 0, false, err
+		}
+		if applied {
+			return 0, false, nil
+		}
+		var eligible bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM session_turns t JOIN sessions s ON s.canonical_user_id=t.canonical_user_id AND s.session_id=t.session_id AND s.generation=t.session_generation WHERE t.id=? AND t.canonical_user_id=? AND s.is_active=1 AND julianday(s.expires_at)>julianday('now') AND (t.expires_at IS NULL OR julianday(t.expires_at)>julianday('now')))`, anchor.ID, userID).Scan(&eligible); err != nil {
+			return 0, false, err
+		}
+		if !eligible {
+			return 0, false, nil
+		}
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT id FROM session_turns WHERE canonical_user_id = ? AND session_id = ? AND session_generation = ? AND id <= ? AND delivered_at IS NOT NULL AND delivery_failed_at IS NULL AND (? != 'assessment-v1' OR expires_at IS NULL OR julianday(expires_at)>julianday('now')) ORDER BY id DESC LIMIT ?`, userID, anchor.SessionID, anchor.Generation, source.TurnID, version, MaxPatternContextTurns)
 	if err != nil {
 		return 0, false, err
 	}
@@ -64,7 +90,7 @@ func (s *Store) EnqueuePatternFormationJob(ctx context.Context, source Formation
 	if err := rows.Close(); err != nil {
 		return 0, false, err
 	}
-	if len(reversed) < 2 {
+	if len(reversed) < 2 && version == PatternExtractorVersion {
 		return 0, false, nil
 	}
 	turnIDs := make([]int64, len(reversed))
@@ -72,18 +98,24 @@ func (s *Store) EnqueuePatternFormationJob(ctx context.Context, source Formation
 		turnIDs[len(reversed)-1-i] = reversed[i]
 	}
 	payload, err := MarshalPatternContext(turnIDs)
+	if version == AssessmentExtractorVersion {
+		payload, err = json.Marshal(struct {
+			Version int     `json:"version"`
+			TurnIDs []int64 `json:"turn_ids"`
+		}{1, turnIDs})
+	}
 	if err != nil {
 		return 0, false, err
 	}
-	source.ExtractorVersion = PatternExtractorVersion
-	key := fmt.Sprintf("turn:%d:%s", source.TurnID, PatternExtractorVersion)
+	source.ExtractorVersion = version
+	key := fmt.Sprintf("turn:%d:%s", source.TurnID, version)
 	now := formatTime(time.Now().UTC())
 	result, err := tx.ExecContext(ctx, `
 INSERT INTO durable_jobs (job_kind, canonical_user_id, idempotency_key, state, source_request_id,
 	source_session_id, source_session_generation, source_turn_id, extraction_model,
 	extractor_version, formation_purpose, artifact_payload, available_at, updated_at)
 VALUES ('memory_formation', ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(job_kind, idempotency_key) DO NOTHING`, userID, key, source.RequestID, anchor.SessionID, anchor.Generation, source.TurnID, source.Model, PatternExtractorVersion, FormationPurposeBackgroundPattern, string(payload), now, now)
+ON CONFLICT(job_kind, idempotency_key) DO NOTHING`, userID, key, source.RequestID, anchor.SessionID, anchor.Generation, source.TurnID, source.Model, version, FormationPurposeBackgroundPattern, string(payload), now, now)
 	if err != nil {
 		return 0, false, fmt.Errorf("enqueue pattern formation job: %w", err)
 	}
@@ -229,6 +261,15 @@ WHERE turns.created_at >= ? AND turns.delivered_at IS NOT NULL AND turns.deliver
 // ReconcilePatternFormationJobs deterministically rebuilds missing frozen
 // windows for recently delivered anchor turns.
 func (s *Store) ReconcilePatternFormationJobs(ctx context.Context, model string) (int64, error) {
+	return s.reconcileWindowFormationJobs(ctx, model, PatternExtractorVersion)
+}
+
+// ReconcileAssessmentFormationJobs backfills recent delivered assessment anchors.
+func (s *Store) ReconcileAssessmentFormationJobs(ctx context.Context, model string) (int64, error) {
+	return s.reconcileWindowFormationJobs(ctx, model, AssessmentExtractorVersion)
+}
+
+func (s *Store) reconcileWindowFormationJobs(ctx context.Context, model, version string) (int64, error) {
 	rows, err := s.sql.QueryContext(ctx, `SELECT canonical_user_id, source_request_id, session_id, session_generation, id FROM session_turns WHERE created_at >= ? AND delivered_at IS NOT NULL AND delivery_failed_at IS NULL ORDER BY id`, formatTime(time.Now().UTC().Add(-24*time.Hour)))
 	if err != nil {
 		return 0, err
@@ -254,7 +295,7 @@ func (s *Store) ReconcilePatternFormationJobs(ctx context.Context, model string)
 	}
 	var count int64
 	for _, item := range sources {
-		_, created, err := s.EnqueuePatternFormationJob(ctx, item.source, item.userID)
+		_, created, err := s.enqueueWindowFormationJob(ctx, item.source, item.userID, version)
 		if err != nil {
 			return count, err
 		}
