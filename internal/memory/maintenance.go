@@ -11,25 +11,27 @@ import (
 
 // MaintenanceCounts contains aggregate results from one sweep.
 type MaintenanceCounts struct {
-	Phase                   string               `json:"-"`
-	SessionCleanup          SessionCleanupCounts `json:"session_cleanup"`
-	PendingDeliveriesFailed int64                `json:"pending_deliveries_failed"`
-	CandidatesDeleted       int64                `json:"candidates_deleted"`
-	FormationJobsDeleted    int64                `json:"formation_jobs_deleted"`
-	CompactionJobsDeleted   int64                `json:"compaction_jobs_deleted"`
-	DerivedIndexJobsDeleted int64                `json:"derived_index_jobs_deleted"`
-	ChallengesDeleted       int64                `json:"account_challenges_deleted"`
-	IndexRowsDeleted        int64                `json:"index_rows_deleted"`
-	IndexRevisionsDegraded  int64                `json:"index_revisions_degraded"`
-	IndexTablesDropped      int64                `json:"index_tables_dropped"`
-	OptimizeRun             bool                 `json:"optimize_run"`
+	Phase                      string               `json:"-"`
+	SessionCleanup             SessionCleanupCounts `json:"session_cleanup"`
+	PendingDeliveriesFailed    int64                `json:"pending_deliveries_failed"`
+	CandidatesDeleted          int64                `json:"candidates_deleted"`
+	AssessmentReceiptsDeleted  int64                `json:"assessment_receipts_deleted"`
+	ObservationReceiptsDeleted int64                `json:"observation_receipts_deleted"`
+	FormationJobsDeleted       int64                `json:"formation_jobs_deleted"`
+	CompactionJobsDeleted      int64                `json:"compaction_jobs_deleted"`
+	DerivedIndexJobsDeleted    int64                `json:"derived_index_jobs_deleted"`
+	ChallengesDeleted          int64                `json:"account_challenges_deleted"`
+	IndexRowsDeleted           int64                `json:"index_rows_deleted"`
+	IndexRevisionsDegraded     int64                `json:"index_revisions_degraded"`
+	IndexTablesDropped         int64                `json:"index_tables_dropped"`
+	OptimizeRun                bool                 `json:"optimize_run"`
 }
 
 // Changed returns the number of rows changed, excluding database hygiene.
 func (c MaintenanceCounts) Changed() int64 {
 	s := c.SessionCleanup
-	return s.SessionTurnsDeleted + s.SessionsDeactivated + s.MemoryEntriesExpired + s.CandidatesDeleted + s.FormationJobsDeleted + s.SessionSummariesDeleted + s.CompactionJobsRetired +
-		c.PendingDeliveriesFailed + c.CandidatesDeleted + c.FormationJobsDeleted + c.CompactionJobsDeleted + c.DerivedIndexJobsDeleted + c.ChallengesDeleted + c.IndexRowsDeleted + c.IndexRevisionsDegraded + c.IndexTablesDropped
+	return s.SessionTurnsDeleted + s.SessionsDeactivated + s.MemoryEntriesExpired + s.CandidatesDeleted + s.FormationJobsDeleted + s.SessionSummariesDeleted + s.CompactionJobsRetired + s.ObservationsDeleted +
+		c.PendingDeliveriesFailed + c.CandidatesDeleted + c.FormationJobsDeleted + c.CompactionJobsDeleted + c.DerivedIndexJobsDeleted + c.ChallengesDeleted + c.IndexRowsDeleted + c.IndexRevisionsDegraded + c.IndexTablesDropped + c.AssessmentReceiptsDeleted + c.ObservationReceiptsDeleted
 }
 
 // MaintenanceSweep performs one bounded, serialized retention and consistency pass.
@@ -70,6 +72,20 @@ func (s *Store) MaintenanceSweep(ctx context.Context, now time.Time, policy conf
 	deadCutoff := formatTime(now.Add(-policy.DeadJobRetention))
 	successCutoff := formatTime(now.Add(-policy.SuccessfulJobRetention))
 	pendingCutoff := formatTime(now.Add(-policy.PendingDeliveryTimeout))
+	// Missing turn IDs are irreversible. Keep receipts while retained observations or live frozen jobs still depend on them.
+	for _, table := range []string{"memory_assessment_receipts", "memory_observation_receipts"} {
+		n, deleteErr := execAffected(ctx, tx, `DELETE FROM `+table+` WHERE rowid IN (SELECT r.rowid FROM `+table+` r WHERE NOT EXISTS(SELECT 1 FROM session_turns t WHERE t.id=r.source_turn_id)
+AND NOT EXISTS(SELECT 1 FROM memory_observations o WHERE o.canonical_user_id=r.canonical_user_id AND o.source_turn_id=r.source_turn_id AND julianday(o.expires_at)>julianday(?))
+AND NOT EXISTS(SELECT 1 FROM memory_assessment_inputs i JOIN durable_jobs j ON j.id=i.job_id WHERE i.canonical_user_id=r.canonical_user_id AND j.state IN ('queued','running','retry') AND EXISTS(SELECT 1 FROM json_each(i.payload,'$.Observations') o WHERE json_extract(o.value,'$.SourceTurnID')=r.source_turn_id)) ORDER BY r.rowid LIMIT ?)`, nowText, batch)
+		if deleteErr != nil {
+			return counts, deleteErr
+		}
+		if table == "memory_assessment_receipts" {
+			counts.AssessmentReceiptsDeleted = n
+		} else {
+			counts.ObservationReceiptsDeleted = n
+		}
+	}
 
 	if counts.PendingDeliveriesFailed, err = execAffected(ctx, tx, `WITH due AS (SELECT id FROM session_turns WHERE delivered_at IS NULL AND delivery_failed_at IS NULL AND julianday(created_at) <= julianday(?) ORDER BY julianday(created_at), id LIMIT ?) UPDATE session_turns SET delivery_failed_at = ? WHERE id IN (SELECT id FROM due)`, pendingCutoff, batch, nowText); err != nil {
 		return counts, err

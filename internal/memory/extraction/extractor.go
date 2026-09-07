@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/compaction/budget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory/policy"
@@ -63,11 +64,12 @@ func invalidOutput(code string) error {
 
 // LLMExtractor uses the configured gateway model with one private forced schema per extraction mode.
 type LLMExtractor struct {
-	client      llm.Chatter
-	model       string
-	tool        llm.Tool
-	patternTool llm.Tool
-	maxTokens   int
+	client           llm.Chatter
+	model            string
+	tool             llm.Tool
+	patternTool      llm.Tool
+	maxTokens        int
+	assessmentBudget budget.ContextBudget
 }
 
 func userMemorySaveTool() llm.Tool {
@@ -130,7 +132,7 @@ func NewLLMExtractor(client llm.Chatter, model string, maxTokens int) (*LLMExtra
 		return nil, fmt.Errorf("invalid private memory extraction schema: %w", err)
 	}
 	patternTool := userMemoryPatternTool()
-	return &LLMExtractor{client: client, model: model, tool: tool, patternTool: patternTool, maxTokens: maxTokens}, nil
+	return &LLMExtractor{client: client, model: model, tool: tool, patternTool: patternTool, maxTokens: maxTokens, assessmentBudget: budget.NewContextBudget(0, maxTokens)}, nil
 }
 
 func userMemoryPatternTool() llm.Tool {

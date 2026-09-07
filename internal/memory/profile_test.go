@@ -122,13 +122,13 @@ func TestCompileProfileInferenceEligibilityUsesCategoryConfidenceThresholds(t *t
 	}
 }
 
-func TestProfileRendererVersionV3(t *testing.T) {
-	if ProfileRendererVersion != "tenant-profile-v3" {
+func TestProfileRendererVersionV4(t *testing.T) {
+	if ProfileRendererVersion != "tenant-profile-v4" {
 		t.Fatalf("unexpected renderer version: %q", ProfileRendererVersion)
 	}
 	compiled := CompileProfile("speaker", nil, time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC))
-	if !strings.Contains(compiled.Content, `renderer="tenant-profile-v3"`) || !strings.Contains(compiled.Content, "lower") {
-		t.Fatalf("unexpected v3 profile header: %q", compiled.Content)
+	if !strings.Contains(compiled.Content, `renderer="tenant-profile-v4"`) || !strings.Contains(compiled.Content, "lower") {
+		t.Fatalf("unexpected v4 profile header: %q", compiled.Content)
 	}
 }
 
@@ -149,11 +149,11 @@ func TestActiveSessionKeepsOldRendererUntilReset(t *testing.T) {
 	}
 	frozen, err := store.ResolveSessionProfile(context.Background(), "user", "session", time.Hour)
 	if err != nil || frozen.Version != initial.Version || frozen.Content != frozenContent {
-		t.Fatalf("active session adopted v3: initial=%+v frozen=%+v err=%v", initial, frozen, err)
+		t.Fatalf("active session adopted v4: initial=%+v frozen=%+v err=%v", initial, frozen, err)
 	}
 	reset, err := store.ResetSession(context.Background(), "user", "session", time.Hour)
-	if err != nil || reset.Version <= frozen.Version || !strings.Contains(reset.Content, `renderer="tenant-profile-v3"`) {
-		t.Fatalf("reset session did not adopt v3: frozen=%+v reset=%+v err=%v", frozen, reset, err)
+	if err != nil || reset.Version <= frozen.Version || !strings.Contains(reset.Content, `renderer="tenant-profile-v4"`) {
+		t.Fatalf("reset session did not adopt v4: frozen=%+v reset=%+v err=%v", frozen, reset, err)
 	}
 	var renderer string
 	if err := store.sql.QueryRow(`SELECT renderer_version FROM sessions WHERE canonical_user_id = 'user' AND session_id = 'session'`).Scan(&renderer); err != nil || renderer != ProfileRendererVersion {

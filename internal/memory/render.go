@@ -6,6 +6,19 @@ import (
 	"strings"
 )
 
+// ProvenanceLabel describes formation authority without implying verification or
+// presenting a model confidence estimate as a calibrated probability.
+func ProvenanceLabel(provenance string) string {
+	switch provenance {
+	case "user_statement":
+		return "stated"
+	case "model_inference":
+		return "inferred"
+	default:
+		return "unknown"
+	}
+}
+
 // RenderMarkdown formats entries as compact Markdown for tools and stream payloads.
 func RenderMarkdown(intro string, entries []MemoryEntry) string {
 	var b strings.Builder
@@ -34,8 +47,18 @@ func RenderMarkdown(intro string, entries []MemoryEntry) string {
 		for _, entry := range byHeading[heading] {
 			b.WriteString("- Statement: ")
 			b.WriteString(quoteProfileText(normalizeProfileText(entry.Statement)))
+			if context := normalizeProfileText(entry.Context); context != "" {
+				b.WriteString("\n\n- Context: ")
+				b.WriteString(quoteProfileText(context))
+			}
 			b.WriteString("\n\n- Memory ID: ")
 			b.WriteString(strconv.FormatInt(entry.ID, 10))
+			b.WriteString("\n\n- Revision: ")
+			b.WriteString(strconv.FormatInt(entry.Revision, 10))
+			b.WriteString("\n\n- Claim slot: ")
+			b.WriteString(quoteProfileText(entry.ClaimSlot))
+			b.WriteString("\n\n- Claim value: ")
+			b.WriteString(quoteProfileText(entry.ClaimValue))
 			b.WriteString("\n\n- Evidence: ")
 			b.WriteString(quoteProfileText(normalizeProfileText(entry.Evidence)))
 			b.WriteString("\n\n- Confidence: ")

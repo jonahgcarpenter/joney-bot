@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -10,42 +11,70 @@ import (
 )
 
 func TestHardDeleteMemoryRemovesMemoryGraphAndKeepsTranscript(t *testing.T) {
-	ctx := context.Background()
-	store := newTestStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
-	t.Cleanup(func() { _ = store.Close() })
-	seedAccountUsers(t, store, "user", "other")
-	target, err := store.publishFixtureMemory(ctx, "user", memoryFixture{Scope: ScopeLongTerm, Category: "durable_preferences", Statement: "The user likes purple.", Evidence: "I like purple.", Confidence: 1, Importance: 5})
-	if err != nil {
-		t.Fatal(err)
+	for _, suppress := range []bool{false, true} {
+		t.Run(map[bool]string{false: "forget", true: "suppress"}[suppress], func(t *testing.T) {
+			ctx := context.Background()
+			store := newTestStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
+			t.Cleanup(func() { _ = store.Close() })
+			seedAccountUsers(t, store, "user", "other")
+			target, err := store.publishFixtureMemory(ctx, "user", memoryFixture{Scope: ScopeLongTerm, Category: "durable_preferences", Statement: "The user likes purple.", Evidence: "I like purple.", Confidence: 1, Importance: 5})
+			if err != nil {
+				t.Fatal(err)
+			}
+			other, err := store.publishFixtureMemory(ctx, "other", memoryFixture{Scope: ScopeLongTerm, Category: "notes", Statement: "The other user likes blue.", Evidence: "I like blue."})
+			if err != nil {
+				t.Fatal(err)
+			}
+			profile, err := store.ResolveSessionProfile(ctx, "user", "session", time.Hour)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if profile.FactCount != 1 {
+				t.Fatalf("initial profile=%+v", profile)
+			}
+			turn, err := store.appendFixturePendingTurn(ctx, "session", "user", profile.Generation, "I like purple.", "Noted.", nil, time.Hour)
+			if err != nil {
+				t.Fatal(err)
+			}
+			revision, err := store.CreateIndexRevision(ctx, IndexKindMemoryFTS, "sqlite_fts5", "", 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			record, err := store.MemoryIndexRecordByID(ctx, target.ID, "user")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.WriteMemoryIndexRecord(ctx, revision, record, nil); err != nil {
+				t.Fatal(err)
+			}
+			if suppress {
+				_, err = store.SuppressMemory(ctx, "user", target.ID, time.Now())
+			} else {
+				err = store.HardDeleteMemory(ctx, "user", target.ID, time.Now())
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			rebound, err := store.ResolveSessionProfile(ctx, "user", "session", time.Hour)
+			if err != nil || rebound.FactCount != 0 || rebound.Bytes != len(rebound.Content) || rebound.Generation != profile.Generation {
+				t.Fatalf("rebound profile=%+v err=%v", rebound, err)
+			}
+			assertStoreCount(t, store.sql, `SELECT COUNT(*) FROM memory_entries WHERE id = ?`, 0, target.ID)
+			assertStoreCount(t, store.sql, `SELECT COUNT(*) FROM memory_candidates WHERE published_memory_id = ?`, 0, target.ID)
+			assertStoreCount(t, store.sql, `SELECT COUNT(*) FROM `+revision.TableName+` WHERE rowid=?`, 0, target.ID)
+			if err := store.WriteMemoryIndexRecord(ctx, revision, record, nil); !errors.Is(err, ErrStaleIndexRecord) {
+				t.Fatalf("stale index write: %v", err)
+			}
+			assertStoreCount(t, store.sql, `SELECT COUNT(*) FROM `+revision.TableName+` WHERE rowid=?`, 0, target.ID)
+			if suppress {
+				assertStoreCount(t, store.sql, `SELECT COUNT(*) FROM memory_suppressions WHERE canonical_user_id='user' AND is_active=1`, 1)
+			}
+			assertStoreCount(t, store.sql, `SELECT COUNT(*) FROM durable_jobs WHERE canonical_user_id = 'user' AND entity_kind = 'memory' AND entity_id = ?`, 0, target.ID)
+			assertStoreCount(t, store.sql, `SELECT COUNT(*) FROM session_turns WHERE id = ?`, 1, turn.ID)
+			assertStoreCount(t, store.sql, `SELECT COUNT(*) FROM memory_entries WHERE id = ? AND canonical_user_id = 'other'`, 1, other.ID)
+			assertForeignKeysClean(t, store)
+		})
 	}
-	other, err := store.publishFixtureMemory(ctx, "other", memoryFixture{Scope: ScopeLongTerm, Category: "notes", Statement: "The other user likes blue.", Evidence: "I like blue."})
-	if err != nil {
-		t.Fatal(err)
-	}
-	profile, err := store.ResolveSessionProfile(ctx, "user", "session", time.Hour)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if profile.FactCount != 1 {
-		t.Fatalf("initial profile=%+v", profile)
-	}
-	turn, err := store.appendFixturePendingTurn(ctx, "session", "user", profile.Generation, "I like purple.", "Noted.", nil, time.Hour)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.HardDeleteMemory(ctx, "user", target.ID, time.Now().UTC()); err != nil {
-		t.Fatal(err)
-	}
-	rebound, err := store.ResolveSessionProfile(ctx, "user", "session", time.Hour)
-	if err != nil || rebound.FactCount != 0 || rebound.Bytes != len(rebound.Content) || rebound.Generation != profile.Generation {
-		t.Fatalf("rebound profile=%+v err=%v", rebound, err)
-	}
-	assertStoreCount(t, store.sql, `SELECT COUNT(*) FROM memory_entries WHERE id = ?`, 0, target.ID)
-	assertStoreCount(t, store.sql, `SELECT COUNT(*) FROM memory_candidates WHERE published_memory_id = ?`, 0, target.ID)
-	assertStoreCount(t, store.sql, `SELECT COUNT(*) FROM durable_jobs WHERE canonical_user_id = 'user' AND entity_kind = 'memory' AND entity_id = ?`, 0, target.ID)
-	assertStoreCount(t, store.sql, `SELECT COUNT(*) FROM session_turns WHERE id = ?`, 1, turn.ID)
-	assertStoreCount(t, store.sql, `SELECT COUNT(*) FROM memory_entries WHERE id = ? AND canonical_user_id = 'other'`, 1, other.ID)
-	assertForeignKeysClean(t, store)
 }
 
 func TestHardDeleteAllUserDataPreservesAccountAndResetsEverySession(t *testing.T) {

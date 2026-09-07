@@ -13,7 +13,9 @@ import (
 // SessionTurnByID reloads a source turn under canonical tenant scope.
 func (s *Store) SessionTurnByID(ctx context.Context, userID string, turnID int64) (StoredSessionTurn, error) {
 	var turn StoredSessionTurn
-	err := s.sql.QueryRowContext(ctx, `SELECT id, canonical_user_id, session_id, session_generation, user_text FROM session_turns WHERE id = ? AND canonical_user_id = ?`, turnID, userID).Scan(&turn.ID, &turn.UserID, &turn.SessionID, &turn.Generation, &turn.UserText)
+	var created string
+	err := s.sql.QueryRowContext(ctx, `SELECT id, canonical_user_id, session_id, session_generation, user_text, created_at, assistant_text FROM session_turns WHERE id = ? AND canonical_user_id = ?`, turnID, userID).Scan(&turn.ID, &turn.UserID, &turn.SessionID, &turn.Generation, &turn.UserText, &created, &turn.AssistantResponse)
+	turn.CreatedAt = parseTime(created)
 	return turn, err
 }
 

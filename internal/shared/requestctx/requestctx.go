@@ -26,10 +26,17 @@ const MaxStagedMemoryCandidates = 5
 
 // StagedMemoryCandidate is a prevalidated candidate awaiting successful delivery.
 type StagedMemoryCandidate struct {
-	CanonicalUserID     string
-	Candidate           policy.CandidateOutput
-	TargetMemoryID      int64
-	SupersedesStatement string
+	CanonicalUserID      string
+	Candidate            policy.CandidateOutput
+	TargetMemoryID       int64
+	SupersedesStatement  string
+	Retention            string
+	Intent               string
+	Context              string
+	TTLDays              int
+	Cardinality          string
+	SourceObservationIDs []int64
+	ExpectedRevision     int64
 }
 
 // MemoryStageCollector holds foreground candidates for one request. It does not
@@ -51,7 +58,7 @@ func (c *MemoryStageCollector) Stage(candidates []StagedMemoryCandidate) error {
 		return fmt.Errorf("memory stage batch must not be empty")
 	}
 	for _, candidate := range candidates {
-		if candidate.CanonicalUserID == "" || candidate.TargetMemoryID < 0 || (candidate.Candidate.Approval != policy.ApprovalApproved && candidate.Candidate.Approval != policy.ApprovalProposed) {
+		if candidate.CanonicalUserID == "" || candidate.TargetMemoryID < 0 || candidate.ExpectedRevision < 0 || len(candidate.SourceObservationIDs) != 0 || (candidate.Candidate.Approval != policy.ApprovalApproved && candidate.Candidate.Approval != policy.ApprovalProposed) {
 			return fmt.Errorf("memory stage candidate is not publishable")
 		}
 		if candidate.CanonicalUserID != candidates[0].CanonicalUserID {

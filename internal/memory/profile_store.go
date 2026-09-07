@@ -49,6 +49,9 @@ func (s *Store) ResolveSessionProfile(ctx context.Context, userID, sessionID str
 	}
 	defer tx.Rollback() // nolint:errcheck
 
+	if err := rebindProfileCopiesTx(ctx, tx, userID, 0, now); err != nil {
+		return SessionProfile{}, err
+	}
 	current, sourceIDs, err := refreshProfileTx(ctx, tx, userID, now)
 	if err != nil {
 		return SessionProfile{}, err
@@ -206,7 +209,8 @@ func refreshProfileTx(ctx context.Context, tx *sql.Tx, userID string, now time.T
 	}
 	rows, err := tx.QueryContext(ctx, `
 SELECT id, category, statement, scope, status, 1, confidence, importance, expires_at, provenance_type,
-	CASE provenance_type WHEN 'user_statement' THEN 'user_direct' WHEN 'model_inference' THEN 'model' ELSE 'unknown' END
+	CASE provenance_type WHEN 'user_statement' THEN 'user_direct' WHEN 'model_inference' THEN 'model' ELSE 'unknown' END,
+	assessment_context
 FROM memory_entries WHERE canonical_user_id = ?`, userID)
 	if err != nil {
 		return SessionProfile{}, nil, fmt.Errorf("read tenant profile candidates: %w", err)
@@ -215,7 +219,7 @@ FROM memory_entries WHERE canonical_user_id = ?`, userID)
 	for rows.Next() {
 		var candidate ProfileCandidate
 		var expires sql.NullString
-		if err := rows.Scan(&candidate.MemoryID, &candidate.Category, &candidate.Statement, &candidate.Scope, &candidate.Status, &candidate.Approved, &candidate.Confidence, &candidate.Importance, &expires, &candidate.FormationProvenance, &candidate.SourceAuthority); err != nil {
+		if err := rows.Scan(&candidate.MemoryID, &candidate.Category, &candidate.Statement, &candidate.Scope, &candidate.Status, &candidate.Approved, &candidate.Confidence, &candidate.Importance, &expires, &candidate.FormationProvenance, &candidate.SourceAuthority, &candidate.Context); err != nil {
 			rows.Close()
 			return SessionProfile{}, nil, fmt.Errorf("scan tenant profile candidate: %w", err)
 		}
@@ -273,7 +277,7 @@ func rebindProfileCopiesTx(ctx context.Context, tx *sql.Tx, userID string, memor
 	if err != nil {
 		return fmt.Errorf("encode rebound profile sources: %w", err)
 	}
-	condition := `EXISTS (SELECT 1 FROM json_each(sessions.source_memory_ids) source JOIN memory_entries memory ON memory.id = CAST(source.value AS INTEGER) WHERE memory.canonical_user_id = ? AND memory.status = 'expired')`
+	condition := `EXISTS (SELECT 1 FROM json_each(sessions.source_memory_ids) source WHERE NOT EXISTS (SELECT 1 FROM memory_entries memory WHERE memory.id = CAST(source.value AS INTEGER) AND memory.canonical_user_id = ? AND memory.status = 'active' AND (memory.expires_at IS NULL OR julianday(memory.expires_at) > julianday('now'))))`
 	args := []any{profile.Version, profile.Version, ProfileRendererVersion, profile.sourceDigest, profile.SpeakerIntro, profile.Content, string(encoded), userID, userID}
 	if memoryID > 0 {
 		condition = `EXISTS (SELECT 1 FROM json_each(sessions.source_memory_ids) source WHERE CAST(source.value AS INTEGER) = ?)`

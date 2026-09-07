@@ -24,6 +24,7 @@ type memoryFixture struct {
 	Importance                                                        int
 	TTL                                                               time.Duration
 	Provenance                                                        policy.Provenance
+	SourceTurnID                                                      int64
 }
 
 var fixtureSequence atomic.Uint64
@@ -103,7 +104,7 @@ func (s *Store) publishFixtureMemory(ctx context.Context, userID string, req mem
 	candidate, _, err := s.ProposeCandidate(ctx, userID, CandidateProposal{
 		IdempotencyKey:      fmt.Sprintf("fixture:%d", fixtureSequence.Add(1)),
 		SupersedesStatement: req.Supersedes,
-		Source:              FormationSource{SessionID: req.SourceSessionID, ExtractorVersion: AgentSaveExtractorVersion},
+		Source:              FormationSource{SessionID: req.SourceSessionID, TurnID: req.SourceTurnID, ExtractorVersion: AgentSaveExtractorVersion},
 		Output: policy.CandidateOutput{
 			Scope: policy.Scope(req.Scope), Category: policy.Category(req.Category),
 			Statement: req.Statement, Evidence: req.Evidence, Confidence: req.Confidence,

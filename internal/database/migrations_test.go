@@ -121,7 +121,7 @@ INSERT INTO memory_candidates(
 	if toolTrace != `{"version":1,"batches":[]}` || toolSearchText != "" {
 		t.Fatalf("unexpected legacy tool history defaults trace=%q search=%q", toolTrace, toolSearchText)
 	}
-	if foregroundMemory != `{"version":2,"candidates":[]}` {
+	if foregroundMemory != `{"version":3,"candidates":[]}` {
 		t.Fatalf("unexpected foreground memory default %q", foregroundMemory)
 	}
 	if _, err := reopened.SQL().Exec(`UPDATE session_turns SET tool_trace = '{"version":1,"batches":[{}]}' WHERE canonical_user_id = 'restart-user'`); err == nil {
@@ -548,8 +548,8 @@ func TestPermanentV400CanonicalTableInventory(t *testing.T) {
 	defer db.Close()
 	expected := []string{
 		"account_link_challenges", "account_users", "derived_index_revisions", "durable_jobs",
-		"global_memories", "linked_accounts", "mcp_servers", "memory_candidates",
-		"memory_entries", "schema_migration_versions", "session_summaries",
+		"global_memories", "linked_accounts", "mcp_servers", "memory_assessment_inputs", "memory_assessment_receipts", "memory_candidates",
+		"memory_entries", "memory_observation_evidence", "memory_observation_receipts", "memory_observations", "memory_suppressions", "schema_migration_versions", "session_summaries",
 		"session_turns", "sessions",
 	}
 	rows, err := db.SQL().Query(`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name`)
@@ -577,7 +577,7 @@ func TestPermanentV400CanonicalObjectInventory(t *testing.T) {
 	}
 	defer db.Close()
 
-	for objectType, want := range map[string]int{"table": 12, "index": 27, "trigger": 29, "view": 0} {
+	for objectType, want := range map[string]int{"table": 18, "index": 28, "trigger": 35, "view": 0} {
 		var got int
 		if err := db.SQL().QueryRow(`
 SELECT COUNT(*) FROM sqlite_master

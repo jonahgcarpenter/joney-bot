@@ -55,6 +55,20 @@ func TestRecallFTSFindsExactTermsAndScopesTenant(t *testing.T) {
 	if results[0].Authority != RecallAuthorityUserStated || len(results[0].Provenance) == 0 || results[0].Provenance[0].Authority != RecallAuthorityUserStated {
 		t.Fatalf("published statement authority was not preserved: %+v", results[0])
 	}
+	wantRevision := results[0].Entry.Revision + 1
+	if _, err := store.sql.Exec(`UPDATE memory_entries SET assessment_context = 'Only for the retired deployment.' WHERE id = ?`, results[0].Entry.ID); err != nil {
+		t.Fatal(err)
+	}
+	results, stats = store.Recall(ctx, "user-1", "ZXQ-741", RecallRequest{TopK: 4})
+	if stats.LexicalError != nil || len(results) != 1 || results[0].Entry.Revision != wantRevision || results[0].Entry.Context != "Only for the retired deployment." {
+		t.Fatalf("automatic recall did not hydrate canonical revision: %+v %+v", results, stats)
+	}
+	rendered := RenderDurableMemoryRecall(results, 12000)
+	for _, field := range []string{fmt.Sprintf(`"revision":%d`, wantRevision), `"claim_slot":`, `"claim_value":`, `"assessment_context":"Only for the retired deployment."`} {
+		if !strings.Contains(rendered, field) {
+			t.Fatalf("automatic recall missing %s: %s", field, rendered)
+		}
+	}
 }
 
 func TestRecallPreservesUnknownPersistedAuthority(t *testing.T) {

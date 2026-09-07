@@ -187,32 +187,45 @@ WHERE loser.canonical_user_id = ?`
 		loserClaimSlot, winnerClaimSlot     string
 		loserClaimValue, winnerClaimValue   string
 		loserStatement, loserCategory       string
+		loserSource, winnerSource           int64
+		useLoser                            bool
 	}
-	duplicateRows, err := tx.QueryContext(ctx, `SELECT loser.id, winner.id, loser.confidence, winner.confidence, loser.importance, winner.importance, loser.provenance_type, winner.provenance_type, loser.sensitivity, winner.sensitivity, loser.claim_slot, winner.claim_slot, loser.claim_value, winner.claim_value, loser.statement, loser.category `+duplicateJoin, winnerID, loserID)
+	duplicateRows, err := tx.QueryContext(ctx, `SELECT loser.id, winner.id, loser.confidence, winner.confidence, loser.importance, winner.importance, loser.provenance_type, winner.provenance_type, loser.sensitivity, winner.sensitivity, loser.claim_slot, winner.claim_slot, loser.claim_value, winner.claim_value, loser.statement, loser.category,loser.assessed_source_turn_id,winner.assessed_source_turn_id `+duplicateJoin, winnerID, loserID)
 	if err != nil {
 		return fmt.Errorf("read merged confidence duplicates: %w", err)
 	}
 	var mergedDuplicates []mergedMemoryDuplicate
 	for duplicateRows.Next() {
 		var duplicate mergedMemoryDuplicate
-		if err := duplicateRows.Scan(&duplicate.loserID, &duplicate.winnerID, &duplicate.loserConfidence, &duplicate.winnerConfidence, &duplicate.loserImportance, &duplicate.winnerImportance, &duplicate.loserProvenance, &duplicate.winnerProvenance, &duplicate.loserSensitivity, &duplicate.winnerSensitivity, &duplicate.loserClaimSlot, &duplicate.winnerClaimSlot, &duplicate.loserClaimValue, &duplicate.winnerClaimValue, &duplicate.loserStatement, &duplicate.loserCategory); err != nil {
+		if err := duplicateRows.Scan(&duplicate.loserID, &duplicate.winnerID, &duplicate.loserConfidence, &duplicate.winnerConfidence, &duplicate.loserImportance, &duplicate.winnerImportance, &duplicate.loserProvenance, &duplicate.winnerProvenance, &duplicate.loserSensitivity, &duplicate.winnerSensitivity, &duplicate.loserClaimSlot, &duplicate.winnerClaimSlot, &duplicate.loserClaimValue, &duplicate.winnerClaimValue, &duplicate.loserStatement, &duplicate.loserCategory, &duplicate.loserSource, &duplicate.winnerSource); err != nil {
 			duplicateRows.Close()
 			return fmt.Errorf("scan merged confidence duplicate: %w", err)
 		}
+		duplicate.useLoser = provenanceAuthorityRank(duplicate.loserProvenance) > provenanceAuthorityRank(duplicate.winnerProvenance) || (duplicate.loserProvenance == duplicate.winnerProvenance && (duplicate.loserSource > duplicate.winnerSource || (duplicate.loserSource == duplicate.winnerSource && duplicate.loserConfidence > duplicate.winnerConfidence)))
 		mergedDuplicates = append(mergedDuplicates, duplicate)
 	}
 	if err := duplicateRows.Close(); err != nil {
 		return fmt.Errorf("close merged confidence duplicates: %w", err)
 	}
+	if _, err := tx.ExecContext(ctx, `UPDATE memory_observations SET canonical_user_id=? WHERE canonical_user_id=?`, winnerID, loserID); err != nil {
+		return err
+	}
 	for _, duplicate := range mergedDuplicates {
+		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO memory_observation_evidence(memory_id,observation_id) SELECT ?,observation_id FROM memory_observation_evidence WHERE memory_id=? ORDER BY observation_id LIMIT MAX(0,5-(SELECT COUNT(*) FROM memory_observation_evidence WHERE memory_id=?))`, duplicate.winnerID, duplicate.loserID, duplicate.winnerID); err != nil {
+			return err
+		}
 		provenance := strongestMemoryProvenance(duplicate.winnerProvenance, duplicate.loserProvenance)
-		useLoser := provenanceAuthorityRank(duplicate.loserProvenance) > provenanceAuthorityRank(duplicate.winnerProvenance) ||
-			(provenanceAuthorityRank(duplicate.loserProvenance) == provenanceAuthorityRank(duplicate.winnerProvenance) && duplicate.loserConfidence > duplicate.winnerConfidence)
+		useLoser := duplicate.useLoser
 		statement, category := "", ""
+		confidence := duplicate.winnerConfidence
 		if useLoser {
 			statement, category = duplicate.loserStatement, duplicate.loserCategory
+			confidence = duplicate.loserConfidence
+			if _, err := tx.ExecContext(ctx, `UPDATE memory_entries SET (assessed_source_turn_id,assessment_context,retired_at,retirement_reason,status,expires_at)=(SELECT assessed_source_turn_id,assessment_context,retired_at,retirement_reason,status,expires_at FROM memory_entries WHERE id=?) WHERE id=?`, duplicate.loserID, duplicate.winnerID); err != nil {
+				return err
+			}
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE memory_entries SET confidence = ?, importance = ?, provenance_type = ?, sensitivity = ?, statement = CASE WHEN ? = '' THEN statement ELSE ? END, category = CASE WHEN ? = '' THEN category ELSE ? END WHERE id = ? AND canonical_user_id = ?`, max(duplicate.winnerConfidence, duplicate.loserConfidence), max(duplicate.winnerImportance, duplicate.loserImportance), provenance, strongestSensitivity(duplicate.winnerSensitivity, duplicate.loserSensitivity), statement, statement, category, category, duplicate.winnerID, winnerID); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE memory_entries SET confidence = ?, importance = ?, provenance_type = ?, sensitivity = ?, statement = CASE WHEN ? = '' THEN statement ELSE ? END, category = CASE WHEN ? = '' THEN category ELSE ? END WHERE id = ? AND canonical_user_id = ?`, confidence, max(duplicate.winnerImportance, duplicate.loserImportance), provenance, strongestSensitivity(duplicate.winnerSensitivity, duplicate.loserSensitivity), statement, statement, category, category, duplicate.winnerID, winnerID); err != nil {
 			return fmt.Errorf("merge confidence evidence metadata: %w", err)
 		}
 		if err := enqueueDerivedChangeTx(ctx, tx, winnerID, "memory", duplicate.winnerID, "upsert", "account-merge-confidence:"+mergeTurnNow); err != nil {
@@ -337,6 +350,48 @@ WHERE job_kind = 'derived_index' AND canonical_user_id = ?;
 		return fmt.Errorf("move merged derived index changes: %w", err)
 	}
 
+	if _, err := tx.ExecContext(ctx, `INSERT INTO memory_suppressions(canonical_user_id,statement,claim_slot,claim_value,is_active,through_turn_id,created_at,retained_source_turn_id) SELECT ?,statement,claim_slot,claim_value,is_active,through_turn_id,created_at,retained_source_turn_id FROM memory_suppressions WHERE canonical_user_id=?
+ON CONFLICT(canonical_user_id,claim_slot,claim_value) DO UPDATE SET is_active=MAX(is_active,excluded.is_active),through_turn_id=MAX(through_turn_id,excluded.through_turn_id),retained_source_turn_id=CASE WHEN excluded.through_turn_id>through_turn_id THEN excluded.retained_source_turn_id WHEN excluded.through_turn_id<through_turn_id THEN retained_source_turn_id WHEN retained_source_turn_id=excluded.retained_source_turn_id THEN retained_source_turn_id ELSE 0 END`, winnerID, loserID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_suppressions WHERE canonical_user_id=?`, loserID); err != nil {
+		return err
+	}
+	for _, table := range []string{"memory_assessment_inputs", "memory_assessment_receipts", "memory_observation_receipts"} {
+		if _, err := tx.ExecContext(ctx, `UPDATE `+table+` SET canonical_user_id=? WHERE canonical_user_id=?`, winnerID, loserID); err != nil {
+			return err
+		}
+	}
+	// A frozen input must retain its membership while reflecting the merged owner.
+	if _, err := tx.ExecContext(ctx, `UPDATE memory_assessment_inputs SET payload=json_set(payload,'$.Anchor.UserID',?) WHERE canonical_user_id=?`, winnerID, winnerID); err != nil {
+		return err
+	}
+	suppressedIDs, err := memoryIDsTx(tx, `SELECT id FROM memory_entries WHERE canonical_user_id=? AND EXISTS(SELECT 1 FROM memory_suppressions r WHERE r.canonical_user_id=memory_entries.canonical_user_id AND r.claim_slot=memory_entries.claim_slot AND replace(r.claim_value,'_',' ')=replace(memory_entries.claim_value,'_',' ') AND (r.is_active=1 OR (memory_entries.assessed_source_turn_id<=r.through_turn_id AND NOT (r.retained_source_turn_id>0 AND r.retained_source_turn_id=memory_entries.assessed_source_turn_id))))`, winnerID)
+	if err != nil {
+		return err
+	}
+	for _, id := range suppressedIDs {
+		if err := hardDeleteMemoryTx(ctx, tx, winnerID, id, time.Now().UTC(), false); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_observations WHERE canonical_user_id=? AND EXISTS(SELECT 1 FROM memory_suppressions r WHERE r.canonical_user_id=memory_observations.canonical_user_id AND r.claim_slot=memory_observations.claim_slot AND replace(r.claim_value,'_',' ')=replace(memory_observations.claim_value,'_',' ') AND r.is_active=1)`, winnerID); err != nil {
+		return err
+	}
+	// Enforce the combined tenant's retention bounds without extending any lifetime.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_observations WHERE id IN (SELECT id FROM (SELECT id,ROW_NUMBER() OVER(ORDER BY intent='remember' DESC,julianday(observed_at) DESC,id DESC) n,SUM(length(CAST(statement||evidence||context||provenance_type||claim_slot||claim_value AS BLOB))) OVER(ORDER BY intent='remember' DESC,julianday(observed_at) DESC,id DESC) bytes FROM memory_observations WHERE canonical_user_id=?) WHERE n>100 OR bytes>131072)`, winnerID); err != nil {
+		return err
+	}
+	if err := rebindProfileCopiesTx(ctx, tx, winnerID, 0, time.Now().UTC()); err != nil {
+		return err
+	}
+	for _, duplicate := range mergedDuplicates {
+		if duplicate.useLoser {
+			if err := rebindProfileCopiesTx(ctx, tx, winnerID, duplicate.winnerID, time.Now().UTC()); err != nil {
+				return err
+			}
+		}
+	}
 	var remaining int
 	if err := tx.QueryRowContext(ctx, `
 SELECT SUM(row_count) FROM (
@@ -346,8 +401,13 @@ SELECT SUM(row_count) FROM (
 	UNION ALL SELECT COUNT(*) FROM memory_candidates WHERE canonical_user_id = ?
 	UNION ALL SELECT COUNT(*) FROM durable_jobs WHERE canonical_user_id = ?
 	UNION ALL SELECT COUNT(*) FROM session_summaries WHERE canonical_user_id = ?
+	UNION ALL SELECT COUNT(*) FROM memory_observations WHERE canonical_user_id = ?
+	UNION ALL SELECT COUNT(*) FROM memory_suppressions WHERE canonical_user_id = ?
+	UNION ALL SELECT COUNT(*) FROM memory_assessment_inputs WHERE canonical_user_id = ?
+	UNION ALL SELECT COUNT(*) FROM memory_assessment_receipts WHERE canonical_user_id = ?
+	UNION ALL SELECT COUNT(*) FROM memory_observation_receipts WHERE canonical_user_id = ?
 )
-`, loserID, loserID, loserID, loserID, loserID, loserID).Scan(&remaining); err != nil {
+`, loserID, loserID, loserID, loserID, loserID, loserID, loserID, loserID, loserID, loserID, loserID).Scan(&remaining); err != nil {
 		return fmt.Errorf("verify merged tenant ownership: %w", err)
 	}
 	if remaining != 0 {

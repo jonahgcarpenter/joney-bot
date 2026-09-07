@@ -11,9 +11,11 @@ import (
 
 // ListedMemory is one active memory exposed to its owning user.
 type ListedMemory struct {
-	ID        int64
-	Category  string
-	Statement string
+	ID         int64
+	Category   string
+	Statement  string
+	Provenance string
+	Confidence float64
 }
 
 // UserDeletionScope identifies runtime state owned by a deleted account.
@@ -35,7 +37,7 @@ func (s *Store) ListActiveMemories(ctx context.Context, userID string, now time.
 	if err := requireActiveUser(ctx, tx, userID); err != nil {
 		return nil, err
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT id, category, statement FROM memory_entries WHERE canonical_user_id = ? AND status = 'active' AND (expires_at IS NULL OR julianday(expires_at) > julianday(?)) ORDER BY id`, userID, formatTime(now))
+	rows, err := tx.QueryContext(ctx, `SELECT id, category, statement, provenance_type, confidence FROM memory_entries WHERE canonical_user_id = ? AND status = 'active' AND (expires_at IS NULL OR julianday(expires_at) > julianday(?)) ORDER BY id`, userID, formatTime(now))
 	if err != nil {
 		return nil, err
 	}
@@ -43,7 +45,7 @@ func (s *Store) ListActiveMemories(ctx context.Context, userID string, now time.
 	memories := make([]ListedMemory, 0)
 	for rows.Next() {
 		var memory ListedMemory
-		if err := rows.Scan(&memory.ID, &memory.Category, &memory.Statement); err != nil {
+		if err := rows.Scan(&memory.ID, &memory.Category, &memory.Statement, &memory.Provenance, &memory.Confidence); err != nil {
 			return nil, err
 		}
 		memories = append(memories, memory)
@@ -67,8 +69,33 @@ func (s *Store) HardDeleteMemory(ctx context.Context, userID string, memoryID in
 	if err := requireActiveUser(ctx, tx, userID); err != nil {
 		return err
 	}
+	if err := hardDeleteMemoryTx(ctx, tx, userID, memoryID, now, true); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.signalDerivedIndex()
+	return nil
+}
+
+// hardDeleteMemoryTx removes canonical and derived artifacts without committing or removing suppression rules.
+// recordCutoff is false when applying an existing merge policy, whose source boundary must not advance.
+func hardDeleteMemoryTx(ctx context.Context, tx *sql.Tx, userID string, memoryID int64, now time.Time, recordCutoff bool) error {
 	var exists int
 	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM memory_entries WHERE canonical_user_id = ? AND id = ?`, userID, memoryID).Scan(&exists); err != nil {
+		return err
+	}
+	if recordCutoff {
+		var through int64
+		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(id),0) FROM session_turns`).Scan(&through); err != nil {
+			return err
+		}
+		if err := assessmentBarrierTx(ctx, tx, userID, memoryID, through, now); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_observations WHERE canonical_user_id=? AND EXISTS(SELECT 1 FROM memory_entries m WHERE m.id=? AND m.canonical_user_id=? AND m.claim_slot=memory_observations.claim_slot AND replace(m.claim_value,'_',' ')=replace(memory_observations.claim_value,'_',' '))`, userID, memoryID, userID); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE memory_candidates SET supersedes_memory_id = NULL WHERE canonical_user_id = ? AND supersedes_memory_id = ? AND published_memory_id IS NOT ?`, userID, memoryID, memoryID); err != nil {
@@ -93,10 +120,6 @@ func (s *Store) HardDeleteMemory(ctx context.Context, userID string, memoryID in
 	if err := rebindProfileCopiesTx(ctx, tx, userID, memoryID, now); err != nil {
 		return err
 	}
-	if err := tx.Commit(); err != nil {
-		return err
-	}
-	s.signalDerivedIndex()
 	return nil
 }
 
@@ -123,6 +146,11 @@ func (s *Store) ResetUserDataPreservingAccount(ctx context.Context, userID strin
 		return nil, err
 	}
 	nowText := formatTime(now)
+	for _, table := range []string{"memory_observations", "memory_observation_receipts", "memory_suppressions", "memory_assessment_receipts"} {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM `+table+` WHERE canonical_user_id = ?`, userID); err != nil {
+			return nil, err
+		}
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM durable_jobs WHERE canonical_user_id = ?`, userID); err != nil {
 		return nil, err
 	}

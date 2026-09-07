@@ -26,6 +26,7 @@ func TestPublicationCreatesNewObservationAfterHardDelete(t *testing.T) {
 	if err := store.HardDeleteMemory(ctx, "user", first.ID, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
+	request.SourceTurnID = seedFormationTurn(t, store, "user", "fresh-after-delete", request.Evidence)
 	second, err := store.publishFixtureMemory(ctx, "user", request)
 	if err != nil {
 		t.Fatal(err)
@@ -54,6 +55,7 @@ func TestPublicationDoesNotReuseHardDeletedMemory(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	request.SourceTurnID = seedFormationTurn(t, store, "user", "fresh-after-delete", request.Evidence)
 	fresh, err := store.publishFixtureMemory(ctx, "user", request)
 	if err != nil {
 		t.Fatal(err)
@@ -306,7 +308,7 @@ func TestProposeCandidateCanonicalMetadataUsesStrongestEvidenceAuthority(t *test
 		t.Fatalf("inferred candidate=%+v err=%v", candidate, err)
 	}
 	memory, err := store.EntryByID(candidate.PublishedMemoryID)
-	if err != nil || memory.Confidence != 0.8 || memory.ProvenanceType != "user_statement" || memory.Statement != direct.Statement || memory.EvidenceCount != 2 {
+	if err != nil || memory.Confidence != 0.2 || memory.ProvenanceType != "user_statement" || memory.Statement != direct.Statement || memory.EvidenceCount != 2 {
 		t.Fatalf("memory=%+v err=%v", memory, err)
 	}
 }

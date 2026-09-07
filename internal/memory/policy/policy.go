@@ -36,6 +36,25 @@ var namedCredentialMaterialPattern = regexp.MustCompile(`(?i)\b(api[ _-]?key|acc
 
 // Evaluate validates, normalizes, and deterministically classifies a candidate.
 func Evaluate(in CandidateInput) (CandidateOutput, error) {
+	return evaluate(in, false)
+}
+
+// EvaluateAssessment validates current model assessments using punctuation-safe
+// identity and verbatim evidence. Legacy persisted candidates must use Evaluate.
+func EvaluateAssessment(in CandidateInput) (CandidateOutput, error) {
+	if in.Mode != ModeAgentSave && in.Mode != ModeBackgroundPattern {
+		return CandidateOutput{}, invalid("mode", "assessment requires a model-assessed workflow")
+	}
+	if !strings.Contains(in.SourceUserText, in.Evidence) {
+		return CandidateOutput{Approval: ApprovalRejected, Decision: DecisionDisallowed, Reason: "evidence is not an exact quote from normalized source user text"}, nil
+	}
+	// The whole current turn may exceed the legacy source bound; only the exact
+	// selected span is candidate content. Membership was checked above.
+	in.SourceUserText = in.Evidence
+	return evaluate(in, true)
+}
+
+func evaluate(in CandidateInput, assessment bool) (CandidateOutput, error) {
 	if err := validateCandidate(in); err != nil {
 		return CandidateOutput{}, err
 	}
@@ -58,7 +77,14 @@ func Evaluate(in CandidateInput) (CandidateOutput, error) {
 		Reason:          "candidate requires review",
 	}
 	out.ClaimSlot, out.ClaimValue = NormalizeClaimIdentity(in.Category, in.ClaimSlot, in.ClaimValue, out.Statement)
+	if assessment {
+		out.ClaimSlot, out.ClaimValue = NormalizeAssessmentClaimIdentity(in.Category, in.ClaimSlot, in.ClaimValue, out.Statement)
+		out.Evidence = in.Evidence
+	}
 	if !claimSlotCompatible(in.Category, out.ClaimSlot) {
+		return disallow(out, "semantic claim slot is incompatible with memory category"), nil
+	}
+	if assessment && !AssessmentClaimSlotCompatible(in.Category, out.ClaimSlot) {
 		return disallow(out, "semantic claim slot is incompatible with memory category"), nil
 	}
 	source := normalizeText(in.SourceUserText)
@@ -70,6 +96,9 @@ func Evaluate(in CandidateInput) (CandidateOutput, error) {
 	evidenceContext, ok := uniqueEvidenceContext(source, out.Evidence)
 	if modelAssessed {
 		ok = strings.Contains(source, out.Evidence)
+		if assessment {
+			ok = strings.Contains(in.SourceUserText, out.Evidence)
+		}
 	}
 	if !ok {
 		return disallow(out, "evidence is not an exact quote from normalized source user text"), nil
@@ -170,6 +199,58 @@ func Evaluate(in CandidateInput) (CandidateOutput, error) {
 	}
 
 	return classifyEligible(out), nil
+}
+
+// NormalizeAssessmentClaimIdentity retains legacy separator and fallback-slot
+// spelling so ordinary claims match persisted suppression and source-cutoff keys.
+// Unlike v2 it preserves +/#, supports explicit C-language aliases, and never
+// truncates identities into collisions. It must not alias C++ or C# to legacy c.
+func NormalizeAssessmentClaimIdentity(category Category, slot, value, statement string) (string, string) {
+	normalize := func(s string, allowDot bool) string {
+		var out []rune
+		separator := false
+		for _, r := range strings.ToLower(normalizeText(s)) {
+			if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '+' || r == '#' || allowDot && r == '.' {
+				out = append(out, r)
+				separator = false
+			} else if !separator && len(out) > 0 {
+				out = append(out, '_')
+				separator = true
+			}
+		}
+		return strings.Trim(string(out), "_")
+	}
+	slot = normalize(slot, true)
+	if slot == "" {
+		slot = normalize(string(category)+".fact", true)
+	}
+	value = normalize(value, false)
+	if value == "" {
+		value = normalize(statement, false)
+	}
+	switch value {
+	case "c_plus_plus", "cplusplus":
+		value = "c++"
+	case "c_sharp", "csharp":
+		value = "c#"
+	}
+	if slot == "environment.linux_distribution" || slot == "environment.os_family" {
+		switch value {
+		case "arch", "arch_linux", "archlinux", "arch_family", "pacman_based", "pacman_based_linux":
+			value = "arch_family"
+		}
+	}
+	return slot, value
+}
+
+// AssessmentClaimSlotCompatible checks current category prefixes without lossy
+// legacy normalization or accepting an unknown category's fallback slot.
+func AssessmentClaimSlotCompatible(category Category, slot string) bool {
+	if !validCategory(category) {
+		return false
+	}
+	slot, _ = NormalizeAssessmentClaimIdentity(category, slot, "", "")
+	return claimSlotCompatible(category, slot)
 }
 
 func classifyEligible(out CandidateOutput) CandidateOutput {
