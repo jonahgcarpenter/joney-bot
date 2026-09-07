@@ -1,6 +1,7 @@
 package discord
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"sync"
@@ -65,22 +66,31 @@ func (dg *Gateway) runtimeDependencies() gatewayruntime.Dependencies {
 
 // Gateway runs the Discord gateway connection loop.
 type Gateway struct {
-	Token       string
-	BotID       string
-	Broker      *broker.Broker
-	Links       *accounts.Service
-	Runtime     gatewayruntime.Dependencies
-	Log         *config.Logger
-	APIBaseURL  string
-	HTTPClient  *http.Client
-	VideoFrames media.VideoFrameExtractor
-	replyMu     sync.RWMutex
-	replyIndex  map[string]replyContext
-	sessionMu   sync.RWMutex
-	sessionID   string
-	resumeURL   string
-	lastSeq     *int
-	hbAcked     bool
+	Token          string
+	BotID          string
+	Broker         *broker.Broker
+	Links          *accounts.Service
+	Runtime        gatewayruntime.Dependencies
+	Log            *config.Logger
+	APIBaseURL     string
+	HTTPClient     *http.Client
+	VideoFrames    media.VideoFrameExtractor
+	replyMu        sync.RWMutex
+	replyIndex     map[string]replyContext
+	sessionMu      sync.RWMutex
+	sessionID      string
+	resumeURL      string
+	lastSeq        *int
+	hbAcked        bool
+	outboundMu     sync.Mutex
+	outbound       []*outboundEntry
+	outboundActive *outboundEntry
+	outboundBytes  int
+	outboundClosed bool
+	outboundCancel context.CancelFunc
+	outboundDone   chan struct{}
+	// deliveryContext is set only on a request-local REST client.
+	deliveryContext context.Context
 }
 
 func (dg *Gateway) log(scoped ...*config.Logger) *config.Logger {

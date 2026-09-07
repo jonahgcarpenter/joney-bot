@@ -375,7 +375,7 @@ func TestDiscordEditMessageRetriesRateLimit(t *testing.T) {
 	}
 }
 
-func TestDiscordStreamFallsBackWhenFinalEditFails(t *testing.T) {
+func TestDiscordStreamFallsBackWhenLifecycleMessageIsMissing(t *testing.T) {
 	var mu sync.Mutex
 	var posts []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -388,7 +388,7 @@ func TestDiscordStreamFallsBackWhenFinalEditFails(t *testing.T) {
 			t.Fatalf("decode payload: %v", err)
 		}
 		if r.Method == http.MethodPatch {
-			w.WriteHeader(http.StatusBadGateway)
+			w.WriteHeader(http.StatusNotFound)
 			return
 		}
 		mu.Lock()
@@ -420,7 +420,7 @@ func TestDiscordStreamReportsStaleLifecycleCleanupFailure(t *testing.T) {
 			postCount++
 			_, _ = fmt.Fprintf(w, `{"id":"sent-%d"}`, postCount)
 		case http.MethodPatch, http.MethodDelete:
-			w.WriteHeader(http.StatusBadGateway)
+			w.WriteHeader(http.StatusForbidden)
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -431,8 +431,8 @@ func TestDiscordStreamReportsStaleLifecycleCleanupFailure(t *testing.T) {
 	r.Stream(agent.StreamChunk{Type: agent.ChunkThinking, Text: "temporary thinking"})
 
 	err := r.SendAgentResponse(&agent.Response{Model: "test-model", Response: "The authoritative final answer."})
-	if err == nil || postCount != 2 {
-		t.Fatalf("error=%v post_count=%d, want cleanup error and fallback answer", err, postCount)
+	if err == nil || postCount != 1 {
+		t.Fatalf("error=%v post_count=%d, want permanent error without replacement", err, postCount)
 	}
 }
 
@@ -444,7 +444,7 @@ func TestDiscordStreamReportsStaleLifecycleErrorCleanupFailure(t *testing.T) {
 			postCount++
 			_, _ = fmt.Fprintf(w, `{"id":"sent-%d"}`, postCount)
 		case http.MethodPatch, http.MethodDelete:
-			w.WriteHeader(http.StatusBadGateway)
+			w.WriteHeader(http.StatusForbidden)
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -455,8 +455,8 @@ func TestDiscordStreamReportsStaleLifecycleErrorCleanupFailure(t *testing.T) {
 	r.Stream(agent.StreamChunk{Type: agent.ChunkThinking, Text: "temporary thinking"})
 
 	err := r.SendAgentError("Safe error response.")
-	if err == nil || postCount != 2 {
-		t.Fatalf("error=%v post_count=%d, want cleanup error and fallback error response", err, postCount)
+	if err == nil || postCount != 1 {
+		t.Fatalf("error=%v post_count=%d, want permanent error without replacement", err, postCount)
 	}
 }
 
@@ -517,7 +517,7 @@ func TestDiscordStreamReportsFinalContinuationFailure(t *testing.T) {
 		}
 		postCount++
 		if postCount > 1 {
-			w.WriteHeader(http.StatusBadGateway)
+			w.WriteHeader(http.StatusForbidden)
 			return
 		}
 		_, _ = w.Write([]byte(`{"id":"sent-1"}`))
@@ -632,7 +632,7 @@ func TestDiscordCommandAttachmentMultipart(t *testing.T) {
 	}))
 	defer server.Close()
 	dg := &Gateway{Token: "token", APIBaseURL: server.URL, Log: config.NewLogger(config.LevelError)}
-	responder := runtimeResponder{gateway: dg, channelID: "channel-1", replyToID: "message-1"}
+	responder := newRuntimeResponder(dg, "request", "channel-1", "message-1", "session", "user")
 	err := responder.SendCommandResponse(commands.Result{Text: "export ready", Attachments: []commands.Attachment{
 		{Filename: "export.json.part001", MIMEType: "application/octet-stream", Data: []byte("first")},
 		{Filename: "export.json.part002", MIMEType: "application/octet-stream", Data: []byte("second")},
@@ -772,12 +772,12 @@ func TestDiscordStreamsAttachmentBeforeRequestingFinalText(t *testing.T) {
 	}
 }
 
-func TestDiscordDoesNotRetryFailedStreamAttachmentAtFinalDelivery(t *testing.T) {
+func TestDiscordDoesNotRetryPermanentlyFailedStreamAttachmentAtFinalDelivery(t *testing.T) {
 	attachmentCalls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
 			attachmentCalls++
-			http.Error(w, "provider body", http.StatusBadGateway)
+			http.Error(w, "provider body", http.StatusForbidden)
 			return
 		}
 		_, _ = w.Write([]byte(`{"id":"message-1"}`))

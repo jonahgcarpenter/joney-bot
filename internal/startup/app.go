@@ -263,6 +263,14 @@ func run(ctx context.Context, cfg *config.Config, rootLog *config.Logger, stdout
 	if err != nil {
 		return &Error{Event: "app.gateways.init_failed", Message: "failed to initialize gateways", Cause: err}
 	}
+	// Release delivery waiters before broker command drain and store cleanup.
+	defer func() {
+		for _, gw := range activeGateways {
+			if outbound, ok := gw.(interface{ StopOutbound() }); ok {
+				outbound.StopOutbound()
+			}
+		}
+	}()
 	if ctx.Err() != nil {
 		return nil
 	}

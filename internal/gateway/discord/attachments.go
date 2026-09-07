@@ -286,6 +286,10 @@ func (dg *Gateway) fetchAttachmentImage(attachmentID, rawURL, declaredMIME, file
 
 // sendCommandAttachment posts ordered in-memory command attachments to Discord.
 func (dg *Gateway) sendCommandAttachment(channelID string, result commands.Result, replyToID string) (string, error) {
+	return dg.sendAttachmentNonce(channelID, result, replyToID, "")
+}
+
+func (dg *Gateway) sendAttachmentNonce(channelID string, result commands.Result, replyToID, nonce string) (string, error) {
 	if err := result.ValidateAttachments(); err != nil {
 		return "", err
 	}
@@ -301,6 +305,9 @@ func (dg *Gateway) sendCommandAttachment(channelID string, result commands.Resul
 	payload := map[string]any{
 		"content":     result.Text,
 		"attachments": metadata,
+	}
+	if nonce != "" {
+		payload["nonce"], payload["enforce_nonce"] = nonce, true
 	}
 	if replyToID != "" {
 		payload["message_reference"] = map[string]string{"message_id": replyToID}
@@ -332,7 +339,7 @@ func (dg *Gateway) sendCommandAttachment(channelID string, result commands.Resul
 	}
 
 	endpoint := fmt.Sprintf("%s/channels/%s/messages", dg.apiBaseURL(), channelID)
-	req, err := http.NewRequest(http.MethodPost, endpoint, &body)
+	req, err := http.NewRequestWithContext(dg.restContext(), http.MethodPost, endpoint, &body)
 	if err != nil {
 		return "", err
 	}
@@ -343,12 +350,19 @@ func (dg *Gateway) sendCommandAttachment(channelID string, result commands.Resul
 		return "", err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusTooManyRequests {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+		return "", discordRateLimitError{retryAfter: discordRetryAfter(resp, body)}
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("Discord attachment send failed with status %d", resp.StatusCode)
+		return "", discordHTTPError(resp.StatusCode)
 	}
 	var created createMessageResponse
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&created); err != nil {
 		return "", err
+	}
+	if nonce != "" && created.ID == "" {
+		return "", io.ErrUnexpectedEOF
 	}
 	return created.ID, nil
 }

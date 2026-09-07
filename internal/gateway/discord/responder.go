@@ -86,34 +86,14 @@ func (r *runtimeResponder) Stream(chunk agent.StreamChunk) {
 }
 
 func (r *runtimeResponder) SendFallback(text string) error {
-	_, err := r.gateway.sendMessage(r.channelID, text, r.replyToID, r.gateway.log().With(config.F("request_id", r.requestID)))
-	return err
+	return r.stream.Finish(&agent.Response{Response: text})
 }
 
 func (r *runtimeResponder) SendCommandResponse(result commands.Result) error {
 	if err := result.ValidateAttachments(); err != nil {
 		return err
 	}
-	attachments := result.Attachments
-	if len(attachments) == 0 {
-		_, err := r.gateway.sendMessage(r.channelID, result.Text, r.replyToID, r.gateway.log().With(config.F("request_id", r.requestID)))
-		return err
-	}
-	for i := range attachments {
-		replyToID := ""
-		if i == 0 {
-			replyToID = r.replyToID
-		}
-		attachmentResult := commands.Result{Attachments: attachments[i : i+1]}
-		if _, err := r.gateway.sendCommandAttachment(r.channelID, attachmentResult, replyToID); err != nil {
-			return err
-		}
-	}
-	if result.Text != "" {
-		_, err := r.gateway.sendMessage(r.channelID, result.Text, "", r.gateway.log().With(config.F("request_id", r.requestID)))
-		return err
-	}
-	return nil
+	return r.stream.Finish(&agent.Response{Response: result.Text, Attachments: result.Attachments})
 }
 
 func (r *runtimeResponder) SendAgentError(text string) error {

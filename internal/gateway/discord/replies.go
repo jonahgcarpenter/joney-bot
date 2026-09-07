@@ -20,6 +20,9 @@ func (dg *Gateway) rememberReply(messageID string, ctx replyContext) {
 	}
 
 	dg.replyMu.Lock()
+	if dg.replyIndex == nil {
+		dg.replyIndex = make(map[string]replyContext)
+	}
 	dg.pruneReplyIndexLocked()
 	dg.replyIndex[messageID] = ctx
 	dg.replyMu.Unlock()
