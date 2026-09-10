@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"fmt"
 	"strings"
 	"time"
@@ -29,10 +30,12 @@ type SessionTurnWrite struct {
 	Staged         []requestctx.StagedMemoryCandidate
 	TTL            time.Duration
 	Pressure       SessionPromptPressure
+	// Images contains at most four normalized generated outputs, oldest first.
+	Images []requestctx.InputImage
 }
 
 // AppendPendingSessionTurn atomically stores one pending exchange, native tool
-// history, and staged memory inputs.
+// history, staged memory inputs, and bounded normalized generated images.
 func (s *Store) AppendPendingSessionTurn(ctx context.Context, input SessionTurnWrite) (StoredSessionTurn, error) {
 	pressure := input.Pressure
 	if pressure.Tokens < 0 || pressure.Limit <= 0 || strings.TrimSpace(pressure.Version) == "" {
@@ -96,6 +99,9 @@ WHERE EXISTS (
 		return StoredSessionTurn{}, fmt.Errorf("begin session turn write: %w", err)
 	}
 	defer tx.Rollback() // nolint:errcheck
+	if len(input.Images) > 4 {
+		return StoredSessionTurn{}, fmt.Errorf("too many session images")
+	}
 	var id int64
 	if err := tx.QueryRowContext(ctx, query, args...).Scan(&id); err != nil {
 		if err == sql.ErrNoRows {
@@ -105,6 +111,15 @@ WHERE EXISTS (
 	}
 	if err := enqueueDerivedChangeTx(ctx, tx, userID, "session_turn", id, "upsert", "append:"+formatTime(now)); err != nil {
 		return StoredSessionTurn{}, err
+	}
+	for ordinal, image := range input.Images {
+		data, err := base64.StdEncoding.DecodeString(image.Data)
+		if err != nil {
+			return StoredSessionTurn{}, fmt.Errorf("decode session image: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO session_images(id,turn_id,ordinal,mime_type,data) VALUES(?,?,?,?,?)`, image.ID, id, ordinal, image.MIMEType, data); err != nil {
+			return StoredSessionTurn{}, fmt.Errorf("store session image: %w", err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return StoredSessionTurn{}, fmt.Errorf("commit session turn write: %w", err)

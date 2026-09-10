@@ -51,6 +51,7 @@ func Register(reg *registry.Registry, cfg *config.Config, userMemStore *memory.S
 		if err := reg.RegisterHandler(toolnames.ComfyUITextToImage, policy, registry.Handler(comfyui.NewHandler(comfyui.TextToImage, textWorkflow, client, log))); err != nil {
 			return fmt.Errorf("initialize %s tool: %w", toolnames.ComfyUITextToImage, err)
 		}
+		policy.NormalizeArgs = normalizeComfyImageArgs
 		if err := reg.RegisterHandler(toolnames.ComfyUIImageToImage, policy, registry.Handler(comfyui.NewHandler(comfyui.ImageToImage, imageWorkflow, client, log))); err != nil {
 			return fmt.Errorf("initialize %s tool: %w", toolnames.ComfyUIImageToImage, err)
 		}
@@ -178,6 +179,15 @@ func normalizeComfyArgs(args map[string]interface{}) interface{} {
 		"prompt":          normalizedString(args, "prompt", false),
 		"negative_prompt": normalizedString(args, "negative_prompt", false),
 	}
+}
+
+func normalizeComfyImageArgs(args map[string]interface{}) interface{} {
+	normalized := normalizeComfyArgs(args).(map[string]interface{})
+	if source, exists := args["source_image_id"]; exists {
+		// Source IDs are exact-match selectors; preserve invalid values for validation.
+		normalized["source_image_id"] = source
+	}
+	return normalized
 }
 
 func normalizeTimeArgs(args map[string]interface{}) interface{} {

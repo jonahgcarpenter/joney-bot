@@ -432,7 +432,7 @@ func TestProcessOffersRetrievalOnlyMemoryTools(t *testing.T) {
 	}
 }
 
-func TestProcessHidesComfyUIToolsByGatewayAndCurrentImages(t *testing.T) {
+func TestProcessHidesComfyUIToolsOnlyForHomeAssistant(t *testing.T) {
 	for _, test := range []struct {
 		name      string
 		gateway   string
@@ -440,7 +440,7 @@ func TestProcessHidesComfyUIToolsByGatewayAndCurrentImages(t *testing.T) {
 		wantText  bool
 		wantImage bool
 	}{
-		{name: "discord text only", gateway: "discord", wantText: true},
+		{name: "discord text only", gateway: "discord", wantText: true, wantImage: true},
 		{name: "discord with image", gateway: "discord", images: []llm.InputImage{testInputImage(t, 2, 2)}, wantText: true, wantImage: true},
 		{name: "home assistant", gateway: "homeassistant", images: []llm.InputImage{testInputImage(t, 2, 2)}},
 	} {

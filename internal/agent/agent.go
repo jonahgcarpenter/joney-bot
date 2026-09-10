@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -170,15 +171,13 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	ctx = requestctx.WithMetadata(ctx, inherited)
 	reqLog = reqLog.With(requestctx.LogFields(ctx)...)
 	contextImages := make([]requestctx.InputImage, 0, len(userImages))
-	for _, image := range userImages {
-		contextImages = append(contextImages, requestctx.InputImage{MIMEType: image.MimeType, Data: image.Data, Source: image.Source})
+	for i, image := range userImages {
+		contextImages = append(contextImages, requestctx.InputImage{ID: fmt.Sprintf("current-%d", i+1), MIMEType: image.MimeType, Data: image.Data, Source: image.Source})
 	}
 	ctx = requestctx.WithInputImages(ctx, contextImages)
 	toolExposure := exposure.NewExposure()
 	if strings.EqualFold(strings.TrimSpace(gateway), "homeassistant") {
 		toolExposure.HideBuiltins(toolnames.ComfyUITextToImage, toolnames.ComfyUIImageToImage)
-	} else if len(userImages) == 0 {
-		toolExposure.HideBuiltins(toolnames.ComfyUIImageToImage)
 	}
 	ctx = requestctx.WithToolExposer(ctx, toolExposure)
 	toolGovernor := governance.New(a.toolPolicy)
@@ -237,6 +236,17 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	meta := requestctx.MetadataFromContext(ctx)
 	meta.SessionGeneration = sessionGeneration
 	ctx = requestctx.WithMetadata(ctx, meta)
+	if a.userMemory != nil && sessionGeneration > 0 && gateway != "homeassistant" && a.registry.HasHandler(toolnames.ComfyUIImageToImage) {
+		imagesStarted := time.Now()
+		priorImages, err := a.userMemory.SessionImages(ctx, senderID, sessionKey, sessionGeneration)
+		if err != nil {
+			reqLog.Warn("agent.images.load_failed", "failed to load session images", config.F("status", "degraded"), config.ErrorField(err))
+		} else {
+			contextImages = append(contextImages, priorImages...)
+			reqLog.Info("agent.images.loaded", "loaded session images", config.F("image_count", len(priorImages)), config.F("duration_ms", time.Since(imagesStarted).Milliseconds()), config.F("status", "ok"))
+		}
+		ctx = requestctx.WithInputImages(ctx, contextImages)
+	}
 	var recalledMemories []memory.RecallResult
 	if a.userMemory != nil {
 		recallQuery, _ := stripReplyContext(userPrompt)
@@ -324,6 +334,11 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		previousSummary = &sessionSummary
 	}
 	foregroundCompaction := newForegroundCompactionState(a.compactor, inputLimit, dynamicSystemPrompt, profileContent, userPrompt, userImages, previousSummary, foregroundDebt, streamCallback)
+	if len(contextImages) > 0 && gateway != "homeassistant" && a.registry.HasHandler(toolnames.ComfyUIImageToImage) {
+		imageContext := sessionImageContext(contextImages, nil)
+		messages = append(messages, imageContext)
+		foregroundCompaction.imageContext = &imageContext
+	}
 	if promptContext.RequiredOverBudget {
 		reqLog.Warn("agent.context.over_budget", "prompt still exceeds budget after compaction",
 			config.F("estimated_after", promptContext.EstimatedAfter),
@@ -380,6 +395,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 
 	var lastResp *llm.ChatResponse
 	var outputAttachments []media.OutputAttachment
+	var generatedImages []requestctx.InputImage
 	toolGovernanceStopReason := ""
 	temporaryParserFallback := false
 	imageSizeFallbackUsed := false
@@ -564,7 +580,17 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 			policy, advertised := catalog.Policies[toolName]
 			decision := governance.Decision{ReasonCode: iterationDecision.ReasonCode}
 			if iterationDecision.Allowed {
-				decision = toolGovernor.BeforeExecution(toolName, tc.Function.Arguments, policy, advertised)
+				fingerprintArgs := tc.Function.Arguments
+				if _, explicit := fingerprintArgs["source_image_id"]; toolName == toolnames.ComfyUIImageToImage && !explicit && len(contextImages) > 0 {
+					// Bind duplicates to the default source at this execution, without
+					// rewriting model arguments or bypassing handler source validation.
+					fingerprintArgs = make(map[string]interface{}, len(tc.Function.Arguments)+1)
+					for key, value := range tc.Function.Arguments {
+						fingerprintArgs[key] = value
+					}
+					fingerprintArgs["source_image_id"] = contextImages[0].ID
+				}
+				decision = toolGovernor.BeforeExecution(toolName, fingerprintArgs, policy, advertised)
 			}
 			if decision.Allowed {
 				toolExecutionCount++
@@ -581,7 +607,34 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 					} else if attachmentErr := media.ValidateOutputAttachments(candidate); attachmentErr != nil {
 						execErr = fmt.Errorf("tool returned invalid attachments: %w", attachmentErr)
 					} else {
-						outputAttachments = candidate
+						if toolName == toolnames.ComfyUITextToImage || toolName == toolnames.ComfyUIImageToImage {
+							for _, attachment := range result.Attachments {
+								normalized, err := media.NormalizeInputImageFromBytes(nil, attachment.MIMEType, attachment.Data, "generated")
+								if err != nil {
+									execErr = fmt.Errorf("normalize generated image: %w", err)
+									break
+								}
+								image := requestctx.InputImage{ID: config.NewRequestID(), MIMEType: normalized.Image.MimeType, Data: normalized.Image.Data, Source: "generated"}
+								var metadata map[string]json.RawMessage
+								if err := json.Unmarshal([]byte(result.Content), &metadata); err != nil || metadata == nil {
+									execErr = fmt.Errorf("invalid generated image metadata")
+									break
+								}
+								metadata["source_image_id"], _ = json.Marshal(image.ID)
+								encoded, _ := json.Marshal(metadata)
+								result.Content = string(encoded)
+								generatedImages = append(generatedImages, image)
+								if len(generatedImages) > 4 {
+									generatedImages = generatedImages[len(generatedImages)-4:]
+								}
+								contextImages = append([]requestctx.InputImage{image}, contextImages...)
+								ctx = requestctx.WithInputImages(ctx, contextImages)
+								reqLog.Info("agent.images.generated", "normalized generated image for active context", config.F("image_bytes", normalized.NormalizedBytes), config.F("image_count", len(generatedImages)), config.F("status", "ok"))
+							}
+						}
+						if execErr == nil {
+							outputAttachments = candidate
+						}
 					}
 				}
 				toolGovernor.RecordResult(toolName, decision, result, execErr)
@@ -694,6 +747,11 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 			toolHistory.Batches = append(toolHistory.Batches, historyBatch)
 		}
 		foregroundCompaction.addToolBatch(foregroundBatch, userPrompt)
+		if len(generatedImages) > 0 {
+			imageContext := sessionImageContext(contextImages, generatedImages)
+			messages = replaceSessionImageContext(messages, foregroundCompaction.imageContext, imageContext)
+			foregroundCompaction.imageContext = &imageContext
+		}
 		if reason := toolGovernor.GlobalStopReason(); reason != "" {
 			toolGovernanceStopReason = reason
 			reqLog.Warn("agent.tool_budget.exhausted", "tool governance budget exhausted",
@@ -893,23 +951,36 @@ finalize:
 		persistenceStatus = "failed"
 		return nil, fmt.Errorf("persist staged foreground memory: session storage is unavailable")
 	}
+	if len(generatedImages) > 0 && (a.userMemory == nil || sessionGeneration <= 0) {
+		persistenceStatus = "failed"
+		return nil, fmt.Errorf("persist generated images: session storage is unavailable")
+	}
 	var storedTurn memory.StoredSessionTurn
 	if finalContent != "" && a.userMemory != nil && sessionGeneration > 0 {
 		persistenceStatus = "failed"
 		storedReplay := memory.SessionTurn{UserText: userMemoryContent, AssistantText: finalContent, ToolNames: uniqueToolNames(toolAnnotations), ToolHistory: toolHistory}
 		completedPressure := tokenbudget.EstimateCompletedRequest(promptContext.EstimatedBefore, storedReplay.UserText, memory.SessionTurnMessages(storedReplay))
 		var err error
-		storedTurn, err = a.userMemory.AppendPendingSessionTurn(ctx, memory.SessionTurnWrite{SessionID: sessionKey, UserID: senderID, Generation: sessionGeneration, UserText: userMemoryContent, AssistantText: finalContent, GroupGateway: meta.GroupGateway, GroupChatID: meta.GroupChatID, PublicUserText: meta.PublicUserText, ToolNames: toolAnnotations, History: toolHistory, Staged: stagedMemory, TTL: sessionTurnTTL, Pressure: memory.SessionPromptPressure{Tokens: completedPressure, Limit: promptContext.InputLimit, Version: promptPressureVersion(a.model, promptContext.InputLimit)}})
+		storedTurn, err = a.userMemory.AppendPendingSessionTurn(ctx, memory.SessionTurnWrite{SessionID: sessionKey, UserID: senderID, Generation: sessionGeneration, UserText: userMemoryContent, AssistantText: finalContent, GroupGateway: meta.GroupGateway, GroupChatID: meta.GroupChatID, PublicUserText: meta.PublicUserText, ToolNames: toolAnnotations, History: toolHistory, Staged: stagedMemory, Images: generatedImages, TTL: sessionTurnTTL, Pressure: memory.SessionPromptPressure{Tokens: completedPressure, Limit: promptContext.InputLimit, Version: promptPressureVersion(a.model, promptContext.InputLimit)}})
 		if err != nil {
 			reqLog.Warn("agent.session_memory.write_failed", "failed to append session memory after turn", config.F("status", "degraded"), config.ErrorField(err))
 			if len(stagedMemory) > 0 {
 				return nil, fmt.Errorf("persist staged foreground memory: %w", err)
 			}
+			if len(generatedImages) > 0 {
+				return nil, fmt.Errorf("persist generated images: %w", err)
+			}
 		} else if len(stagedMemory) > 0 && storedTurn.ID == 0 {
 			return nil, fmt.Errorf("persist staged foreground memory: session turn was not stored")
 		}
+		if len(generatedImages) > 0 && storedTurn.ID == 0 {
+			return nil, fmt.Errorf("persist generated images: session turn was not stored")
+		}
 		if storedTurn.ID > 0 {
 			persistenceStatus = "pending"
+			if len(generatedImages) > 0 {
+				reqLog.Info("agent.images.stored", "stored pending session images", config.F("image_count", len(generatedImages)), config.F("status", "ok"))
+			}
 		}
 	}
 

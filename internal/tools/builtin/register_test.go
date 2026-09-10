@@ -440,7 +440,7 @@ func TestRegisterComfyUIProviderMatrix(t *testing.T) {
 	}
 }
 
-func TestRegisterComfyUISchemasExposeOnlyPrompts(t *testing.T) {
+func TestRegisterComfyUISchemasExposePromptsAndImageSource(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
 	reg := newTestRegistry(t, log)
 	cfg := testConfig()
@@ -457,7 +457,14 @@ func TestRegisterComfyUISchemasExposeOnlyPrompts(t *testing.T) {
 			t.Fatalf("missing %s", name)
 		}
 		schema := tool.Function.Parameters
-		if len(schema.Properties) != 2 || len(schema.Required) != 1 || schema.Required[0] != "prompt" || schema.AdditionalProperties == nil || *schema.AdditionalProperties {
+		wantProperties := 2
+		if name == toolnames.ComfyUIImageToImage {
+			wantProperties = 3
+			if _, ok := schema.Properties["source_image_id"]; !ok {
+				t.Fatal("missing image source selector")
+			}
+		}
+		if len(schema.Properties) != wantProperties || len(schema.Required) != 1 || schema.Required[0] != "prompt" || schema.AdditionalProperties == nil || *schema.AdditionalProperties {
 			t.Fatalf("%s schema=%+v", name, schema)
 		}
 		prompt, ok := schema.Properties["prompt"]

@@ -114,8 +114,9 @@ type Metadata struct {
 	JobID             int64
 }
 
-// InputImage is a request-scoped copy of one normalized current-turn image.
+// InputImage is a normalized current or generated image available to this request.
 type InputImage struct {
+	ID       string
 	MIMEType string
 	Data     string
 	Source   string
@@ -154,12 +155,12 @@ func ToolExposerFromContext(ctx context.Context) ToolExposer {
 	return exposer
 }
 
-// WithInputImages attaches a defensive copy of current-turn images to ctx.
+// WithInputImages attaches a defensive copy of available images in default selection order.
 func WithInputImages(ctx context.Context, images []InputImage) context.Context {
 	return context.WithValue(ctx, inputImagesKey, append([]InputImage(nil), images...))
 }
 
-// InputImagesFromContext returns a defensive copy of current-turn images.
+// InputImagesFromContext returns a defensive copy of the available image catalog.
 func InputImagesFromContext(ctx context.Context) []InputImage {
 	images, _ := ctx.Value(inputImagesKey).([]InputImage)
 	return append([]InputImage(nil), images...)

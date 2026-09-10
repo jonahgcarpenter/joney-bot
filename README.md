@@ -12,6 +12,7 @@ It combines tools, private long-term memory, conversation continuity, image unde
 - Chat through iMessage, Discord, or the [Home Assistant integration](https://github.com/jonahgcarpenter/has-oswald-conversation)
 - Send text, images, animated GIFs, and replies with quoted context
 - Search the web, check the current time, generate images with ComfyUI, and use connected MCP tools
+- Refine generated images across turns: "generate a car", "make it blue", then "make it purple" reuses successive outputs in the same active conversation. Normalized generated images are retained for up to 24 hours, with at most eight per user/conversation; reset and deletion remove them. Image generation is unavailable through Home Assistant.
 - Remember your preferences, projects, and other useful details across conversations
 - Keep continuity in long conversations and search earlier conversation details
 - Link your accounts so your personal memory follows you across gateways

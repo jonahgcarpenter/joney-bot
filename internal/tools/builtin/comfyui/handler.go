@@ -24,7 +24,7 @@ type generator interface {
 
 type imageSource func(context.Context) []requestctx.InputImage
 
-// NewHandler builds a ComfyUI tool handler using current request images from requestctx.
+// NewHandler builds a ComfyUI handler using the agent's scoped image catalog.
 func NewHandler(mode Mode, workflow *Workflow, client *Client, log *config.Logger) func(context.Context, map[string]interface{}) (governance.Result, error) {
 	return newHandler(mode, workflow, client, log, requestctx.InputImagesFromContext)
 }
@@ -50,10 +50,28 @@ func newHandler(mode Mode, workflow *Workflow, client generator, log *config.Log
 		if mode == ImageToImage {
 			requestImages := images(ctx)
 			if len(requestImages) == 0 {
-				return governance.Result{}, errors.New("image-to-image generation requires an image on the current request")
+				return governance.Result{}, errors.New("image-to-image generation requires a current image or a retained generated image in this session")
+			}
+			selected := requestImages[0]
+			if raw, exists := args["source_image_id"]; exists {
+				id, ok := raw.(string)
+				if !ok || strings.TrimSpace(id) == "" {
+					return governance.Result{}, errors.New("source_image_id must be a nonempty available image ID")
+				}
+				found := false
+				for _, candidate := range requestImages {
+					if candidate.ID == id {
+						selected = candidate
+						found = true
+						break
+					}
+				}
+				if !found {
+					return governance.Result{}, errors.New("source_image_id is unavailable; use an image ID from the current session image catalog")
+				}
 			}
 			var err error
-			inputPNG, err = reencodePNG(requestImages[0])
+			inputPNG, err = reencodePNG(selected)
 			if err != nil {
 				return governance.Result{}, err
 			}

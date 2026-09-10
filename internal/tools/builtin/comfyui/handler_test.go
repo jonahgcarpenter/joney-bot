@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"image"
 	"strings"
 	"testing"
@@ -74,4 +75,24 @@ func authenticatedContext() context.Context {
 	return requestctx.WithPrincipal(context.Background(), identity.Principal{
 		CanonicalUserID: "user-1", Gateway: "discord", ExternalID: "external-1", Assurance: identity.AssuranceDiscordGateway,
 	})
+}
+
+func TestImageHandlerSelectsOnlyAvailableSourceIDs(t *testing.T) {
+	workflow, err := LoadWorkflow(workflowPath("image-to-image-basic.json"), ImageToImage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []interface{}{"generated-id", "current-2", "foreign-id", "", 42} {
+		t.Run(fmt.Sprint(id), func(t *testing.T) {
+			generator := &fakeGenerator{result: testPNG(t)}
+			handler := newHandler(ImageToImage, workflow, generator, config.NewLogger(config.LevelError), func(context.Context) []requestctx.InputImage {
+				return []requestctx.InputImage{{ID: "current-1", Data: "must not select first"}, {ID: "generated-id", Data: base64.StdEncoding.EncodeToString(testPNG(t))}, {ID: "current-2", Data: base64.StdEncoding.EncodeToString(testPNG(t))}}
+			})
+			_, err := handler(authenticatedContext(), map[string]interface{}{"prompt": "make it blue", "source_image_id": id})
+			valid := id == "generated-id" || id == "current-2"
+			if (err == nil) != valid || (len(generator.input) > 0) != valid {
+				t.Fatalf("valid=%v err=%v upload bytes=%d", valid, err, len(generator.input))
+			}
+		})
+	}
 }

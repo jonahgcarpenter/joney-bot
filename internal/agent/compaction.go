@@ -31,6 +31,7 @@ type foregroundCompactionState struct {
 	stream        func(StreamChunk)
 	lastArtifact  memory.SummaryArtifact
 	hasCheckpoint bool
+	imageContext  *llm.ChatMessage
 }
 
 type foregroundCompactionStats struct {
@@ -95,6 +96,9 @@ func (s *foregroundCompactionState) prepare(ctx context.Context, messages []llm.
 	}
 	rebuilt := append([]llm.ChatMessage(nil), s.prefix...)
 	rebuilt = append(rebuilt, llm.ChatMessage{Role: "user", Content: rendered}, s.current)
+	if s.imageContext != nil {
+		rebuilt = append(rebuilt, *s.imageContext)
+	}
 	s.previous = &memory.SessionSummary{
 		Narrative: artifact.Narrative, OpenTasks: artifact.OpenTasks,
 		Commitments: artifact.Commitments, Entities: artifact.Entities,

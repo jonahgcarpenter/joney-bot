@@ -110,6 +110,7 @@ func (s *Service) sweepAt(ctx context.Context, now time.Time) {
 		config.F("observation_deleted_count", counts.SessionCleanup.ObservationsDeleted),
 		config.F("assessment_receipt_deleted_count", counts.AssessmentReceiptsDeleted),
 		config.F("observation_receipt_deleted_count", counts.ObservationReceiptsDeleted),
+		config.F("session_image_deleted_count", counts.SessionImagesDeleted),
 		config.F("expiry_candidate_deleted_count", counts.SessionCleanup.CandidatesDeleted),
 		config.F("expiry_formation_job_deleted_count", counts.SessionCleanup.FormationJobsDeleted),
 		config.F("session_summary_deleted_count", counts.SessionCleanup.SessionSummariesDeleted),
