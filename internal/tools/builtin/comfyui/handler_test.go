@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"image"
+	"math"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -92,6 +94,69 @@ func TestImageHandlerSelectsOnlyAvailableSourceIDs(t *testing.T) {
 			valid := id == "generated-id" || id == "current-2"
 			if (err == nil) != valid || (len(generator.input) > 0) != valid {
 				t.Fatalf("valid=%v err=%v upload bytes=%d", valid, err, len(generator.input))
+			}
+		})
+	}
+}
+
+func TestImageHandlerStrengthValidationAndGraph(t *testing.T) {
+	workflow, err := LoadWorkflow(workflowPath("image-to-image-basic.json"), ImageToImage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Use an operator value distinct from the checked-in default.
+	workflow.nodes["26"].Inputs["denoise"] = 0.37
+	original := cloneNodes(t, workflow.nodes)
+	for _, test := range []struct {
+		name  string
+		value interface{}
+		omit  bool
+		valid bool
+	}{
+		{name: "omitted", omit: true, valid: true},
+		{name: "minimum", value: 0.1, valid: true},
+		{name: "visible change", value: 0.6, valid: true},
+		{name: "maximum", value: 0.9, valid: true},
+		{name: "null", value: nil},
+		{name: "string", value: "0.6"},
+		{name: "bool", value: true},
+		{name: "object", value: map[string]interface{}{}},
+		{name: "array", value: []interface{}{0.6}},
+		{name: "zero", value: 0.0},
+		{name: "below", value: 0.099},
+		{name: "above", value: 0.901},
+		{name: "nan", value: math.NaN()},
+		{name: "positive infinity", value: math.Inf(1)},
+		{name: "negative infinity", value: math.Inf(-1)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			generator := &fakeGenerator{result: testPNG(t)}
+			handler := newHandler(ImageToImage, workflow, generator, config.NewLogger(config.LevelError), func(context.Context) []requestctx.InputImage {
+				return []requestctx.InputImage{{Data: base64.StdEncoding.EncodeToString(testPNG(t))}}
+			})
+			args := map[string]interface{}{"prompt": "a cobalt-blue car", "negative_prompt": "red panels"}
+			if !test.omit {
+				args["strength"] = test.value
+			}
+			_, err := handler(authenticatedContext(), args)
+			if (err == nil) != test.valid || (generator.workflow != nil) != test.valid {
+				t.Fatalf("valid=%v submitted=%v err=%v", test.valid, generator.workflow != nil, err)
+			}
+			if test.valid {
+				expected := cloneNodes(t, original)
+				expected["24"].Inputs["text"] = args["prompt"]
+				expected["25"].Inputs["text"] = args["negative_prompt"]
+				expected["26"].Inputs["seed"] = generator.workflow["26"].Inputs["seed"]
+				expected["29"].Inputs["image"] = InputImageReference
+				if !test.omit {
+					expected["26"].Inputs["denoise"] = test.value
+				}
+				if !reflect.DeepEqual(generator.workflow, expected) {
+					t.Fatal("submitted graph differs outside approved request fields")
+				}
+			}
+			if !reflect.DeepEqual(workflow.nodes, original) {
+				t.Fatal("operator template mutated")
 			}
 		})
 	}

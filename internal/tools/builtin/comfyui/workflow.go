@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"reflect"
 )
@@ -39,7 +40,11 @@ func LoadWorkflow(path string, mode Mode) (*Workflow, error) {
 }
 
 // Build returns a deep copy with only request-controlled fields changed.
-func (w *Workflow) Build(prompt, negativePrompt string) (map[string]node, uint32, error) {
+// A nil strength preserves template denoise; overrides are image-to-image only.
+func (w *Workflow) Build(prompt, negativePrompt string, strength *float64) (map[string]node, uint32, error) {
+	if strength != nil && (w.mode != ImageToImage || math.IsNaN(*strength) || math.IsInf(*strength, 0) || *strength < 0.1 || *strength > 0.9) {
+		return nil, 0, fmt.Errorf("strength must be a finite number between 0.1 and 0.9 for image-to-image")
+	}
 	encoded, err := json.Marshal(w.nodes)
 	if err != nil {
 		return nil, 0, fmt.Errorf("clone ComfyUI workflow")
@@ -61,6 +66,9 @@ func (w *Workflow) Build(prompt, negativePrompt string) (map[string]node, uint32
 		nodes["24"].Inputs["text"] = prompt
 		nodes["25"].Inputs["text"] = negativePrompt
 		nodes["26"].Inputs["seed"] = seed
+		if strength != nil {
+			nodes["26"].Inputs["denoise"] = *strength
+		}
 		nodes["29"].Inputs["image"] = InputImageReference
 	}
 	return nodes, seed, nil

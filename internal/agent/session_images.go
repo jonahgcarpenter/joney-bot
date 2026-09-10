@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
@@ -16,7 +17,7 @@ func sessionImageContext(sources, generated []requestctx.InputImage) llm.ChatMes
 	for _, image := range sources {
 		text.WriteString(image.ID)
 		if image.Source == "generated" {
-			text.WriteString(" (generated)")
+			fmt.Fprintf(&text, " (image_id=%s version=%d parent_source_image_id=%s)", image.ImageID, image.Version, image.ParentSourceImageID)
 		} else {
 			text.WriteString(" (current attached/replied)")
 		}
@@ -28,6 +29,54 @@ func sessionImageContext(sources, generated []requestctx.InputImage) llm.ChatMes
 		message.Images = append(message.Images, llm.InputImage{MimeType: image.MIMEType, Data: image.Data, Source: "generated"})
 	}
 	return message
+}
+
+// planGeneratedImage resolves only catalog-owned selectors before provider work.
+func planGeneratedImage(args map[string]interface{}, edit bool, sources, selected []requestctx.InputImage) (requestctx.InputImage, int, error) {
+	image := requestctx.InputImage{}
+	variant := false
+	if edit {
+		if raw, exists := args["create_variant"]; exists {
+			var ok bool
+			variant, ok = raw.(bool)
+			if !ok {
+				return image, -1, fmt.Errorf("create_variant must be a boolean")
+			}
+		}
+		if len(sources) == 0 {
+			return image, -1, fmt.Errorf("provide a source image or generate one first")
+		}
+		source := sources[0]
+		if raw, exists := args["source_image_id"]; exists {
+			id, ok := raw.(string)
+			if !ok || id == "" {
+				return image, -1, fmt.Errorf("source_image_id must be an available catalog ID")
+			}
+			found := false
+			for _, candidate := range sources {
+				if candidate.ID == id {
+					source, found = candidate, true
+					break
+				}
+			}
+			if !found {
+				return image, -1, fmt.Errorf("source_image_id is unavailable; select an ID from the current catalog")
+			}
+		}
+		image.ParentSourceImageID = source.ID
+		if !variant {
+			image.ImageID = source.ImageID
+		}
+	}
+	for i, current := range selected {
+		if image.ImageID != "" && current.ImageID == image.ImageID {
+			return image, i, nil
+		}
+	}
+	if len(selected) >= 4 {
+		return image, -1, fmt.Errorf("at most four logical images can be delivered per request; edit an existing generated image with create_variant=false or ask for another request")
+	}
+	return image, -1, nil
 }
 
 func replaceSessionImageContext(messages []llm.ChatMessage, previous *llm.ChatMessage, imageContext llm.ChatMessage) []llm.ChatMessage {

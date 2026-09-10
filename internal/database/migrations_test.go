@@ -577,7 +577,7 @@ func TestPermanentV400CanonicalObjectInventory(t *testing.T) {
 	}
 	defer db.Close()
 
-	for objectType, want := range map[string]int{"table": 19, "index": 28, "trigger": 37, "view": 0} {
+	for objectType, want := range map[string]int{"table": 19, "index": 29, "trigger": 37, "view": 0} {
 		var got int
 		if err := db.SQL().QueryRow(`
 SELECT COUNT(*) FROM sqlite_master

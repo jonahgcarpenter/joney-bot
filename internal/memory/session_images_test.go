@@ -21,7 +21,7 @@ func TestSessionImagesDeliveryScopeBoundsAndReset(t *testing.T) {
 	}
 	appendImage := func(id string) StoredSessionTurn {
 		t.Helper()
-		turn, err := s.AppendPendingSessionTurn(ctx, SessionTurnWrite{UserID: "user", SessionID: "session", Generation: profile.Generation, UserText: "generate", AssistantText: "image", TTL: time.Hour, History: EmptyToolHistory(), Pressure: SessionPromptPressure{Limit: 1000, Version: "test"}, Images: []requestctx.InputImage{{ID: id, MIMEType: "image/png", Data: base64.StdEncoding.EncodeToString([]byte("synthetic normalized bytes"))}}})
+		turn, err := s.AppendPendingSessionTurn(ctx, SessionTurnWrite{UserID: "user", SessionID: "session", Generation: profile.Generation, UserText: "generate", AssistantText: "image", TTL: time.Hour, History: EmptyToolHistory(), Pressure: SessionPromptPressure{Limit: 1000, Version: "test"}, Images: []requestctx.InputImage{{ID: id, ImageID: id, Version: 1, VersionHighwater: 1, MIMEType: "image/png", Data: base64.StdEncoding.EncodeToString([]byte("synthetic normalized bytes"))}}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -79,6 +79,44 @@ func TestSessionImagesDeliveryScopeBoundsAndReset(t *testing.T) {
 	}
 }
 
+func TestImageVersionHighwaterSurvivesRemovalOfNewestAsset(t *testing.T) {
+	s := newFormationTestStore(t)
+	ctx := context.Background()
+	profile, err := s.ResolveSessionProfile(ctx, "user", "session", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for version := 1; version <= 2; version++ {
+		turn, err := s.AppendPendingSessionTurn(ctx, SessionTurnWrite{UserID: "user", SessionID: "session", Generation: profile.Generation, UserText: "synthetic", AssistantText: "image", TTL: time.Hour, History: EmptyToolHistory(), Pressure: SessionPromptPressure{Limit: 1000, Version: "test"}, Images: []requestctx.InputImage{{ID: fmt.Sprint(version), ImageID: "logical", Version: version, VersionHighwater: version, MIMEType: "image/png", Data: base64.StdEncoding.EncodeToString([]byte("synthetic"))}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.MarkSessionTurnDelivered(ctx, "user", turn.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if version, err := s.ReserveImageVersion(ctx, "user", "session", profile.Generation, "logical", 2); err != nil || version != 3 {
+		t.Fatalf("version=%d err=%v", version, err)
+	}
+	// Simulate expiry/eviction of the newest asset while its ancestor survives.
+	if _, err := s.sql.Exec(`DELETE FROM session_images WHERE id='2'`); err != nil {
+		t.Fatal(err)
+	}
+	images, err := s.SessionImages(ctx, "user", "session", profile.Generation)
+	if err != nil || len(images) != 1 || images[0].VersionHighwater != 3 {
+		t.Fatal("ancestor lost reserved highwater")
+	}
+	if version, err := s.ReserveImageVersion(ctx, "user", "session", profile.Generation, "logical", 1); err != nil || version != 4 {
+		t.Fatalf("version=%d err=%v", version, err)
+	}
+	if _, err := s.ResetSession(ctx, "user", "session", time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ReserveImageVersion(ctx, "user", "session", profile.Generation, "logical", 4); err == nil {
+		t.Fatal("reset generation reserved a version")
+	}
+}
+
 func TestSessionImageWriteRollsBackTurnOnInvalidAsset(t *testing.T) {
 	s := newFormationTestStore(t)
 	ctx := context.Background()
@@ -87,7 +125,7 @@ func TestSessionImageWriteRollsBackTurnOnInvalidAsset(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, data := range []string{"invalid base64", base64.StdEncoding.EncodeToString(make([]byte, 286721))} {
-		_, err := s.AppendPendingSessionTurn(ctx, SessionTurnWrite{UserID: "user", SessionID: "session", Generation: profile.Generation, UserText: "generate", AssistantText: "image", History: EmptyToolHistory(), Pressure: SessionPromptPressure{Limit: 1000, Version: "test"}, Images: []requestctx.InputImage{{ID: "invalid", MIMEType: "image/png", Data: data}}})
+		_, err := s.AppendPendingSessionTurn(ctx, SessionTurnWrite{UserID: "user", SessionID: "session", Generation: profile.Generation, UserText: "generate", AssistantText: "image", History: EmptyToolHistory(), Pressure: SessionPromptPressure{Limit: 1000, Version: "test"}, Images: []requestctx.InputImage{{ID: "invalid", ImageID: "invalid", Version: 1, VersionHighwater: 1, MIMEType: "image/png", Data: data}}})
 		if err == nil {
 			t.Fatal("invalid asset accepted")
 		}
@@ -108,7 +146,7 @@ func TestSessionImagesFollowMergeGenerationAndForgetAll(t *testing.T) {
 			t.Fatal(err)
 		}
 		for i := 0; i < 6; i++ {
-			turn, err := s.AppendPendingSessionTurn(ctx, SessionTurnWrite{UserID: user, SessionID: "session", Generation: profile.Generation, UserText: "generate", AssistantText: "image", TTL: time.Hour, History: EmptyToolHistory(), Pressure: SessionPromptPressure{Limit: 1000, Version: "test"}, Images: []requestctx.InputImage{{ID: fmt.Sprintf("%s-%d", user, i), MIMEType: "image/png", Data: base64.StdEncoding.EncodeToString([]byte(user))}}})
+			turn, err := s.AppendPendingSessionTurn(ctx, SessionTurnWrite{UserID: user, SessionID: "session", Generation: profile.Generation, UserText: "generate", AssistantText: "image", TTL: time.Hour, History: EmptyToolHistory(), Pressure: SessionPromptPressure{Limit: 1000, Version: "test"}, Images: []requestctx.InputImage{{ID: fmt.Sprintf("%s-%d", user, i), ImageID: fmt.Sprintf("%s-%d", user, i), Version: 1, VersionHighwater: 1, MIMEType: "image/png", Data: base64.StdEncoding.EncodeToString([]byte(user))}}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -143,6 +181,21 @@ func TestSessionImagesFollowMergeGenerationAndForgetAll(t *testing.T) {
 		if len(images) > 0 && images[0].Data != base64.StdEncoding.EncodeToString([]byte("loser")) {
 			t.Fatal("merge lost image bytes")
 		}
+		if len(images) > 0 {
+			if images[0].ImageID != "loser-5" || images[0].Version != 1 {
+				t.Fatal("merge lost logical identity")
+			}
+			version, err := s.ReserveImageVersion(ctx, scope.user, "session", scope.generation, images[0].ImageID, 1)
+			if err != nil || version != 2 {
+				t.Fatalf("merged version=%d err=%v", version, err)
+			}
+		}
+	}
+	if _, err := s.ReserveImageVersion(ctx, "loser", "session", 1, "loser-5", 1); err == nil {
+		t.Fatal("loser reserved image version")
+	}
+	if _, err := s.ReserveImageVersion(ctx, "winner", "session", 1, "loser-5", 1); err == nil {
+		t.Fatal("stale generation reserved image version")
 	}
 	if _, err := s.ResetUserDataPreservingAccount(ctx, "winner", time.Now()); err != nil {
 		t.Fatal(err)
@@ -163,12 +216,15 @@ func TestSessionImagesReopenExpiryAndAccountDeletion(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			turn, err := s.AppendPendingSessionTurn(ctx, SessionTurnWrite{UserID: "user", SessionID: "session", Generation: profile.Generation, UserText: "generate", AssistantText: "image", TTL: time.Hour, History: EmptyToolHistory(), Pressure: SessionPromptPressure{Limit: 1000, Version: "test"}, Images: []requestctx.InputImage{{ID: "persistent-id", MIMEType: "image/png", Data: base64.StdEncoding.EncodeToString([]byte("retained bytes"))}}})
+			turn, err := s.AppendPendingSessionTurn(ctx, SessionTurnWrite{UserID: "user", SessionID: "session", Generation: profile.Generation, UserText: "generate", AssistantText: "image", TTL: time.Hour, History: EmptyToolHistory(), Pressure: SessionPromptPressure{Limit: 1000, Version: "test"}, Images: []requestctx.InputImage{{ID: "persistent-id", ImageID: "persistent-id", Version: 1, VersionHighwater: 1, MIMEType: "image/png", Data: base64.StdEncoding.EncodeToString([]byte("retained bytes"))}}})
 			if err != nil {
 				t.Fatal(err)
 			}
 			if err := s.MarkSessionTurnDelivered(ctx, "user", turn.ID); err != nil {
 				t.Fatal(err)
+			}
+			if version, err := s.ReserveImageVersion(ctx, "user", "session", profile.Generation, "persistent-id", 1); err != nil || version != 2 {
+				t.Fatalf("reserved=%d err=%v", version, err)
 			}
 			if err := s.Close(); err != nil {
 				t.Fatal(err)
@@ -178,6 +234,12 @@ func TestSessionImagesReopenExpiryAndAccountDeletion(t *testing.T) {
 			images, err := s.SessionImages(ctx, "user", "session", profile.Generation)
 			if err != nil || len(images) != 1 || images[0].ID != "persistent-id" || images[0].Data != base64.StdEncoding.EncodeToString([]byte("retained bytes")) {
 				t.Fatal("reopen lost image reference or bytes")
+			}
+			if images[0].ImageID != "persistent-id" || images[0].Version != 1 || images[0].VersionHighwater != 2 {
+				t.Fatal("reopen lost highwater or immutable version")
+			}
+			if version, err := s.ReserveImageVersion(ctx, "user", "session", profile.Generation, "persistent-id", 1); err != nil || version != 3 {
+				t.Fatalf("reopened reservation=%d err=%v", version, err)
 			}
 			if expire {
 				_, err = s.sql.Exec(`UPDATE sessions SET expires_at=? WHERE canonical_user_id='user'`, formatTime(time.Now().Add(-time.Hour)))

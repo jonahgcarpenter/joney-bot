@@ -117,7 +117,10 @@ WHERE EXISTS (
 		if err != nil {
 			return StoredSessionTurn{}, fmt.Errorf("decode session image: %w", err)
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO session_images(id,turn_id,ordinal,mime_type,data) VALUES(?,?,?,?,?)`, image.ID, id, ordinal, image.MIMEType, data); err != nil {
+		if image.ImageID == "" || len(image.ImageID) > 64 || len(image.ParentSourceImageID) > 64 {
+			return StoredSessionTurn{}, fmt.Errorf("invalid session image identity")
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO session_images(id,turn_id,ordinal,mime_type,data,image_id,version,parent_source_image_id,version_highwater) VALUES(?,?,?,?,?,?,?,?,?)`, image.ID, id, ordinal, image.MIMEType, data, image.ImageID, image.Version, image.ParentSourceImageID, image.VersionHighwater); err != nil {
 			return StoredSessionTurn{}, fmt.Errorf("store session image: %w", err)
 		}
 	}

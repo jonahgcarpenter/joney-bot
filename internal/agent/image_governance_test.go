@@ -29,6 +29,20 @@ func TestComfyImageGovernanceUsesEffectiveSource(t *testing.T) {
 		blocked int
 	}{
 		{
+			name:    "variant differs from default while explicit false is equivalent",
+			args:    []map[string]interface{}{{"source_image_id": "current-1"}, {"source_image_id": "current-1", "create_variant": false}, {"source_image_id": "current-1", "create_variant": true}, {"source_image_id": "current-1", "create_variant": true}},
+			uploads: []image.Point{image.Pt(2, 3), image.Pt(2, 3)}, blocked: 2,
+		},
+		{
+			name: "invalid variant values never submit",
+			args: []map[string]interface{}{{"create_variant": "true"}, {"create_variant": nil}, {"create_variant": 1}},
+		},
+		{
+			name:    "same source changed strength permits retry but same strength blocks",
+			args:    []map[string]interface{}{{"source_image_id": "current-1", "strength": 0.4}, {"source_image_id": "current-1", "strength": 0.6}, {"source_image_id": "current-1", "strength": 0.6}},
+			uploads: []image.Point{image.Pt(2, 3), image.Pt(2, 3)}, blocked: 1,
+		},
+		{
 			name:    "distinct explicit sources and exact duplicate",
 			args:    []map[string]interface{}{{"source_image_id": "current-1"}, {"source_image_id": "current-2"}, {"source_image_id": "current-1"}},
 			uploads: []image.Point{image.Pt(2, 3), image.Pt(4, 5)}, blocked: 1,

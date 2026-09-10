@@ -183,6 +183,13 @@ func normalizeComfyArgs(args map[string]interface{}) interface{} {
 
 func normalizeComfyImageArgs(args map[string]interface{}) interface{} {
 	normalized := normalizeComfyArgs(args).(map[string]interface{})
+	normalized["create_variant"] = false
+	if variant, exists := args["create_variant"]; exists {
+		normalized["create_variant"] = variant
+	}
+	if strength, exists := args["strength"]; exists {
+		normalized["strength"] = strength
+	}
 	if source, exists := args["source_image_id"]; exists {
 		// Source IDs are exact-match selectors; preserve invalid values for validation.
 		normalized["source_image_id"] = source

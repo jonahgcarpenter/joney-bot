@@ -701,7 +701,7 @@ func TestDiscordAgentResponseDeliversAttachmentBeforeFinalText(t *testing.T) {
 	}
 }
 
-func TestDiscordStreamsAttachmentBeforeRequestingFinalText(t *testing.T) {
+func TestDiscordDefersStreamAttachmentsUntilFinalResponse(t *testing.T) {
 	var mu sync.Mutex
 	var calls []string
 	attachmentStarted := make(chan struct{})
@@ -742,14 +742,13 @@ func TestDiscordStreamsAttachmentBeforeRequestingFinalText(t *testing.T) {
 		responder.Stream(agent.StreamChunk{Type: agent.ChunkToolResult, Tool: &agent.ToolStreamPayload{Name: "comfyui.text_to_image"}, Attachments: []media.OutputAttachment{attachment}})
 		close(streamReturned)
 	}()
-	<-attachmentStarted
+	<-streamReturned
 	select {
-	case <-streamReturned:
-		t.Fatal("stream callback returned before Discord completed the attachment request")
+	case <-attachmentStarted:
+		t.Fatal("attachment uploaded before final response")
 	default:
 	}
 	close(releaseAttachment)
-	<-streamReturned
 
 	responder.Stream(agent.StreamChunk{Type: agent.ChunkContent, Text: "generated"})
 	if err := responder.SendAgentResponse(&agent.Response{Response: "generated", Attachments: []media.OutputAttachment{attachment}}); err != nil {
@@ -767,12 +766,12 @@ func TestDiscordStreamsAttachmentBeforeRequestingFinalText(t *testing.T) {
 			finalTextIndex = i
 		}
 	}
-	if len(calls) == 0 || calls[0] != "attachment:generated.png" || attachmentCount != 1 || finalTextIndex <= 0 {
+	if attachmentCount != 1 || finalTextIndex < 0 {
 		t.Fatalf("calls=%v", calls)
 	}
 }
 
-func TestDiscordDoesNotRetryPermanentlyFailedStreamAttachmentAtFinalDelivery(t *testing.T) {
+func TestDiscordDoesNotRetryPermanentlyFailedFinalAttachment(t *testing.T) {
 	attachmentCalls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
@@ -788,7 +787,7 @@ func TestDiscordDoesNotRetryPermanentlyFailedStreamAttachmentAtFinalDelivery(t *
 	attachment := media.OutputAttachment{Filename: "generated.png", MIMEType: "image/png", Data: []byte("image-data")}
 	responder.Stream(agent.StreamChunk{Type: agent.ChunkToolResult, Attachments: []media.OutputAttachment{attachment}})
 	if err := responder.SendAgentResponse(&agent.Response{Response: "generated", Attachments: []media.OutputAttachment{attachment}}); err == nil {
-		t.Fatal("streamed attachment failure was not returned at final delivery")
+		t.Fatal("attachment failure was not returned at final delivery")
 	}
 	if attachmentCalls != 1 {
 		t.Fatalf("attachment calls=%d, want 1", attachmentCalls)

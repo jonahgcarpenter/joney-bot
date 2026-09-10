@@ -63,6 +63,16 @@ Replies to Oswald do not need another mention:
 Can you elaborate on that?
 ```
 
+### Image Refinement
+
+Images are delivered only with the final response, not during tool activity. Repeated edits normally replace the earlier draft of the same logical image, so you receive its latest successful version. Ask to keep alternatives, such as both blue and purple cars, to use `create_variant=true` and receive both. A response can produce at most four logical images; attempts to add a fifth are rejected before generation without removing earlier results. Other tool attachments are preserved, and a failed edit leaves the last successful draft selected.
+
+Each generated result has a stable `image_id`, a server-assigned `version`, an immutable `source_image_id`, and the exact `parent_source_image_id` used for an edit. Retrying from version 1 after version 2 creates version 3 with version 1 as its parent. Failed attempts may leave version gaps. Only selected final generated outputs are stored with the pending response and become reusable across turns after successful delivery. Intermediate drafts remain available only within a bounded active-request catalog; loaded prior images are not automatically sent again.
+
+If the model fails after generating images, Oswald returns the latest successful selections with a partial-completion message rather than discarding the files. They still require successful persistence and delivery before reuse; cancellation aborts the request instead. Delivery order remains stable, but the next default editing source is the most recently generated selected image. For example, generating A and B and then editing A delivers A-v2 followed by B, while the next edit defaults to A-v2.
+
+For image edits, describe the desired final result and what should stay the same, for example: "A cobalt-blue car with blue body panels, retaining the side view and street background." The image-to-image tool accepts optional `strength` from 0.1 to 0.9, mapped to denoise; omission keeps the operator's workflow value. Around 0.55-0.65 may help produce visible changes, but results are not guaranteed and higher values can alter composition or identity. Strength does not select a larger model or change resolution, precision, steps, CFG, or sampler; it is not a VRAM limit.
+
 ## Bootstrap
 
 When no administrator exists, Oswald prints a process-local, single-use bootstrap code to the terminal. From an authenticated Discord, iMessage, or Home Assistant conversation, run:

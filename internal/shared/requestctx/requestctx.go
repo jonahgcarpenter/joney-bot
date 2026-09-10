@@ -116,10 +116,15 @@ type Metadata struct {
 
 // InputImage is a normalized current or generated image available to this request.
 type InputImage struct {
-	ID       string
-	MIMEType string
-	Data     string
-	Source   string
+	// ID selects immutable source bytes; ImageID groups generated versions.
+	ID                  string
+	ImageID             string
+	Version             int
+	ParentSourceImageID string
+	VersionHighwater    int
+	MIMEType            string
+	Data                string
+	Source              string
 }
 
 // WithPrincipal returns a copy of ctx with the resolved request actor attached.

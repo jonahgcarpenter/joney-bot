@@ -23,15 +23,16 @@ import (
 )
 
 const (
-	sessionHistoryCandidateLimit = 1000
-	recentToolExposureTurns      = 4
-	automaticRecallTopK          = 4
-	automaticRecallCharLimit     = 2000
-	sessionTurnTTL               = 24 * time.Hour
-	emptyResponseRetryPrompt     = "Your previous completion contained no visible response. Answer the user's last request now using only visible response content."
-	emptyResponseFallback        = "I blanked on the actual answer. Try again and I'll take another shot."
-	contextCompactionFallback    = "I cannot continue because I ran out of context. Any completed actions have not been undone. Try splitting the remaining task into smaller steps."
-	sessionPromptPressurePrefix  = "session-prompt-pressure-v1"
+	sessionHistoryCandidateLimit  = 1000
+	recentToolExposureTurns       = 4
+	automaticRecallTopK           = 4
+	automaticRecallCharLimit      = 2000
+	sessionTurnTTL                = 24 * time.Hour
+	emptyResponseRetryPrompt      = "Your previous completion contained no visible response. Answer the user's last request now using only visible response content."
+	emptyResponseFallback         = "I blanked on the actual answer. Try again and I'll take another shot."
+	contextCompactionFallback     = "I cannot continue because I ran out of context. Any completed actions have not been undone. Try splitting the remaining task into smaller steps."
+	generatedImagePartialResponse = "The model could not finish the request. I am returning the latest successfully generated images; any completed actions have not been undone. Ask again to continue editing."
+	sessionPromptPressurePrefix   = "session-prompt-pressure-v1"
 )
 
 // Agent handles LLM orchestration: a single agentic loop where the model
@@ -94,7 +95,8 @@ func NewAgent(
 //
 // Tool execution errors are handled gracefully — failures inject an error tool
 // response so the model can decide how to proceed. Provider errors are captured
-// into Response.Error rather than returned as Go errors.
+// into Response.Error rather than returned as Go errors, except that completed
+// generated images are finalized with a partial response. Cancellation still aborts.
 func (a *Agent) Process(ctx context.Context, request Request) (response *Response, processErr error) {
 	if !request.Principal.Authenticated() {
 		return nil, fmt.Errorf("agent request has no authenticated principal")
@@ -396,15 +398,23 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	var lastResp *llm.ChatResponse
 	var outputAttachments []media.OutputAttachment
 	var generatedImages []requestctx.InputImage
+	var visionGeneratedImages []requestctx.InputImage
+	var generatedAttachmentSlots []int
+	imageHighwater := make(map[string]int)
+	for _, image := range contextImages {
+		if image.VersionHighwater > imageHighwater[image.ImageID] {
+			imageHighwater[image.ImageID] = image.VersionHighwater
+		}
+	}
 	toolGovernanceStopReason := ""
 	temporaryParserFallback := false
 	imageSizeFallbackUsed := false
-	useContextFallback := func() {
+	useFallback := func(content string) {
 		accumulatedContent.Reset()
-		accumulatedContent.WriteString(contextCompactionFallback)
-		lastResp = &llm.ChatResponse{Model: a.model, Message: llm.ChatMessage{Role: "assistant", Content: contextCompactionFallback}}
+		accumulatedContent.WriteString(content)
+		lastResp = &llm.ChatResponse{Model: a.model, Message: llm.ChatMessage{Role: "assistant", Content: content}}
 		if streamCallback != nil {
-			streamCallback(StreamChunk{Type: ChunkContent, Text: contextCompactionFallback})
+			streamCallback(StreamChunk{Type: ChunkContent, Text: content})
 		}
 	}
 
@@ -427,7 +437,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 			}
 			reqLog.Warn("agent.context.compaction_failed", "failed to compact active request context",
 				config.F("iteration", iteration), config.F("status", "degraded"), config.ErrorField(compactErr))
-			useContextFallback()
+			useFallback(contextCompactionFallback)
 			goto finalize
 		}
 		messages = preparedMessages
@@ -469,13 +479,19 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return nil, ctxErr
 			}
+			if errors.Is(err, context.Canceled) {
+				return nil, err
+			}
 			if err != nil && llm.IsContextLengthExceededError(err) {
-				useContextFallback()
+				useFallback(contextCompactionFallback)
 				goto finalize
 			}
 			if err == nil {
 				// Continue with the response recovered after compaction.
 				reqLog.Info("agent.model.context_retry_recovered", "model recovered after context compaction", config.F("status", "ok"))
+			} else if len(generatedImages) > 0 && !llm.IsTemporaryOllamaToolParserError(err) {
+				useFallback(generatedImagePartialResponse)
+				goto finalize
 			} else if imageRetriesExhausted {
 				imageSizeFallbackUsed = true
 				resp = &llm.ChatResponse{Model: a.model, Message: llm.ChatMessage{Role: "assistant", Content: imageSizeFallback}}
@@ -492,6 +508,9 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 				)
 				modelIterations++
 				resp, err = a.chatClient.Chat(ctx, req, chatCallback)
+				if errors.Is(err, context.Canceled) {
+					return nil, err
+				}
 				if ctxErr := ctx.Err(); ctxErr != nil {
 					return nil, ctxErr
 				}
@@ -510,6 +529,14 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 						config.F("status", "error"),
 						config.ErrorField(err),
 					)
+					if len(generatedImages) > 0 {
+						if llm.IsContextLengthExceededError(err) {
+							useFallback(contextCompactionFallback)
+						} else {
+							useFallback(generatedImagePartialResponse)
+						}
+						goto finalize
+					}
 					if llm.IsTemporaryOllamaToolParserError(err) {
 						temporaryParserFallback = true
 						resp = &llm.ChatResponse{Model: a.model, Message: llm.ChatMessage{Role: "assistant", Content: emptyResponseFallback}}
@@ -599,11 +626,37 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 				toolMeta.ParentOperationID = toolMeta.OperationID
 				toolMeta.OperationID = config.NewRequestID()
 				reqLog.Debug("agent.tool.start", "starting authorized tool execution", config.F("tool_name", toolName))
-				result, execErr = a.executeTool(requestctx.WithMetadata(ctx, toolMeta), request.Principal, toolName, tc.Function.Arguments, toolExposure)
+				isGenerated := toolName == toolnames.ComfyUITextToImage || toolName == toolnames.ComfyUIImageToImage
+				var plannedImage requestctx.InputImage
+				selectedSlot := -1
+				if isGenerated {
+					plannedImage, selectedSlot, execErr = planGeneratedImage(tc.Function.Arguments, toolName == toolnames.ComfyUIImageToImage, contextImages, generatedImages)
+					if execErr == nil {
+						if plannedImage.ImageID == "" {
+							plannedImage.ImageID = config.NewRequestID()
+						}
+						plannedImage.Version = imageHighwater[plannedImage.ImageID] + 1
+						if a.userMemory != nil && sessionGeneration > 0 {
+							plannedImage.Version, execErr = a.userMemory.ReserveImageVersion(ctx, senderID, sessionKey, sessionGeneration, plannedImage.ImageID, imageHighwater[plannedImage.ImageID])
+						}
+						if execErr == nil {
+							imageHighwater[plannedImage.ImageID] = plannedImage.Version
+						}
+					}
+				}
+				if execErr == nil {
+					result, execErr = a.executeTool(requestctx.WithMetadata(ctx, toolMeta), request.Principal, toolName, tc.Function.Arguments, toolExposure)
+				}
 				if execErr == nil && len(result.Attachments) > 0 {
 					candidate := append(append([]media.OutputAttachment(nil), outputAttachments...), result.Attachments...)
+					if isGenerated && selectedSlot >= 0 && len(result.Attachments) == 1 {
+						candidate = append([]media.OutputAttachment(nil), outputAttachments...)
+						candidate[generatedAttachmentSlots[selectedSlot]] = result.Attachments[0]
+					}
 					if result.Outcome != governance.OutcomeProductive {
 						execErr = fmt.Errorf("tool returned attachments without a productive result")
+					} else if isGenerated && len(result.Attachments) != 1 {
+						execErr = fmt.Errorf("generation must return exactly one image")
 					} else if attachmentErr := media.ValidateOutputAttachments(candidate); attachmentErr != nil {
 						execErr = fmt.Errorf("tool returned invalid attachments: %w", attachmentErr)
 					} else {
@@ -614,22 +667,57 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 									execErr = fmt.Errorf("normalize generated image: %w", err)
 									break
 								}
-								image := requestctx.InputImage{ID: config.NewRequestID(), MIMEType: normalized.Image.MimeType, Data: normalized.Image.Data, Source: "generated"}
+								image := plannedImage
+								image.ID, image.MIMEType, image.Data, image.Source = config.NewRequestID(), normalized.Image.MimeType, normalized.Image.Data, "generated"
+								image.VersionHighwater = image.Version
 								var metadata map[string]json.RawMessage
 								if err := json.Unmarshal([]byte(result.Content), &metadata); err != nil || metadata == nil {
 									execErr = fmt.Errorf("invalid generated image metadata")
 									break
 								}
 								metadata["source_image_id"], _ = json.Marshal(image.ID)
+								metadata["image_id"], _ = json.Marshal(image.ImageID)
+								metadata["version"], _ = json.Marshal(image.Version)
+								metadata["parent_source_image_id"], _ = json.Marshal(image.ParentSourceImageID)
 								encoded, _ := json.Marshal(metadata)
 								result.Content = string(encoded)
-								generatedImages = append(generatedImages, image)
-								if len(generatedImages) > 4 {
-									generatedImages = generatedImages[len(generatedImages)-4:]
+								visionGeneratedImages = append(visionGeneratedImages, image)
+								if len(visionGeneratedImages) > 4 {
+									visionGeneratedImages = visionGeneratedImages[len(visionGeneratedImages)-4:]
+								}
+								variant, _ := tc.Function.Arguments["create_variant"].(bool)
+								if !variant {
+									for i := range contextImages {
+										if contextImages[i].ID == image.ParentSourceImageID && contextImages[i].ImageID == "" {
+											contextImages[i].ImageID = image.ImageID
+										}
+									}
+								}
+								if selectedSlot >= 0 {
+									generatedImages[selectedSlot] = image
+								} else {
+									generatedImages = append(generatedImages, image)
+									generatedAttachmentSlots = append(generatedAttachmentSlots, len(outputAttachments))
 								}
 								contextImages = append([]requestctx.InputImage{image}, contextImages...)
+								if len(contextImages) > 24 {
+									// Keep selected deliverables editable even after many retries.
+									for i := len(contextImages) - 1; i >= 0; i-- {
+										pinned := false
+										for _, selected := range generatedImages {
+											if selected.ID == contextImages[i].ID {
+												pinned = true
+												break
+											}
+										}
+										if !pinned {
+											contextImages = append(contextImages[:i], contextImages[i+1:]...)
+											break
+										}
+									}
+								}
 								ctx = requestctx.WithInputImages(ctx, contextImages)
-								reqLog.Info("agent.images.generated", "normalized generated image for active context", config.F("image_bytes", normalized.NormalizedBytes), config.F("image_count", len(generatedImages)), config.F("status", "ok"))
+								reqLog.Info("agent.images.generated", "normalized generated image for active context", config.F("image_bytes", normalized.NormalizedBytes), config.F("image_count", len(visionGeneratedImages)), config.F("selected_image_count", len(generatedImages)), config.F("catalog_image_count", len(contextImages)), config.F("status", "ok"))
 							}
 						}
 						if execErr == nil {
@@ -700,14 +788,9 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 				toolAnnotations = append(toolAnnotations, toolName)
 			}
 			if streamCallback != nil {
-				var streamAttachments []media.OutputAttachment
-				if decision.Allowed && execErr == nil && len(result.Attachments) > 0 {
-					streamAttachments = append([]media.OutputAttachment(nil), result.Attachments...)
-				}
 				streamCallback(StreamChunk{
-					Type:        ChunkToolResult,
-					Tool:        toolStreamPayload(toolName, tc.Function.Arguments, toolContent, time.Since(toolStartedAt), execErr != nil || !decision.Allowed),
-					Attachments: streamAttachments,
+					Type: ChunkToolResult,
+					Tool: toolStreamPayload(toolName, tc.Function.Arguments, toolContent, time.Since(toolStartedAt), execErr != nil || !decision.Allowed),
 				})
 			}
 
@@ -748,7 +831,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		}
 		foregroundCompaction.addToolBatch(foregroundBatch, userPrompt)
 		if len(generatedImages) > 0 {
-			imageContext := sessionImageContext(contextImages, generatedImages)
+			imageContext := sessionImageContext(contextImages, visionGeneratedImages)
 			messages = replaceSessionImageContext(messages, foregroundCompaction.imageContext, imageContext)
 			foregroundCompaction.imageContext = &imageContext
 		}
@@ -773,7 +856,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 				return nil, ctxErr
 			}
 			reqLog.Warn("agent.context.compaction_failed", "failed to compact active request before final model call", config.F("status", "degraded"), config.ErrorField(compactErr))
-			useContextFallback()
+			useFallback(contextCompactionFallback)
 			goto finalize
 		}
 		messages = preparedMessages
@@ -807,8 +890,14 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 				return nil, ctxErr
 			}
 			if err != nil {
+				if errors.Is(err, context.Canceled) {
+					return nil, err
+				}
 				if llm.IsContextLengthExceededError(err) {
-					useContextFallback()
+					useFallback(contextCompactionFallback)
+					goto finalize
+				} else if len(generatedImages) > 0 {
+					useFallback(generatedImagePartialResponse)
 					goto finalize
 				} else if imageRetriesExhausted {
 					imageSizeFallbackUsed = true
@@ -898,6 +987,9 @@ finalize:
 				return nil, ctxErr
 			}
 			if err != nil {
+				if errors.Is(err, context.Canceled) {
+					return nil, err
+				}
 				reqLog.Warn("agent.response.empty_retry_failed", "empty-response retry failed",
 					config.F("status", "degraded"),
 					config.ErrorField(err),
@@ -907,6 +999,9 @@ finalize:
 					if streamCallback != nil {
 						streamCallback(StreamChunk{Type: ChunkContent, Text: finalContent})
 					}
+				} else if len(generatedImages) > 0 {
+					useFallback(generatedImagePartialResponse)
+					finalContent = generatedImagePartialResponse
 				} else if imageRetriesExhausted {
 					imageSizeFallbackUsed = true
 					finalContent = imageSizeFallback
@@ -951,6 +1046,20 @@ finalize:
 		persistenceStatus = "failed"
 		return nil, fmt.Errorf("persist staged foreground memory: session storage is unavailable")
 	}
+	for i := range generatedImages {
+		generatedImages[i].VersionHighwater = imageHighwater[generatedImages[i].ImageID]
+	}
+	// Delivery stays in first-logical-production order. Storage ordinals instead
+	// encode successful generation recency so the next default is the newest asset.
+	imagesForStorage := make([]requestctx.InputImage, 0, len(generatedImages))
+	for i := len(contextImages) - 1; i >= 0; i-- {
+		for _, selected := range generatedImages {
+			if selected.ID == contextImages[i].ID {
+				imagesForStorage = append(imagesForStorage, selected)
+				break
+			}
+		}
+	}
 	if len(generatedImages) > 0 && (a.userMemory == nil || sessionGeneration <= 0) {
 		persistenceStatus = "failed"
 		return nil, fmt.Errorf("persist generated images: session storage is unavailable")
@@ -961,7 +1070,7 @@ finalize:
 		storedReplay := memory.SessionTurn{UserText: userMemoryContent, AssistantText: finalContent, ToolNames: uniqueToolNames(toolAnnotations), ToolHistory: toolHistory}
 		completedPressure := tokenbudget.EstimateCompletedRequest(promptContext.EstimatedBefore, storedReplay.UserText, memory.SessionTurnMessages(storedReplay))
 		var err error
-		storedTurn, err = a.userMemory.AppendPendingSessionTurn(ctx, memory.SessionTurnWrite{SessionID: sessionKey, UserID: senderID, Generation: sessionGeneration, UserText: userMemoryContent, AssistantText: finalContent, GroupGateway: meta.GroupGateway, GroupChatID: meta.GroupChatID, PublicUserText: meta.PublicUserText, ToolNames: toolAnnotations, History: toolHistory, Staged: stagedMemory, Images: generatedImages, TTL: sessionTurnTTL, Pressure: memory.SessionPromptPressure{Tokens: completedPressure, Limit: promptContext.InputLimit, Version: promptPressureVersion(a.model, promptContext.InputLimit)}})
+		storedTurn, err = a.userMemory.AppendPendingSessionTurn(ctx, memory.SessionTurnWrite{SessionID: sessionKey, UserID: senderID, Generation: sessionGeneration, UserText: userMemoryContent, AssistantText: finalContent, GroupGateway: meta.GroupGateway, GroupChatID: meta.GroupChatID, PublicUserText: meta.PublicUserText, ToolNames: toolAnnotations, History: toolHistory, Staged: stagedMemory, Images: imagesForStorage, TTL: sessionTurnTTL, Pressure: memory.SessionPromptPressure{Tokens: completedPressure, Limit: promptContext.InputLimit, Version: promptPressureVersion(a.model, promptContext.InputLimit)}})
 		if err != nil {
 			reqLog.Warn("agent.session_memory.write_failed", "failed to append session memory after turn", config.F("status", "degraded"), config.ErrorField(err))
 			if len(stagedMemory) > 0 {
@@ -985,7 +1094,7 @@ finalize:
 	}
 
 	responseStatus := "ok"
-	if temporaryParserFallback || imageSizeFallbackUsed || toolGovernanceStopReason != "" || finalContent == contextCompactionFallback {
+	if temporaryParserFallback || imageSizeFallbackUsed || toolGovernanceStopReason != "" || finalContent == contextCompactionFallback || finalContent == generatedImagePartialResponse {
 		responseStatus = "degraded"
 	}
 	reqLog.Debug("agent.response.detail", "completed agent response",
@@ -1012,6 +1121,9 @@ finalize:
 	}
 	if finalContent == emptyResponseFallback && !temporaryParserFallback {
 		responseKind = "empty_fallback"
+	}
+	if finalContent == generatedImagePartialResponse {
+		responseKind = "image_partial"
 	}
 	return &Response{
 		Kind:              responseKind,

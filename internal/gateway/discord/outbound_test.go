@@ -363,7 +363,7 @@ func TestOutboundAgentErrorIgnoresStreamedAttachmentInventory(t *testing.T) {
 				if err := r.SendAgentError("safe error text"); err != nil {
 					t.Fatal(err)
 				}
-				if attachments != 1 || texts != 1 {
+				if attachments != 0 || texts != 1 {
 					t.Fatalf("attachments=%d texts=%d", attachments, texts)
 				}
 			})
