@@ -2,6 +2,7 @@ package comfyui
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -76,5 +77,65 @@ func TestGenerationStagesAndCleanupWarningExcludeProviderProse(t *testing.T) {
 	}
 	if !cleanupWarning || strings.Contains(output.String(), canary) {
 		t.Fatalf("logs=%s", output.String())
+	}
+}
+
+func TestImageStrengthStageTelemetry(t *testing.T) {
+	const canary = "private_strength_prompt"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/upload/image":
+			_ = json.NewEncoder(w).Encode(map[string]string{"name": InputFilename, "subfolder": InputSubfolder, "type": "input"})
+		case "/prompt":
+			http.Error(w, canary, http.StatusBadRequest)
+		case "/free":
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Errorf("unexpected endpoint %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	for _, level := range []config.Level{config.LevelInfo, config.LevelDebug} {
+		for _, explicit := range []bool{false, true} {
+			client, err := NewClient(server.URL, time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			workflow, err := LoadWorkflow(workflowPath("image-to-image-basic.json"), ImageToImage)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var output bytes.Buffer
+			log := config.NewLogger(level)
+			log.SetOutput(&output)
+			ctx := requestctx.WithMetadata(authenticatedContext(), requestctx.Metadata{RequestID: "req_strength", OperationID: "op_strength"})
+			ctx = requestctx.WithInputImages(ctx, []requestctx.InputImage{{Data: base64.StdEncoding.EncodeToString(testPNG(t))}})
+			args := map[string]interface{}{"prompt": canary}
+			want := workflow.nodes["26"].Inputs["denoise"]
+			if explicit {
+				args["strength"] = 0.6
+				want = 0.6
+			}
+			if _, err := NewHandler(ImageToImage, workflow, client, log)(ctx, args); err == nil {
+				t.Fatal("expected submission failure")
+			}
+			submits := 0
+			for _, line := range strings.Split(strings.TrimSpace(output.String()), "\n") {
+				var record map[string]interface{}
+				if err := json.Unmarshal([]byte(line), &record); err != nil {
+					t.Fatal(err)
+				}
+				if record["event"] == "provider.comfyui.stage.complete" && record["phase"] == "submit" {
+					submits++
+					if record["strength"] != want || record["level"] != "info" || record["status"] != "error" || record["request_id"] != "req_strength" || record["parent_operation_id"] != "op_strength" {
+						t.Fatalf("unexpected strength measurement: %+v", record)
+					}
+				}
+			}
+			if submits != 1 || strings.Contains(output.String(), canary) {
+				t.Fatalf("unsafe or missing measurement: %s", output.String())
+			}
+		}
 	}
 }

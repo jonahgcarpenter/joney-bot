@@ -22,7 +22,7 @@ func TestMigrationLogOnlyAfterChangedOpen(t *testing.T) {
 	if err := db.SQL().QueryRow(`PRAGMA foreign_keys`).Scan(&foreignKeys); err != nil || foreignKeys != 1 {
 		t.Fatalf("foreign keys=%d err=%v", foreignKeys, err)
 	}
-	if strings.Count(output.String(), `"event":"database.migrations.applied"`) != 1 || !strings.Contains(output.String(), `"applied_count":12`) {
+	if strings.Count(output.String(), `"event":"database.migrations.applied"`) != 1 || !strings.Contains(output.String(), `"applied_count":14`) {
 		t.Fatalf("migration logs=%s", output.String())
 	}
 	if err := db.Close(); err != nil {

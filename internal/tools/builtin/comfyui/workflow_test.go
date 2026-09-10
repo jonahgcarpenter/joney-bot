@@ -25,7 +25,7 @@ func TestBuildMutatesOnlyAllowedWorkflowFields(t *testing.T) {
 				t.Fatal(err)
 			}
 			expected := cloneNodes(t, workflow.nodes)
-			built, seed, err := workflow.Build("positive", "negative")
+			built, seed, err := workflow.Build("positive", "negative", nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -67,18 +67,37 @@ func TestLoadAndBuildWorkflows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	built, _, err := text.Build("positive", "negative")
+	built, _, err := text.Build("positive", "negative", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if built["6"].Inputs["text"] != "positive" || built["7"].Inputs["text"] != "negative" {
 		t.Fatalf("prompts not replaced: %+v", built)
 	}
+	for key, want := range map[string]interface{}{
+		"sampler_name": "dpmpp_2m", "scheduler": "karras",
+		"steps": float64(20), "cfg": float64(7), "denoise": float64(1),
+	} {
+		if got := built["3"].Inputs[key]; got != want {
+			t.Errorf("text sampler %s = %v, want %v", key, got, want)
+		}
+	}
+	for key, want := range map[string]interface{}{
+		"width": float64(512), "height": float64(512), "batch_size": float64(1),
+	} {
+		if got := built["5"].Inputs[key]; got != want {
+			t.Errorf("text latent %s = %v, want %v", key, got, want)
+		}
+	}
 	seed, ok := built["3"].Inputs["seed"].(uint32)
 	if !ok {
 		t.Fatalf("seed type = %T, want uint32", built["3"].Inputs["seed"])
 	}
 	_ = seed
+	strength := 0.6
+	if _, _, err := text.Build("positive", "negative", &strength); err == nil {
+		t.Fatal("text-to-image accepted a denoise override")
+	}
 	if text.nodes["6"].Inputs["text"] == "positive" {
 		t.Fatal("template was mutated")
 	}
@@ -87,7 +106,7 @@ func TestLoadAndBuildWorkflows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	built, _, err = image.Build("transform", "")
+	built, _, err = image.Build("transform", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

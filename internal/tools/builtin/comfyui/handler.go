@@ -24,7 +24,7 @@ type generator interface {
 
 type imageSource func(context.Context) []requestctx.InputImage
 
-// NewHandler builds a ComfyUI tool handler using current request images from requestctx.
+// NewHandler builds a ComfyUI handler using the agent's scoped image catalog.
 func NewHandler(mode Mode, workflow *Workflow, client *Client, log *config.Logger) func(context.Context, map[string]interface{}) (governance.Result, error) {
 	return newHandler(mode, workflow, client, log, requestctx.InputImagesFromContext)
 }
@@ -46,21 +46,54 @@ func newHandler(mode Mode, workflow *Workflow, client generator, log *config.Log
 			return governance.Result{}, fmt.Errorf("prompt text must not exceed %d characters", maxPromptRunes)
 		}
 
+		var strength *float64
+		if mode == ImageToImage {
+			if raw, exists := args["create_variant"]; exists {
+				if _, ok := raw.(bool); !ok {
+					return governance.Result{}, errors.New("create_variant must be a boolean")
+				}
+			}
+			if raw, exists := args["strength"]; exists {
+				value, ok := raw.(float64)
+				if !ok {
+					return governance.Result{}, errors.New("strength must be a finite number between 0.1 and 0.9")
+				}
+				strength = &value
+			}
+		}
+		built, seed, err := workflow.Build(prompt, negative, strength)
+		if err != nil {
+			return governance.Result{}, err
+		}
 		var inputPNG []byte
 		if mode == ImageToImage {
 			requestImages := images(ctx)
 			if len(requestImages) == 0 {
-				return governance.Result{}, errors.New("image-to-image generation requires an image on the current request")
+				return governance.Result{}, errors.New("image-to-image generation requires a current image or a retained generated image in this session")
+			}
+			selected := requestImages[0]
+			if raw, exists := args["source_image_id"]; exists {
+				id, ok := raw.(string)
+				if !ok || strings.TrimSpace(id) == "" {
+					return governance.Result{}, errors.New("source_image_id must be a nonempty available image ID")
+				}
+				found := false
+				for _, candidate := range requestImages {
+					if candidate.ID == id {
+						selected = candidate
+						found = true
+						break
+					}
+				}
+				if !found {
+					return governance.Result{}, errors.New("source_image_id is unavailable; use an image ID from the current session image catalog")
+				}
 			}
 			var err error
-			inputPNG, err = reencodePNG(requestImages[0])
+			inputPNG, err = reencodePNG(selected)
 			if err != nil {
 				return governance.Result{}, err
 			}
-		}
-		built, seed, err := workflow.Build(prompt, negative)
-		if err != nil {
-			return governance.Result{}, err
 		}
 		meta := requestctx.MetadataFromContext(ctx)
 		agentLog := log.Agent("agent.tool.comfyui", meta.RequestID, principal.CanonicalUserID, principal.Gateway, meta.Model).With(requestctx.LogFields(ctx)...)
@@ -70,7 +103,11 @@ func newHandler(mode Mode, workflow *Workflow, client generator, log *config.Log
 		if mode == ImageToImage {
 			outputNode = "30"
 		}
-		generated, cleanupFailed, err := client.Generate(context.WithValue(ctx, generationLoggerKey{}, log), built, outputNode, inputPNG)
+		generationLog := log
+		if mode == ImageToImage {
+			generationLog = log.With(config.F("strength", built["26"].Inputs["denoise"]))
+		}
+		generated, cleanupFailed, err := client.Generate(context.WithValue(ctx, generationLoggerKey{}, generationLog), built, outputNode, inputPNG)
 		if err != nil {
 			if cleanupFailed {
 				agentLog.Warn("agent.tool.comfyui.cleanup_failed", "ComfyUI VRAM cleanup failed", config.F("mode", string(mode)), config.F("reason_code", "vram_cleanup_failed"), config.F("status", "degraded"))

@@ -11,6 +11,7 @@ import (
 
 // MaintenanceCounts contains aggregate results from one sweep.
 type MaintenanceCounts struct {
+	SessionImagesDeleted       int64                `json:"session_images_deleted"`
 	Phase                      string               `json:"-"`
 	SessionCleanup             SessionCleanupCounts `json:"session_cleanup"`
 	PendingDeliveriesFailed    int64                `json:"pending_deliveries_failed"`
@@ -30,7 +31,7 @@ type MaintenanceCounts struct {
 // Changed returns the number of rows changed, excluding database hygiene.
 func (c MaintenanceCounts) Changed() int64 {
 	s := c.SessionCleanup
-	return s.SessionTurnsDeleted + s.SessionsDeactivated + s.MemoryEntriesExpired + s.CandidatesDeleted + s.FormationJobsDeleted + s.SessionSummariesDeleted + s.CompactionJobsRetired + s.ObservationsDeleted +
+	return c.SessionImagesDeleted + s.SessionTurnsDeleted + s.SessionsDeactivated + s.MemoryEntriesExpired + s.CandidatesDeleted + s.FormationJobsDeleted + s.SessionSummariesDeleted + s.CompactionJobsRetired + s.ObservationsDeleted +
 		c.PendingDeliveriesFailed + c.CandidatesDeleted + c.FormationJobsDeleted + c.CompactionJobsDeleted + c.DerivedIndexJobsDeleted + c.ChallengesDeleted + c.IndexRowsDeleted + c.IndexRevisionsDegraded + c.IndexTablesDropped + c.AssessmentReceiptsDeleted + c.ObservationReceiptsDeleted
 }
 
@@ -72,6 +73,9 @@ func (s *Store) MaintenanceSweep(ctx context.Context, now time.Time, policy conf
 	deadCutoff := formatTime(now.Add(-policy.DeadJobRetention))
 	successCutoff := formatTime(now.Add(-policy.SuccessfulJobRetention))
 	pendingCutoff := formatTime(now.Add(-policy.PendingDeliveryTimeout))
+	if counts.SessionImagesDeleted, err = execAffected(ctx, tx, `DELETE FROM session_images WHERE id IN (SELECT i.id FROM session_images i JOIN session_turns t ON t.id=i.turn_id WHERE julianday(t.expires_at)<=julianday(?) ORDER BY t.id,i.ordinal LIMIT ?)`, nowText, batch); err != nil {
+		return counts, err
+	}
 	// Missing turn IDs are irreversible. Keep receipts while retained observations or live frozen jobs still depend on them.
 	for _, table := range []string{"memory_assessment_receipts", "memory_observation_receipts"} {
 		n, deleteErr := execAffected(ctx, tx, `DELETE FROM `+table+` WHERE rowid IN (SELECT r.rowid FROM `+table+` r WHERE NOT EXISTS(SELECT 1 FROM session_turns t WHERE t.id=r.source_turn_id)

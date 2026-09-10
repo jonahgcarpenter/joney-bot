@@ -440,7 +440,7 @@ func TestRegisterComfyUIProviderMatrix(t *testing.T) {
 	}
 }
 
-func TestRegisterComfyUISchemasExposeOnlyPrompts(t *testing.T) {
+func TestRegisterComfyUISchemasExposePromptsAndImageSource(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
 	reg := newTestRegistry(t, log)
 	cfg := testConfig()
@@ -457,7 +457,21 @@ func TestRegisterComfyUISchemasExposeOnlyPrompts(t *testing.T) {
 			t.Fatalf("missing %s", name)
 		}
 		schema := tool.Function.Parameters
-		if len(schema.Properties) != 2 || len(schema.Required) != 1 || schema.Required[0] != "prompt" || schema.AdditionalProperties == nil || *schema.AdditionalProperties {
+		wantProperties := 2
+		if name == toolnames.ComfyUIImageToImage {
+			wantProperties = 5
+			if schema.Properties["create_variant"].Type != "boolean" {
+				t.Fatal("missing boolean variant selector")
+			}
+			strength, ok := schema.Properties["strength"]
+			if !ok || strength.Type != "number" || strength.Minimum == nil || *strength.Minimum != 0.1 || strength.Maximum == nil || *strength.Maximum != 0.9 {
+				t.Fatalf("missing strength bounds: %+v", strength)
+			}
+			if _, ok := schema.Properties["source_image_id"]; !ok {
+				t.Fatal("missing image source selector")
+			}
+		}
+		if len(schema.Properties) != wantProperties || len(schema.Required) != 1 || schema.Required[0] != "prompt" || schema.AdditionalProperties == nil || *schema.AdditionalProperties {
 			t.Fatalf("%s schema=%+v", name, schema)
 		}
 		prompt, ok := schema.Properties["prompt"]
@@ -486,5 +500,32 @@ func TestMemoryArgumentNormalizationPreservesInvalidLimitCorrection(t *testing.T
 	}
 	if invalid == valid {
 		t.Fatal("invalid limit and corrected valid limit produced the same fingerprint")
+	}
+}
+
+func TestComfyStrengthFingerprintScope(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		normalize governance.ArgumentNormalizer
+		wantSame  bool
+	}{
+		{toolnames.ComfyUITextToImage, normalizeComfyArgs, true},
+		{toolnames.ComfyUIImageToImage, normalizeComfyImageArgs, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			args := map[string]interface{}{"prompt": "a blue car", "source_image_id": "current-1"}
+			omitted, err := governance.Fingerprint(test.name, args, test.normalize)
+			if err != nil {
+				t.Fatal(err)
+			}
+			args["strength"] = 0.6
+			explicit, err := governance.Fingerprint(test.name, args, test.normalize)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (omitted == explicit) != test.wantSame {
+				t.Fatal("unexpected strength fingerprint scope")
+			}
+		})
 	}
 }

@@ -315,22 +315,17 @@ func TestProcessPropagatesToolAttachmentsWithoutPersistingBytes(t *testing.T) {
 	if len(response.Attachments) != 1 || !bytes.Equal(response.Attachments[0].Data, privateBytes) {
 		t.Fatalf("attachments were not propagated: %+v", response.Attachments)
 	}
-	foundStreamAttachment := false
+	foundToolResult := false
 	for _, chunk := range chunks {
-		if chunk.Type != ChunkToolResult || len(chunk.Attachments) == 0 {
-			continue
+		if len(chunk.Attachments) > 0 {
+			t.Fatal("tool result stream carried an attachment before final selection")
 		}
-		foundStreamAttachment = bytes.Equal(chunk.Attachments[0].Data, privateBytes)
-		encodedChunk, err := json.Marshal(chunk)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if bytes.Contains(encodedChunk, privateBytes) || bytes.Contains(encodedChunk, []byte(base64.StdEncoding.EncodeToString(privateBytes))) {
-			t.Fatalf("serialized stream chunk retained attachment bytes: %s", encodedChunk)
+		if chunk.Type == ChunkToolResult {
+			foundToolResult = true
 		}
 	}
-	if !foundStreamAttachment {
-		t.Fatalf("tool result stream did not carry the generated attachment: %+v", chunks)
+	if !foundToolResult {
+		t.Fatal("tool result status was not streamed")
 	}
 	turns, err := store.RecentSessionTurns("user-1", "session", 1, 1)
 	if err != nil || len(turns) != 1 {
@@ -432,7 +427,7 @@ func TestProcessOffersRetrievalOnlyMemoryTools(t *testing.T) {
 	}
 }
 
-func TestProcessHidesComfyUIToolsByGatewayAndCurrentImages(t *testing.T) {
+func TestProcessHidesComfyUIToolsOnlyForHomeAssistant(t *testing.T) {
 	for _, test := range []struct {
 		name      string
 		gateway   string
@@ -440,7 +435,7 @@ func TestProcessHidesComfyUIToolsByGatewayAndCurrentImages(t *testing.T) {
 		wantText  bool
 		wantImage bool
 	}{
-		{name: "discord text only", gateway: "discord", wantText: true},
+		{name: "discord text only", gateway: "discord", wantText: true, wantImage: true},
 		{name: "discord with image", gateway: "discord", images: []llm.InputImage{testInputImage(t, 2, 2)}, wantText: true, wantImage: true},
 		{name: "home assistant", gateway: "homeassistant", images: []llm.InputImage{testInputImage(t, 2, 2)}},
 	} {

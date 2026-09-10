@@ -78,17 +78,10 @@ func (s *discordResponseStream) Push(chunk agent.StreamChunk) {
 		return
 	}
 	s.start()
+	// Only the authoritative final response owns attachment delivery.
+	chunk.Attachments = nil
 	event := discordStreamEvent{chunk: &chunk}
-	if len(chunk.Attachments) > 0 {
-		event.result = make(chan error, 1)
-	}
 	s.events <- event
-	if event.result != nil {
-		if err := <-event.result; err != nil {
-			s.responder.gateway.log().Warn("gateway.attachment.stream_failed", "failed to deliver streamed discord attachment",
-				config.F("request_id", s.responder.requestID), config.F("status", "degraded"), config.ErrorField(err))
-		}
-	}
 }
 
 func (s *discordResponseStream) Finish(response *agent.Response) error {
@@ -126,14 +119,7 @@ func (s *discordResponseStream) run() {
 		select {
 		case event := <-s.events:
 			if event.chunk != nil {
-				var eventErr error
-				if len(event.chunk.Attachments) > 0 {
-					eventErr = state.deliverAttachments(event.chunk.Attachments)
-				}
 				state.consume(*event.chunk)
-				if event.result != nil {
-					event.result <- eventErr
-				}
 				continue
 			}
 			if event.response != nil {

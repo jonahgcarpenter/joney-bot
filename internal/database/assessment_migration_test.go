@@ -15,7 +15,7 @@ func TestAssessmentMigrationPreservesArtifactsHighWaterAndRollback(t *testing.T)
 	defer raw.Close()
 	db := &DB{db: raw}
 	registry := orderedMigrations()
-	if len(registry) != 12 || registry[11].name != "v4.0.11" {
+	if len(registry) != 14 || registry[13].name != "v4.0.13" {
 		t.Fatalf("registry: %v", registry)
 	}
 	if err := db.runSchemaMigrations(context.Background(), registry[:11]); err != nil {
